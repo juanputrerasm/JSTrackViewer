@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTM2 Track Viewer</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>JSTrackViewer</h1>
+        <p>Online MTM2 Track viewer</p>
+      </div>
+      <div class="load-controls">
+        <input id="file-input" type="file" accept=".pod" hidden>
+        <button id="open-file-btn" type="button">Open POD from disk</button>
+        <div class="url-group">
+          <input id="url-input" type="url" placeholder="https://example.com/track.pod" spellcheck="false">
+          <button id="open-url-btn" type="button">Open from URL</button>
+        </div>
+        <button id="clear-temp-btn" type="button" class="quiet">Clear temp</button>
+      </div>
+      <div class="status-strip">
+        <span id="status-text">Ready. Open a .POD file to begin.</span>
+      </div>
+    </header>
+
+    <main class="main-layout">
+
+      <aside class="sidebar" id="sidebar">
+
+        <section id="track-picker-panel" class="panel" hidden>
+          <h2>Tracks in POD</h2>
+          <select id="track-select" class="full-select"></select>
+          <button id="load-track-btn" type="button" class="full-btn">Load Track</button>
+        </section>
+
+        <section class="panel" id="minimap-panel" hidden>
+          <h2>Navigation</h2>
+          <canvas id="minimap" class="minimap" width="220" height="220"></canvas>
+        </section>
+
+        <section class="panel">
+          <h2>View Options</h2>
+          <div class="toggle-grid">
+            <label><input type="checkbox" id="tog-terrain" checked> Terrain</label>
+            <label><input type="checkbox" id="tog-textures" checked> Textures</label>
+            <label><input type="checkbox" id="tog-grid"> Grid</label>
+            <label><input type="checkbox" id="tog-courses"> Courses</label>
+            <label><input type="checkbox" id="tog-objects" checked> Objects</label>
+            <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
+            <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
+            <label><input type="checkbox" id="tog-wireframe"> Wireframe</label>
+            <label><input type="checkbox" id="tog-trucks" checked> Trucks</label>
+            <label><input type="checkbox" id="tog-water" checked> Water</label>
+            <label><input type="checkbox" id="tog-backdrop" checked> Background</label>
+            <label><input type="checkbox" id="tog-shadows" checked> Sun light</label>
+          </div>
+          <div class="slider-row">
+            <label for="grid-span-slider">Distance</label>
+            <input id="grid-span-slider" type="range" min="4" max="256" value="128" step="4">
+            <span id="grid-span-value">128</span>
+          </div>
+          <div class="slider-row">
+            <label for="sun-intensity-slider">Sun</label>
+            <input id="sun-intensity-slider" type="range" min="0" max="50" value="10" step="1">
+            <span id="sun-intensity-value">1.0</span>
+          </div>
+          <div class="slider-row">
+            <label for="gamma-slider">Gamma</label>
+            <input id="gamma-slider" type="range" min="1" max="30" value="10" step="1">
+            <span id="gamma-value">1.0</span>
+          </div>
+          <button id="reset-cam-btn" type="button" class="full-btn">Reset Camera (Home)</button>
+        </section>
+
+        <section class="panel">
+          <h2>Track Data</h2>
+          <dl id="track-info" class="kv-list">
+            <dt>Status</dt><dd>No track loaded.</dd>
+          </dl>
+        </section>
+
+        <section class="panel" id="stats-panel" hidden>
+          <h2>Stats</h2>
+          <dl id="track-stats" class="kv-list">
+            <dt>Status</dt><dd>No track loaded.</dd>
+          </dl>
+        </section>
+
+      </aside>
+
+      <section class="viewport-section">
+        <div id="viewport" class="viewport">
+          <div id="nav-hint" class="nav-hint">
+            ↑↓ Move · ←→ Turn · PgUp/Dn Pitch · A/Z Height · Scroll Zoom · Drag Look
+          </div>
+          <div id="loading-overlay" class="loading-overlay" hidden>
+            <div class="spinner"></div>
+            <span id="loading-msg">Loading…</span>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
