@@ -12,6 +12,8 @@ const CBOX_WIRE   = 0x9A4DFF;
 const GRID_COLOR = 0x444466;
 const AMBIENT_COLOR = 0x888888;
 const SUN_COLOR = 0xfff4e0;
+const BACKGROUND_COLOR = 0xbcd6e7;
+const EMPTY_BACKGROUND_COLOR = 0x151417;
 
 export class TrackScene {
   constructor(container) {
@@ -21,13 +23,18 @@ export class TrackScene {
       terrain: true, textures: true, grid: false,
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
-      wireframe: false,
+      wireframe: false, trucks: true, billboards: true, checkpoints: true,
     };
     this._heightScale = 4;
     this._lastTime = 0;
     this._terrainAtlasN = 1;
     this._terrainAtlasCols = 1;
     this._terrainAtlasRows = 1;
+    this._terrainAtlasWidth = 1;
+    this._terrainAtlasHeight = 1;
+    this._terrainAtlasTileSize = 64;
+    this._terrainAtlasPadding = 0;
+    this._terrainAtlasSourceTileSize = 64;
 
     this._initRenderer();
     this._initScene();
@@ -40,7 +47,7 @@ export class TrackScene {
   _initRenderer() {
     this._renderer = new THREE.WebGLRenderer({ antialias: true });
     this._renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this._renderer.setClearColor(0x1a1a2e);
+    this._renderer.setClearColor(EMPTY_BACKGROUND_COLOR);
     this._renderer.toneMapping = THREE.LinearToneMapping;
     this._renderer.toneMappingExposure = 1.0;
     this._renderer.shadowMap.enabled = false;
@@ -51,7 +58,6 @@ export class TrackScene {
 
   _initScene() {
     this._scene = new THREE.Scene();
-    this._scene.fog = new THREE.Fog(0x1a1a2e, 5000, 40000);
 
     this._groups = {
       terrain:    new THREE.Group(),
@@ -59,7 +65,12 @@ export class TrackScene {
       courses:    new THREE.Group(),
       objects:    new THREE.Group(),
       objectsWire:new THREE.Group(),
+      billboards: new THREE.Group(),
+      billboardsWire:new THREE.Group(),
+      checkpoints:new THREE.Group(),
+      checkpointsWire:new THREE.Group(),
       racetrack:  new THREE.Group(),
+      racetrackWire:new THREE.Group(),
       gboxes:     new THREE.Group(),
       gboxesWire: new THREE.Group(),
       cboxes:     new THREE.Group(),
@@ -98,11 +109,9 @@ export class TrackScene {
     this._renderer.toneMappingExposure = v;
   }
 
-  // Set view/fog distance in grid-cell units (1 cell = 64 world units)
+  // Set view distance in grid-cell units (1 cell = 64 world units)
   setViewDistance(cells) {
     const dist = cells * 64;
-    this._scene.fog.near = dist * 0.5;
-    this._scene.fog.far  = dist;
     this._camera.far = dist * 3;
     this._camera.updateProjectionMatrix();
   }
@@ -128,6 +137,7 @@ export class TrackScene {
       this._nav.update(dt);
       // Keep backdrop centered on camera so it never appears to move
       if (this._backdropMesh) this._backdropMesh.position.copy(this._camera.position);
+      this._updateBillboards();
       this._renderer.render(this._scene, this._camera);
     };
     requestAnimationFrame((t) => { this._lastTime = t; requestAnimationFrame(loop); });
@@ -148,6 +158,11 @@ export class TrackScene {
     this._groups.courses.visible = f.courses;
     this._groups.objects.visible = f.objects;
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
+    this._groups.billboards.visible = f.objects;
+    this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
+    this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
+    this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
+    this._groups.racetrackWire.visible = f.objects && (f.wireframe === true);
     this._groups.gboxes.visible = f.gboxes;
     this._groups.gboxesWire.visible = f.gboxes && (f.wireframe === true);
     this._groups.cboxes.visible = f.cboxes;
@@ -186,17 +201,25 @@ export class TrackScene {
     this._terrainAtlasN = 1;
     this._terrainAtlasCols = 1;
     this._terrainAtlasRows = 1;
+    this._terrainAtlasWidth = 1;
+    this._terrainAtlasHeight = 1;
+    this._terrainAtlasTileSize = 64;
+    this._terrainAtlasPadding = 0;
+    this._terrainAtlasSourceTileSize = 64;
     this._backdropMesh = null;
     this._modelTexCache = {};
     this._trackData = null;
     this._scene.background = null;
+    this._renderer.setClearColor(EMPTY_BACKGROUND_COLOR);
   }
 
   setTrack(trackData, renderFlags, heightScale) {
     this.clearTrack();
     this._trackData = trackData;
+    this._renderer.setClearColor(BACKGROUND_COLOR);
     if (renderFlags) Object.assign(this._renderFlags, renderFlags);
     if (heightScale !== undefined) this._heightScale = heightScale;
+    if (trackData.terrain?.heightScale) this._heightScale = trackData.terrain.heightScale;
     this._modelTexCache = {};
 
     if (trackData.modelTextures) this._loadModelTextures(trackData.modelTextures);
@@ -211,7 +234,7 @@ export class TrackScene {
     if (trackData.raceTrackSurfaces?.length) this._buildRaceTrackLayer(trackData);
     this._buildCourses(trackData);
     if (trackData.boxes?.length) this._buildObjects(trackData);
-    if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, heightScale ?? this._heightScale, trackData);
+    if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
 
     this._nav.resetToCourseStart(trackData, this._heightScale);
@@ -232,7 +255,10 @@ export class TrackScene {
     // Atlas texture
     const atlasImg = new ImageData(new Uint8ClampedArray(atlas.rgba), atlas.width, atlas.height);
     const atlasTex = new THREE.DataTexture(atlasImg.data, atlas.width, atlas.height, THREE.RGBAFormat);
-    atlasTex.wrapS = atlasTex.wrapT = THREE.RepeatWrapping;
+    atlasTex.wrapS = atlasTex.wrapT = THREE.ClampToEdgeWrapping;
+    atlasTex.magFilter = THREE.NearestFilter;
+    atlasTex.minFilter = THREE.NearestFilter;
+    atlasTex.generateMipmaps = false;
     atlasTex.colorSpace = THREE.SRGBColorSpace;
     atlasTex.needsUpdate = true;
 
@@ -242,6 +268,11 @@ export class TrackScene {
     this._terrainAtlasN = atlas.textureCount;
     this._terrainAtlasCols = atlas.atlasCols ?? atlas.textureCount ?? 1;
     this._terrainAtlasRows = atlas.atlasRows ?? 1;
+    this._terrainAtlasWidth = atlas.width ?? 1;
+    this._terrainAtlasHeight = atlas.height ?? 1;
+    this._terrainAtlasTileSize = atlas.atlasTileSize ?? 64;
+    this._terrainAtlasPadding = atlas.atlasPadding ?? 0;
+    this._terrainAtlasSourceTileSize = atlas.sourceTileSize ?? 64;
 
     this._terrainMesh = new THREE.Mesh(geo, this._terrainMatTextured);
     this._terrainMesh.receiveShadow = false;
@@ -264,7 +295,6 @@ export class TrackScene {
     gridLinGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(lineVerts), 3));
     const gridMat = new THREE.LineBasicMaterial({ color: 0x8888cc, opacity: 0.65, transparent: true });
     this._groups.terrainGrid.add(new THREE.LineSegments(gridLinGeo, gridMat));
-
   }
 
   _buildBackdropFromTexture(skyTexture) {
@@ -361,8 +391,10 @@ export class TrackScene {
       }
       if (pts.length < 2) return;
       const geo = new THREE.BufferGeometry().setFromPoints(pts);
-      const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 });
-      this._groups.courses.add(new THREE.LineLoop(geo, mat));
+      const mat = new THREE.LineBasicMaterial({ color, linewidth: 2, depthTest: false, depthWrite: false });
+      const line = new THREE.LineLoop(geo, mat);
+      line.renderOrder = 1000;
+      this._groups.courses.add(line);
     };
     addCourse(trackData.primaryCourse, COURSE_COLOR);
   }
@@ -383,10 +415,8 @@ export class TrackScene {
 
     const pointToWorld = (point, yBias = 8) => {
       if (!point || point.length < 3) return [0, yBias, 0];
-      let wx = 2 * Math.trunc(point[0]);
-      let wy = 2 * Math.trunc(point[2]);
-      if (wx < 0) wx += 16384;
-      if (wy < 0) wy += 16384;
+      const wx = 2 * Math.trunc(point[0]);
+      const wy = 2 * Math.trunc(point[2]);
       const zDivisor = rawBytesPerCell === 2 ? 4 : 2;
       const wz = point[1] / zDivisor;
       return [wx, wz * hs + yBias, ws - wy];
@@ -419,6 +449,7 @@ export class TrackScene {
       if (laneCount < 1) continue;
 
       for (let lane = 0; lane < laneCount; lane++) {
+        if (!isRaceLaneInsideWalls(a, b, lane)) continue;
         const texIdx = normalizeRaceTextureIndex(a.textureIndexes?.[lane] ?? 0, materials.length);
         const p0 = pointToWorld(aPts[lane]);
         const p1 = pointToWorld(bPts[lane]);
@@ -442,23 +473,19 @@ export class TrackScene {
         if (wallType <= 0) continue;
         const p0 = pointToWorld(aPts[pointIndex], 10);
         const p1 = pointToWorld(bPts[pointIndex], 10);
-        const wallHeight = Math.min(72, 24 + wallType * 8);
+        const wallHeight = Math.min(18, 6 + wallType * 2);
         const p2 = [p1[0], p1[1] + wallHeight, p1[2]];
         const p3 = [p0[0], p0[1] + wallHeight, p0[2]];
-        const wallValue = a.wallTextures?.[pointIndex]?.[0] ?? b.wallTextures?.[pointIndex]?.[0] ?? 0;
+        const wallValue = selectRaceWallTexture(a.wallTextures?.[pointIndex], b.wallTextures?.[pointIndex]);
         const texIdx = normalizeRaceTextureIndex(wallValue, materials.length);
         const len = Math.max(1, Math.hypot(p1[0] - p0[0], p1[2] - p0[2]));
         const uRepeat = Math.max(1, len / 256);
         const vRepeat = Math.max(1, wallHeight / 64);
-        addQuad(wallBuckets, texIdx, p0, p1, p2, p3, [
-          0, 1,
-          uRepeat, 1,
-          uRepeat, 1 - vRepeat,
-          0, 1 - vRepeat,
-        ]);
+        addQuad(wallBuckets, texIdx, p0, p1, p2, p3, raceWallUvs(wallValue, uRepeat, vRepeat));
       }
     }
 
+    const wireMat = new THREE.LineBasicMaterial({ color: 0xF5E287 });
     const addMeshes = (buckets) => {
       for (const [materialIndex, bucket] of buckets) {
         if (!bucket.positions.length) continue;
@@ -468,6 +495,7 @@ export class TrackScene {
         geo.setIndex(bucket.indices);
         geo.computeVertexNormals();
         this._groups.racetrack.add(new THREE.Mesh(geo, materials[materialIndex]));
+        this._groups.racetrackWire.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
       }
     };
 
@@ -503,9 +531,11 @@ export class TrackScene {
       const modelName = box.modelName;
       const model = modelName ? trackData.models?.[modelName] : null;
       const renderModel = model?.meshes?.length;
+      const isBillboard = box.type === 8;
+      const isCheckpoint = box.type === 6;
 
       if (renderModel) {
-        this._buildBinModel(model, box, hs, ws, trackData);
+        this._buildBinModel(model, box, hs, ws, trackData, { checkpoint: isCheckpoint, billboard: isBillboard });
       }
 
       if (!renderModel) {
@@ -566,12 +596,14 @@ export class TrackScene {
     obj.matrixWorldNeedsUpdate = true;
   }
 
-  _buildBinModel(model, box, hs, ws, trackData) {
+  _buildBinModel(model, box, hs, ws, trackData, options = {}) {
+    const checkpoint = options.checkpoint === true;
+    const billboard = options.billboard === true;
     const [wx, wy, wz] = box.position ?? [0, 0, 0];
 
     // World position in Three.js space
     const posX = wx;
-    const posY = trackData.origin === "HB" ? wz * 6 : wz * hs + (model.baseZ ?? 0) * 0.75;
+    const posY = trackData.origin === "HB" ? wz * 3 : wz * hs + (model.baseZ ?? 0) * 0.75;
     const posZ = ws - wy;
 
     // SIT angles are in RADIANS: psi=yaw (around JTraxx Z height), theta=pitch (X), phi=roll (Y depth)
@@ -600,14 +632,10 @@ export class TrackScene {
     );
 
     const group = new THREE.Group();
-    group.matrixAutoUpdate = false;
-    group.matrix.copy(modelMatrix);
-    group.matrixWorldNeedsUpdate = true;
+    const meshRoot = billboard ? new THREE.Group() : group;
 
     const wireGroup = new THREE.Group();
-    wireGroup.matrixAutoUpdate = false;
-    wireGroup.matrix.copy(modelMatrix);
-    wireGroup.matrixWorldNeedsUpdate = true;
+    const wireRoot = billboard ? new THREE.Group() : wireGroup;
     const wireMat = new THREE.LineBasicMaterial({ color: 0xF5E287 });
 
     for (const mesh of model.meshes ?? []) {
@@ -631,12 +659,60 @@ export class TrackScene {
         const b = (c & 0xff) / 255;
         mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(r, g, b), side: THREE.BackSide });
       }
-      group.add(new THREE.Mesh(geo, mat));
-      wireGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
+      meshRoot.add(new THREE.Mesh(geo, mat));
+      wireRoot.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
     }
 
-    this._groups.objects.add(group);
-    this._groups.objectsWire.add(wireGroup);
+    if (billboard) {
+      group.position.set(posX, posY, posZ);
+      wireGroup.position.copy(group.position);
+      group.userData.staticQuaternion = group.quaternion.clone();
+      wireGroup.userData.staticQuaternion = wireGroup.quaternion.clone();
+
+      const localAxisMatrix = new THREE.Matrix4().set(
+         1,  0, 0, 0,
+         0,  0, 1, 0,
+         0, -1, 0, 0,
+         0,  0, 0, 1
+      );
+      meshRoot.matrixAutoUpdate = false;
+      meshRoot.matrix.copy(localAxisMatrix);
+      meshRoot.matrixWorldNeedsUpdate = true;
+      wireRoot.matrixAutoUpdate = false;
+      wireRoot.matrix.copy(localAxisMatrix);
+      wireRoot.matrixWorldNeedsUpdate = true;
+      group.add(meshRoot);
+      wireGroup.add(wireRoot);
+    } else {
+      group.matrixAutoUpdate = false;
+      group.matrix.copy(modelMatrix);
+      group.matrixWorldNeedsUpdate = true;
+      wireGroup.matrixAutoUpdate = false;
+      wireGroup.matrix.copy(modelMatrix);
+      wireGroup.matrixWorldNeedsUpdate = true;
+    }
+
+    const targetGroup = billboard ? this._groups.billboards : (checkpoint ? this._groups.checkpoints : this._groups.objects);
+    const targetWireGroup = billboard ? this._groups.billboardsWire : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
+    targetGroup.add(group);
+    targetWireGroup.add(wireGroup);
+  }
+
+  _updateBillboards() {
+    const target = new THREE.Vector3();
+    if (this._renderFlags.billboards === false) {
+      resetBillboardGroup(this._groups.billboards);
+      resetBillboardGroup(this._groups.billboardsWire);
+      return;
+    }
+    const orient = (group) => {
+      for (const obj of group.children) {
+        target.set(this._camera.position.x, obj.position.y, this._camera.position.z);
+        obj.lookAt(target);
+      }
+    };
+    orient(this._groups.billboards);
+    orient(this._groups.billboardsWire);
   }
 
   _loadModelTextures(modelTextures) {
@@ -653,6 +729,11 @@ export class TrackScene {
     const atlasTex = this._terrainAtlasTex;
     const cols = this._terrainAtlasCols || this._terrainAtlasN || 1;
     const rows = this._terrainAtlasRows || 1;
+    const atlasWidth = this._terrainAtlasWidth || cols;
+    const atlasHeight = this._terrainAtlasHeight || rows;
+    const atlasTileSize = this._terrainAtlasTileSize || (atlasWidth / cols);
+    const atlasPadding = this._terrainAtlasPadding || 0;
+    const atlasSourceTileSize = this._terrainAtlasSourceTileSize || atlasTileSize;
     const CELL = 64;
     const ws = this._worldSize(trackData) || 16384;
 
@@ -701,10 +782,12 @@ export class TrackScene {
               : flatFaceCorners;
           const atlasCol = texIdx % cols;
           const atlasRow = Math.floor(texIdx / cols);
-          const u0 = atlasCol / cols;
-          const u1 = (atlasCol + 1) / cols;
-          const v0 = atlasRow / rows;
-          const v1 = (atlasRow + 1) / rows;
+          const slotX = atlasCol * atlasTileSize + atlasPadding;
+          const slotY = atlasRow * atlasTileSize + atlasPadding;
+          const u0 = slotX / atlasWidth;
+          const u1 = (slotX + atlasSourceTileSize) / atlasWidth;
+          const v0 = slotY / atlasHeight;
+          const v1 = (slotY + atlasSourceTileSize) / atlasHeight;
           const cU = [u0, u1, u1, u0];
           const cV = [v1, v1, v0, v0];
           const base = face * 8;
@@ -799,7 +882,7 @@ export class TrackScene {
       const rightZ2 = baseZ - fwdZ * 14 + rightZ * 18;
 
       const color = TRUCK_COLORS[Math.min(i, TRUCK_COLORS.length - 1)];
-      const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, depthTest: true });
+      const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, depthTest: false, depthWrite: false });
 
       const positions = new Float32Array([
         tipX2,   baseY, tipZ2,
@@ -810,6 +893,7 @@ export class TrackScene {
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
       const arrow = new THREE.Mesh(geo, mat);
+      arrow.renderOrder = 1001;
       this._groups.trucks.add(arrow);
     }
   }
@@ -823,8 +907,48 @@ export class TrackScene {
   }
 }
 
+function resetBillboardGroup(group) {
+  for (const obj of group.children) {
+    if (obj.userData.staticQuaternion) {
+      obj.quaternion.copy(obj.userData.staticQuaternion);
+    }
+  }
+}
+
+function isRaceLaneInsideWalls(surfaceA, surfaceB, lane) {
+  const wallIndexes = [];
+  const collect = (wallTypes) => {
+    for (let i = 0; i < (wallTypes?.length ?? 0); i++) {
+      if ((wallTypes[i] ?? 0) > 0) wallIndexes.push(i);
+    }
+  };
+  collect(surfaceA.wallTypes);
+  collect(surfaceB.wallTypes);
+  if (wallIndexes.length < 2) return true;
+  const leftWall = Math.min(...wallIndexes);
+  const rightWall = Math.max(...wallIndexes);
+  return lane >= leftWall && lane < rightWall;
+}
+
 function normalizeRaceTextureIndex(value, textureCount) {
   if (textureCount <= 0) return 0;
   const idx = (value ?? 0) & 0x0FFF;
   return idx >= 0 && idx < textureCount ? idx : 0;
+}
+
+function selectRaceWallTexture(aValues, bValues) {
+  const first = (aValues ?? [])[0] ?? (bValues ?? [])[0];
+  return Number.isFinite(first) ? first : 0;
+}
+
+function raceWallUvs(value, uRepeat, vRepeat) {
+  const tile = (((value ?? 0) >> 12) & 3) / 4;
+  const u0 = tile;
+  const u1 = tile + 0.25 * uRepeat;
+  return [
+    u0, 1,
+    u1, 1,
+    u1, 1 - vRepeat,
+    u0, 1 - vRepeat,
+  ];
 }

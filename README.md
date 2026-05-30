@@ -1,6 +1,8 @@
 # JS Track Viewer
 
-A pure browser JavaScript 3D viewer for classic Terminal Reality track POD archives, including **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3**, **Hellbender**, and early **CART Precision Racing** track data. Drop in a POD file from local storage, or point it at a CORS-enabled URL, and the viewer decodes terrain, textures, objects, ground boxes, courses, trucks, water, backdrops, and CPR racetrack layers client-side.
+A pure browser JavaScript 3D viewer for classic Terminal Reality game track/level archives, including **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3/F-Zone**, **Hellbender** and **CART Precision Racing** track data. Drop in a POD or ZIP file from local storage, or point it at a CORS-enabled URL, and the viewer decodes terrain, textures, objects, ground boxes, courses, trucks, water, backdrops, and CPR racetrack layers all client-side. 
+
+JSTrackViewer is based on JTraxx, which in turn is based on the original Traxx track editor for MTM1 & MTM2.
 
 ---
 
@@ -12,6 +14,7 @@ A pure browser JavaScript 3D viewer for classic Terminal Reality track POD archi
 | Camera controls | Custom free-flight track navigation |
 | Asset storage | [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) (Origin Private File System) |
 | Heavy parsing | [Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API) |
+| ZIP extraction | [fflate](https://github.com/101arrowz/fflate) via CDN |
 | Module system | Native ES modules (no bundler required) |
 | Styling | Vanilla CSS |
 
@@ -35,26 +38,26 @@ Live deployment on GitHub Pages:
 
 https://juanputrerasm.github.io/JSTrackViewer/
 
-Load a track by clicking **Open POD from disk** and selecting a `.POD` file, or paste a CORS-enabled URL into the URL field. If a POD contains multiple tracks, choose one from the **Tracks in POD** dropdown and click **Load Track**.
+Load a track by clicking **Open POD/ZIP from disk** and selecting a `.POD` or `.ZIP` file, or paste a CORS-enabled POD/ZIP URL into the URL field. ZIP files are scanned for the first POD inside them. If an archive contains multiple tracks, choose one from the title-bar selector and click **Load Track**.
 
 ---
 
 ## Features
 
 - Load `.POD` archives from local disk or remote URL
+- Load `.ZIP` archives containing POD files from local disk or remote URL
 - Multi-track POD support for archives with multiple `.SIT` or `.LVL` entries
 - OPFS-backed per-session staging, with a **Clear temp** control
-- MTM/MTM2 `.SIT` and `.LVL` parsing for terrain, metadata, courses, trucks, objects, and backdrops
-- Terminal Velocity, Fury3, and Hellbender `.LVL` support, including `.DEF` object placement
-- CPR `.TRK` / `.TTX` racetrack layer support
-- Terrain heightfield rendering from `RAW` data with `CLR` texture mapping
-- Large texture atlas support for tracks with many terrain textures
+- Navigation minimap with greyscale height map and clickable camera repositioning
+- Viewer toggles for terrain, textures, grid, courses, objects, billboard behavior, checkpoints, ground boxes, collision boxes, wireframe, trucks, water, background, and sunlight
+- Separate track data and stats panels, including background model, music, weather, texture/object/ground-box/course counts
+- Adjustable view distance, sun intensity, and gamma
+- Static BIN model decoding, including textured meshes, known transparent face types, and TV-family/Hellbender scale handling
 - `RAW` + `ACT` texture decoding with fallback palette support
 - Ground box layer support from `RA0`, `RA1`, and `CL0`
-- Static BIN model decoding, including textured and transparent face support
-- Navigation minimap with greyscale height map and clickable camera repositioning
-- Viewer toggles for terrain, textures, grid, courses, objects, ground boxes, collision boxes, wireframe, trucks, water, background, and sunlight
-- Adjustable view distance, sun intensity, and gamma
+- MTM/MTM2 `.SIT` parsing for terrain, metadata, courses, trucks, objects, and backdrops
+- TV/Fury3-family and Hellbender `.LVL` support, including `.DEF` object placement
+- CPR `.TRK` / `.TTX` racetrack layer support, including walls, wireframe display, and wall-bounded surface rendering
 
 ---
 
@@ -84,6 +87,7 @@ src/
   scene.js               - Three.js scene, terrain, objects, overlays
   nav.js                 - free-flight camera navigation
   worker-client.js       - promise wrapper around the Web Worker
+  zip-utils.js           - ZIP extraction helper for POD-in-ZIP loading
   shared/
     opfs.js              - OPFS read/write helpers
     path-utils.js        - archive path normalization
@@ -92,8 +96,8 @@ src/
     track-loader.js      - track choice listing helpers
     pod-format.js        - POD archive indexing and entry extraction
     sit-parser.js        - SIT track parser
-    lvl-parser.js        - LVL track parser
-    def-loader.js        - TV/F3/HB DEF object loader
+    lvl-parser.js        - TV-family/HB LVL track parser
+    def-loader.js        - TV-family/HB DEF object loader
     gbox-loader.js       - RA0/RA1/CL0 ground box loader
     racetrack-loader.js  - CPR TRK/TTX racetrack layer loader
     terrain-builder.js   - terrain mesh and atlas builder
@@ -113,6 +117,7 @@ Examples:
 - Root-relative path on the same domain: `/JSTrackViewer/?file=/resources/tracks/circuit.pod`
 - Relative path from the viewer folder: `/JSTrackViewer/?file=../archives/track.pod`
 - Full URL: `/JSTrackViewer/?url=https://example.com/resources/tracks/track.pod`
+- ZIP URL: `/JSTrackViewer/?url=https://example.com/resources/tracks/track.zip`
 
 Notes:
 
@@ -120,14 +125,19 @@ Notes:
 - Relative URLs are resolved from the viewer page location.
 - Root-relative URLs that start with `/` are usually the clearest choice for webmasters.
 - Remote loading still uses browser `fetch()`, so cross-origin URLs must allow CORS.
+- ZIP loading extracts the first `.POD` file found inside the archive.
 
 ---
 
 ## Known limitations
 
-- Rendering is inspection-focused; it does not emulate race physics, AI, audio playback, or game scripting.
-- CPR racetrack wall rendering is still experimental.
-- Some TV/F3/Hellbender object placement details may differ from the original engines.
+- Rendering is inspection-focused; it does not emulate race physics, AI, audio playback, weapons, enemies, checkpoint, tunnels or game scripting.
+- CPR racetrack wall rendering is supported but still approximate compared with the original renderer.
+- TV/F3/HB tunnels are not supported.
+- Animated models or textures are not supported.
+- Ramps are not displayed.
+- TopCrush models are not supported.
+- Models or art not available on the POD file is not rendered.
 - Must be served over `http://localhost` or HTTPS; `file://` is not supported.
 
 ---

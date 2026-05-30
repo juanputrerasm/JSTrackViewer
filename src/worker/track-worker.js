@@ -76,8 +76,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   if (choice.format === "SIT") {
     doc = parseSitTrack(podIndex, syncGetBytes, choice.entry, podIndex.comment);
   } else {
-    const origin = detectTvOrigin(podIndex);
-    doc = parseLvlTrack(podIndex, syncGetBytes, choice.entry, podIndex.comment, origin);
+    doc = parseLvlTrack(podIndex, syncGetBytes, choice.entry, podIndex.comment);
   }
 
   // Hydrate BIN models
@@ -96,6 +95,12 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   // Model textures
   const modelTextures = [];
   const seen = new Set();
+  const transparentTextureNames = new Set();
+  for (const model of Object.values(doc.models)) {
+    for (const mesh of model.meshes ?? []) {
+      if (mesh.transparent && mesh.textureName) transparentTextureNames.add(mesh.textureName);
+    }
+  }
   for (const model of Object.values(doc.models)) {
     for (const texName of model.textureNames ?? []) {
       if (seen.has(texName)) continue;
@@ -106,7 +111,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
         const rawBytes = syncGetBytes(entry);
         const actEntry = resolveAsset(podIndex, replaceExtension(texName, ".ACT"));
         const actBytes = actEntry ? syncGetBytes(actEntry) : doc.palette;
-        const decoded = decodeRawTexture(rawBytes, actBytes, texName);
+        const options = transparentTextureNames.has(texName)
+          ? { transparentIndexes: [rawBytes[0]] }
+          : undefined;
+        const decoded = decodeRawTexture(rawBytes, actBytes, texName, options);
         modelTextures.push({ name: texName, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height });
       } catch { /**/ }
     }
@@ -132,10 +140,12 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     }
   }
 
+  const terrainHeightScale = effectiveTerrainHeightScale(doc.origin, heightScale);
+
   // Terrain mesh
   let terrainMesh = null;
   if (doc.terrain.rawData) {
-    terrainMesh = buildTerrainMesh(doc.terrain, doc.palette, doc.textures, heightScale, doc.origin);
+    terrainMesh = buildTerrainMesh(doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin);
   }
 
   // Sky texture
@@ -170,6 +180,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   return {
     origin: doc.origin, podComment: doc.podComment,
+    fileName: choice.fileName ?? choice.entry?.title ?? "",
     trackName: doc.trackName || choice.name,
     localeName: doc.localeName, trackType: doc.trackType,
     gameType: doc.gameType, weatherMask: doc.weatherMask,
@@ -205,15 +216,8 @@ function serializeCourse(course) {
   };
 }
 
-function detectTvOrigin(podIndex) {
-  const comment = (podIndex.comment ?? "").toUpperCase();
-  if (comment.includes("HELLBENDER")) return "HB";
-  if (comment.includes("FURY")) return "F3";
-  const hb = podIndex.entries.some((e) => e.normalizedName.includes("HELLBENDER"));
-  if (hb) return "HB";
-  const f3 = podIndex.entries.some((e) => e.normalizedName.includes("FURY3") || e.normalizedName.includes("FURY 3"));
-  if (f3) return "F3";
-  return "TV";
+function effectiveTerrainHeightScale(origin, requestedHeightScale) {
+  return origin === "HB" ? 3 : (requestedHeightScale ?? 4);
 }
 
 function collectTransfers(obj) {

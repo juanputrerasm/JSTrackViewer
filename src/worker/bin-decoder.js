@@ -7,8 +7,12 @@ const MAX_CORNERS_PER_FACE = 256;
 const UV_SCALE = 0xff0000;
 const TYPE_TRANSPARENT_MTM = 0x00000011;
 const TYPE_TRANSPARENT_MTM2 = 0x00000033;
+const TRANSPARENT_FACE_TYPES = new Set([
+  TYPE_TRANSPARENT_MTM,
+  TYPE_TRANSPARENT_MTM2,
+]);
 
-// Geometry divisors matching Java SoftwareModelRenderer constants
+// Geometry divisors matching JTraxx constants
 const DIVISOR_LEGACY    = 64.0;
 const DIVISOR_HB        = 4096.0;
 const DIVISOR_TV_F3     = 10922.667;
@@ -65,7 +69,7 @@ function decodeBinPayload(reader, model, headerBytesBeforeVertexCount, applyMagn
   model.rawVertexBounds = { vertexCount: rawVertices.length, baseZ: rawBaseZWithOffset, minX: rawMinX, maxX: rawMaxX, minY: rawMinY, maxY: rawMaxY, minZ: rawMinZ, maxZ: rawMaxZ };
   let scale;
   if (applyMagnifyAtDecode) {
-    // Java applies magnify scaling at decode time (65536/magnifyPower) then divides by
+    // JTraxx applies magnify scaling at decode time (65536/magnifyPower) then divides by
     // origin-based geometryDivisor at render time. Combined: 65536/(magnifyPower*divisor).
     // Legacy shorthand: 65536/(magnifyPower*64) = 1024/magnifyPower.
     let geometryDivisor;
@@ -73,7 +77,6 @@ function decodeBinPayload(reader, model, headerBytesBeforeVertexCount, applyMagn
     else if (origin === "TV" || origin === "F3") geometryDivisor = DIVISOR_TV_F3;
     else geometryDivisor = DIVISOR_LEGACY;
     scale = 65536.0 / (model.magnifyPower * geometryDivisor);
-    if (origin === "TV" || origin === "F3") scale *= 1.5;
   } else {
     scale = 1.0 / DIVISOR_LEGACY;  // ANIMATED_BIN always uses 1/64
   }
@@ -179,7 +182,7 @@ function decodeBinPayload(reader, model, headerBytesBeforeVertexCount, applyMagn
 
 function buildMeshes(model) {
   const verts = model.vertices ?? [];
-  // Compute model-space anchor (matches Java SoftwareModelRenderer.modelAnchor):
+  // Compute model-space anchor (matches JTraxx SoftwareModelRenderer.modelAnchor):
   // X,Y centered on bounding box midpoint; Z anchored to minimum (model bottom = 0)
   let minX = Infinity, maxX = -Infinity;
   let minY = Infinity, maxY = -Infinity;
@@ -197,7 +200,7 @@ function buildMeshes(model) {
 
   const grouped = new Map();
   for (const polygon of model.polygons ?? []) {
-    const transparent = polygon.type === TYPE_TRANSPARENT_MTM || polygon.type === TYPE_TRANSPARENT_MTM2;
+    const transparent = TRANSPARENT_FACE_TYPES.has(polygon.type);
     const key = `${polygon.textureName || "__flat__"}|${transparent ? "alpha" : "opaque"}`;
     if (!grouped.has(key)) grouped.set(key, { positions: [], normals: [], uvs: [], textureName: polygon.textureName || "", transparent });
     triangulatePolygon(verts, polygon, grouped.get(key), anchorX, anchorY, anchorZ);
@@ -214,7 +217,7 @@ function buildMeshes(model) {
 }
 
 // Stores vertices in JTraxx local space with 0.75 scale on Z (height).
-// Matches Java SoftwareModelRenderer.transformModelVertex local part BEFORE rotation:
+// Matches JTraxx SoftwareModelRenderer.transformModelVertex local part BEFORE rotation:
 //   localX = v.x - anchorX
 //   localY = v.y - anchorY
 //   localZ = (v.z - anchorZ) * 0.75

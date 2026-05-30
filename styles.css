@@ -63,15 +63,20 @@ body {
   gap: 4px;
 }
 
-.status-strip {
+.top-track-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
-  color: var(--text-dim);
-  font-size: 12px;
-  font-family: var(--mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 400px;
+}
+
+.top-track-picker[hidden] {
+  display: none;
+}
+
+.top-track-picker select {
+  width: 220px;
+  max-width: 28vw;
 }
 
 .main-layout {
@@ -118,7 +123,7 @@ body {
 .viewport {
   flex: 1;
   position: relative;
-  background: #0a0a10;
+  background: #151417;
   overflow: hidden;
   cursor: crosshair;
 }

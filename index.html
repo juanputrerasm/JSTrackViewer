@@ -22,28 +22,23 @@
         <p>Online MTM2 Track viewer</p>
       </div>
       <div class="load-controls">
-        <input id="file-input" type="file" accept=".pod" hidden>
-        <button id="open-file-btn" type="button">Open POD from disk</button>
+        <input id="file-input" type="file" accept=".pod,.zip" hidden>
+        <button id="open-file-btn" type="button">Open POD/ZIP from disk</button>
         <div class="url-group">
-          <input id="url-input" type="url" placeholder="https://example.com/track.pod" spellcheck="false">
+          <input id="url-input" type="url" placeholder="https://example.com/track.pod or /tracks/track.zip" spellcheck="false">
           <button id="open-url-btn" type="button">Open from URL</button>
         </div>
         <button id="clear-temp-btn" type="button" class="quiet">Clear temp</button>
       </div>
-      <div class="status-strip">
-        <span id="status-text">Ready. Open a .POD file to begin.</span>
+      <div id="track-picker-panel" class="top-track-picker" hidden>
+        <select id="track-select"></select>
+        <button id="load-track-btn" type="button">Load Track</button>
       </div>
     </header>
 
     <main class="main-layout">
 
       <aside class="sidebar" id="sidebar">
-
-        <section id="track-picker-panel" class="panel" hidden>
-          <h2>Tracks in POD</h2>
-          <select id="track-select" class="full-select"></select>
-          <button id="load-track-btn" type="button" class="full-btn">Load Track</button>
-        </section>
 
         <section class="panel" id="minimap-panel" hidden>
           <h2>Navigation</h2>
@@ -58,6 +53,8 @@
             <label><input type="checkbox" id="tog-grid"> Grid</label>
             <label><input type="checkbox" id="tog-courses"> Courses</label>
             <label><input type="checkbox" id="tog-objects" checked> Objects</label>
+            <label><input type="checkbox" id="tog-billboards" checked> Billboard</label>
+            <label><input type="checkbox" id="tog-checkpoints" checked> Checkpoints</label>
             <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
             <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
             <label><input type="checkbox" id="tog-wireframe"> Wireframe</label>

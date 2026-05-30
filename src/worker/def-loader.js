@@ -45,15 +45,17 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       const gz = ((worldZ / 8.0) % g + g) % g;
       px = Math.round(gx * 64);
       py = Math.round(gz * 64);
-      pz = Math.round(pl.y / 65536.0);
+      pz = Math.round((pl.y / 65536.0) * 2.0);
     } else {
       // TV/F3: 2^20 units per cell
       const cell = 64;
       const half = 32;
-      const gx = (Math.floor(pl.x / (1 << 20)) % g + g) % g;
-      const gz = (Math.floor(pl.z / (1 << 20)) % g + g) % g;
-      px = ((gx * cell + half) + (g * cell)) % (g * cell);
-      py = ((gz * cell + half) + (g * cell)) % (g * cell);
+      const gx = Math.floor(pl.x / (1 << 20));
+      const gz = Math.floor(pl.z / (1 << 20));
+      const wrappedX = ((gx % g) + g) % g;
+      const wrappedZ = ((gz % g) + g) % g;
+      px = wrappedX * cell + half;
+      py = wrappedZ * cell + half;
       pz = Math.max(0, pl.y >> 15);
     }
 

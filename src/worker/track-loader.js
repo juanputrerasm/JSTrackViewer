@@ -32,7 +32,19 @@ export function listTrackChoices(podIndex) {
 export async function listTrackChoicesAsync(podIndex, opfsPath) {
   const sitEntries = findSitEntries(podIndex);
   if (sitEntries.length > 0) {
-    return sitEntries.map((e, i) => ({ name: archiveTitle(e.name).replace(/\.SIT$/i, ""), index: i, format: "SIT", entry: e }));
+    const choices = [];
+    for (let i = 0; i < sitEntries.length; i++) {
+      const e = sitEntries[i];
+      const fileName = archiveTitle(e.name);
+      choices.push({
+        name: await readSitDisplayName(opfsPath, e) ?? fileName.replace(/\.SIT$/i, ""),
+        fileName,
+        index: i,
+        format: "SIT",
+        entry: e,
+      });
+    }
+    return choices;
   }
   const lvlEntries = findLvlEntries(podIndex);
   const filtered = lvlEntries.filter((e) => {
@@ -45,7 +57,7 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
   const surface = [];
   for (const e of candidates) {
     try {
-      // Read only first 512 bytes — enough for the header lines
+      // Read only first 512 bytes - enough for the header lines
       const partialEntry = { ...e, length: Math.min(e.length, 512) };
       const bytes = await readPodEntryBytes(opfsPath, partialEntry);
       const text = new TextDecoder("latin1").decode(bytes);
@@ -56,8 +68,25 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
     }
   }
   return surface.map((e, i) => ({
-    name: archiveTitle(e.name).replace(/\.LVL$/i, ""), index: i, format: "LVL", entry: e,
+    name: archiveTitle(e.name).replace(/\.LVL$/i, ""), fileName: archiveTitle(e.name), index: i, format: "LVL", entry: e,
   }));
+}
+
+async function readSitDisplayName(opfsPath, entry) {
+  try {
+    const bytes = await readPodEntryBytes(opfsPath, entry);
+    const lines = new TextDecoder("latin1")
+      .decode(bytes)
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((line) => line.trim());
+    const idx = lines.findIndex((line) => line === "!Race Track Name");
+    const name = idx >= 0 ? lines[idx + 1]?.trim() : "";
+    return name || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -71,8 +100,7 @@ export async function loadTrack(podIndex, getBytes, choice, heightScale) {
   if (choice.format === "SIT") {
     doc = parseSitTrack(podIndex, getBytes, choice.entry, podIndex.comment);
   } else {
-    const origin = detectTvOrigin(podIndex);
-    doc = parseLvlTrack(podIndex, getBytes, choice.entry, podIndex.comment, origin);
+    doc = parseLvlTrack(podIndex, getBytes, choice.entry, podIndex.comment);
   }
 
   // Hydrate BIN models for boxes
@@ -81,10 +109,12 @@ export async function loadTrack(podIndex, getBytes, choice, heightScale) {
   // Decode model textures (unique textures referenced by models)
   const modelTextures = decodeModelTextures(podIndex, getBytes, doc);
 
+  const terrainHeightScale = effectiveTerrainHeightScale(doc.origin, hs);
+
   // Build terrain geometry
   let terrainMesh = null;
   if (doc.terrain.rawData) {
-    terrainMesh = buildTerrainMesh(doc.terrain, doc.palette, doc.textures, hs);
+    terrainMesh = buildTerrainMesh(doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin);
   }
 
   // Decode sky texture if present
@@ -161,6 +191,12 @@ function hydrateModels(podIndex, getBytes, doc) {
 function decodeModelTextures(podIndex, getBytes, doc) {
   const textures = [];
   const seen = new Set();
+  const transparentTextureNames = new Set();
+  for (const model of Object.values(doc.models)) {
+    for (const mesh of model.meshes ?? []) {
+      if (mesh.transparent && mesh.textureName) transparentTextureNames.add(mesh.textureName);
+    }
+  }
   for (const model of Object.values(doc.models)) {
     for (const name of model.textureNames ?? []) {
       if (seen.has(name)) continue;
@@ -171,7 +207,10 @@ function decodeModelTextures(podIndex, getBytes, doc) {
       const actEntry = resolveAsset(podIndex, name.replace(/\.[^.]+$/, ".ACT"));
       const actBytes = actEntry ? getBytes(actEntry) : doc.palette;
       try {
-        const decoded = decodeRawTexture(rawBytes, actBytes, name);
+        const options = transparentTextureNames.has(name)
+          ? { transparentIndexes: [rawBytes[0]] }
+          : undefined;
+        const decoded = decodeRawTexture(rawBytes, actBytes, name, options);
         textures.push({ name, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height });
       } catch { /**/ }
     }
@@ -199,13 +238,6 @@ function serializeCourse(course) {
   return { segments: (course?.segments ?? []).map((s) => ({ start: [...s.start], end: [...s.end], speedLimit: s.speedLimit, trackWidth: s.trackWidth })) };
 }
 
-function detectTvOrigin(podIndex) {
-  const comment = (podIndex.comment ?? "").toUpperCase();
-  if (comment.includes("HELLBENDER")) return "HB";
-  if (comment.includes("FURY") || comment.includes("FURY3") || comment.includes("FURY 3")) return "F3";
-  const hasHb = podIndex.entries.some((e) => e.normalizedName.includes("HELLBENDER") || e.normalizedName.includes("HBMOD"));
-  if (hasHb) return "HB";
-  const hasF3 = podIndex.entries.some((e) => e.normalizedName.includes("FURY3") || e.normalizedName.includes("FURY 3"));
-  if (hasF3) return "F3";
-  return "TV";
+function effectiveTerrainHeightScale(origin, requestedHeightScale) {
+  return origin === "HB" ? 3 : (requestedHeightScale ?? 4);
 }

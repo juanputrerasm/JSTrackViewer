@@ -4,19 +4,21 @@ const DEFAULT_TEXTURE_PALETTE = Uint8Array.from(
     .split("").map((c) => c.charCodeAt(0))
 );
 
-export function decodeRawTexture(rawBytes, actBytes, textureName) {
+export function decodeRawTexture(rawBytes, actBytes, textureName, options = {}) {
   const palette = normalizePalette(actBytes);
   const width = rawBytes.length === 4096 ? 64 : rawBytes.length === 65536 ? 256 : 0;
   const height = width;
   if (!width) throw new Error(`Unsupported RAW size for ${textureName}: ${rawBytes.length} bytes`);
+  const transparentIndexes = new Set([0, ...(options.transparentIndexes ?? [])]);
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (let i = 0; i < rawBytes.length; i++) {
-    const ci = rawBytes[i] * 3;
+    const paletteIndex = rawBytes[i];
+    const ci = paletteIndex * 3;
     const o = i * 4;
     rgba[o]     = palette[ci];
     rgba[o + 1] = palette[ci + 1];
     rgba[o + 2] = palette[ci + 2];
-    rgba[o + 3] = rawBytes[i] === 0 ? 0 : 255;
+    rgba[o + 3] = transparentIndexes.has(paletteIndex) ? 0 : 255;
   }
   return { name: textureName, width, height, rgba };
 }

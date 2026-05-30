@@ -4,13 +4,13 @@ import { loadGroundBoxes } from "./gbox-loader.js";
 import { loadDefObjects } from "./def-loader.js";
 
 /**
- * Parses TV/F3/HB tracks from a primary LVL entry in a POD archive.
+ * Parses TV-family/HB tracks from a primary LVL entry in a POD archive.
  * Returns a partial TrackDoc.
  */
-export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment, detectedOrigin) {
+export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   const lvlText = new TextDecoder("latin1").decode(getBytes(lvlEntry));
   const lines = toLines(lvlText);
-  const doc = createDoc(podComment, detectedOrigin ?? "TV");
+  const doc = createDoc(podComment, inferLvlOrigin(lines));
   doc.prefix = prefixFromName(lvlEntry.name);
 
   if (lines.length < 22) {
@@ -22,10 +22,10 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment, detected
   doc.terrain.rawBytesPerCell = 1;
   doc.trackName = displayNameForLvl(lines, lvlEntry.name);
 
-  // Line 2: RAW terrain (or TNL tunnel network — skip for now)
+  // Line 2: RAW terrain (or TNL tunnel network - skip for now)
   const rawOrTnl = normalizeArchiveName(lines[2]);
   if (rawOrTnl && !rawOrTnl.startsWith("NULL.") && !rawOrTnl.endsWith(".TNL")) {
-    const rawEntry = resolveAsset(podIndex, rawOrTnl);
+    const rawEntry = resolveLvlDataAsset(podIndex, rawOrTnl);
     if (rawEntry) {
       doc.terrain.rawName = rawOrTnl;
       doc.terrain.rawData = getBytes(rawEntry);
@@ -35,7 +35,7 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment, detected
   // Line 3: CLR
   const clrName = normalizeArchiveName(lines[3]);
   if (clrName && !clrName.startsWith("NULL.")) {
-    const clrEntry = resolveAsset(podIndex, clrName);
+    const clrEntry = resolveLvlDataAsset(podIndex, clrName);
     if (clrEntry) {
       doc.terrain.clrName = clrName;
       doc.terrain.clrData = getBytes(clrEntry);
@@ -58,10 +58,10 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment, detected
   // Line 5: TEX
   const texName = normalizeArchiveName(lines[5]);
   if (texName && !texName.startsWith("NULL.")) {
-    const texEntry = resolveAsset(podIndex, texName);
+    const texEntry = resolveLvlDataAsset(podIndex, texName);
     if (texEntry) {
       loadTexList(podIndex, getBytes, texEntry, doc);
-      const ttyEntry = resolveAsset(podIndex, replaceExtension(texName, ".TTY"));
+      const ttyEntry = resolveLvlDataAsset(podIndex, replaceExtension(texName, ".TTY"));
       if (ttyEntry) parseTty(getBytes(ttyEntry), doc);
     }
   }
@@ -129,17 +129,33 @@ function loadTexList(podIndex, getBytes, texEntry, doc) {
   const count = parseInt(lines[0] ?? "0", 10);
   for (let i = 0; i < count && i + 1 < lines.length; i++) {
     const name = normalizeArchiveName(lines[i + 1]);
-    const dataEntry = resolveAsset(podIndex, name);
+    const dataEntry = resolveTerrainTextureAsset(podIndex, name);
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
       tex.data = getBytes(dataEntry);
       tex.width = tex.data.length === 65536 ? 256 : 64;
       tex.height = tex.width;
     }
-    const texActEntry = resolveAsset(podIndex, replaceExtension(name, ".ACT"));
+    const texActEntry = resolveTerrainTextureAsset(podIndex, replaceExtension(name, ".ACT"));
     if (texActEntry) tex.actData = getBytes(texActEntry);
     doc.textures.push(tex);
   }
+}
+
+function resolveTerrainTextureAsset(podIndex, name) {
+  const normalized = normalizeArchiveName(name);
+  if (!normalized) return null;
+  if (/[\\/]/.test(normalized)) return resolveAsset(podIndex, normalized);
+  const title = archiveTitle(normalized);
+  return resolveAsset(podIndex, "ART/" + title) ?? resolveAsset(podIndex, normalized);
+}
+
+function resolveLvlDataAsset(podIndex, name) {
+  const normalized = normalizeArchiveName(name);
+  if (!normalized) return null;
+  if (/[\\/]/.test(normalized)) return resolveAsset(podIndex, normalized);
+  const title = archiveTitle(normalized);
+  return resolveAsset(podIndex, "DATA/" + title) ?? resolveAsset(podIndex, normalized);
 }
 
 function parseTty(bytes, doc) {
@@ -198,6 +214,10 @@ function displayNameForLvl(lines, entryName) {
     if (candidate && !candidate.startsWith("!") && !candidate.startsWith(";") && candidate.toLowerCase() !== "null") return candidate;
   }
   return prettyLvlName(entryName);
+}
+
+function inferLvlOrigin(lines) {
+  return lines.some((line) => line.trim() === "!New ground additions") ? "HB" : "TV";
 }
 
 function prettyLvlName(name) {

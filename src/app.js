@@ -1,6 +1,7 @@
 import { TrackScene } from "./scene.js";
 import { WorkerClient } from "./worker-client.js";
 import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
+import { extractFirstPodFromZipBytes } from "./zip-utils.js";
 
 const OPFS_PATH = "track-viewer/current.pod";
 const WORKER_URL = new URL("./worker/track-worker.js", import.meta.url);
@@ -18,7 +19,7 @@ export class TrackViewerApp {
       terrain: true, textures: true, grid: false,
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
-      wireframe: false, trucks: true,
+      wireframe: false, trucks: true, billboards: true, checkpoints: true,
     };
   }
 
@@ -85,6 +86,8 @@ export class TrackViewerApp {
       "tog-grid":      "grid",
       "tog-courses":   "courses",
       "tog-objects":   "objects",
+      "tog-billboards": "billboards",
+      "tog-checkpoints":"checkpoints",
       "tog-gboxes":    "gboxes",
       "tog-cboxes":    "cboxes",
       "tog-water":     "water",
@@ -141,7 +144,8 @@ export class TrackViewerApp {
     this._showLoading(`Reading ${file.name}…`);
     try {
       const buffer = await file.arrayBuffer();
-      await this._storePodAndIndex(new Uint8Array(buffer), file.name, "Local file");
+      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name);
+      await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
       this._setStatus(`Error: ${err.message}`);
     } finally {
@@ -156,13 +160,28 @@ export class TrackViewerApp {
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const buffer = await resp.arrayBuffer();
-      const name = url.split("/").pop() || "track.pod";
-      await this._storePodAndIndex(new Uint8Array(buffer), name, "URL");
+      const name = nameFromUrl(url);
+      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), name, "URL");
+      await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
       this._setStatus(`Error: ${err.message}`);
     } finally {
       this._hideLoading();
     }
+  }
+
+  async _podBytesFromContainer(bytes, filename, sourcePrefix = "Local file") {
+    if (!isZipName(filename)) {
+      return { bytes, filename, source: sourcePrefix };
+    }
+    this._setStatus("Extracting POD from ZIP…");
+    this._showLoading("Extracting POD from ZIP…");
+    const { podBytes, podEntryName } = await extractFirstPodFromZipBytes(bytes, filename);
+    return {
+      bytes: podBytes,
+      filename: podNameFromZipEntry(filename, podEntryName),
+      source: sourcePrefix === "URL" ? `URL ZIP: ${filename}` : `ZIP: ${filename}`,
+    };
   }
 
   async _storePodAndIndex(bytes, filename, source) {
@@ -208,7 +227,7 @@ export class TrackViewerApp {
       this._minimap.setTrack(result);
       this._minimap.updateCamera(this._scene.nav);
       this._updateTrackInfo(result);
-      this._setStatus(`Loaded: ${result.trackName || choice.name}`);
+      this._setStatus(result.trackName || choice.name);
       // Focus viewport after load
       this._doc.getElementById("viewport")?.focus();
     } catch (err) {
@@ -240,12 +259,13 @@ export class TrackViewerApp {
   _updateTrackInfo(data) {
     const dl = this._doc.getElementById("track-info");
     const pairs = [
-      ["File",         this._podFilename || "—"],
+      ["File",         data.fileName || "—"],
       ["Origin",       this._podSource],
       ["Name",         data.trackName || "—"],
       ["Locale",       data.localeName || "—"],
       ["Type",         data.trackType || "—"],
       ["Game",         data.origin || "—"],
+      ["Background",   displayBackgroundModel(data)],
       ["Music",        displayMusic(data)],
       ["Weather",      displayWeather(data.weatherMask)],
       ["Water level",  data.waterLevel > 0 ? data.waterLevel : "None"],
@@ -309,6 +329,24 @@ function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function isZipName(name) {
+  return String(name ?? "").trim().toUpperCase().endsWith(".ZIP");
+}
+
+function podNameFromZipEntry(zipName, podEntryName) {
+  const cleanEntry = String(podEntryName ?? "").replace(/\\/g, "/").split("/").filter(Boolean).pop();
+  return cleanEntry || `${String(zipName ?? "track").replace(/\.[^.]+$/, "")}.POD`;
+}
+
+function nameFromUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return parsed.pathname.split("/").filter(Boolean).pop() || "track.pod";
+  } catch {
+    return "track.pod";
+  }
+}
+
 const MUSIC_NAMES = ["AZTEC", "BREAK", "FARM", "GRAVEX", "ROCKX", "SCRAP", "SPLASH", "SURF", "VOODOO"];
 const WEATHER_NAMES = ["Clear", "Cloudy", "Foggy", "Dense Fog", "Rain", "Snow", "Dusk", "Night", "Pitch Black"];
 
@@ -317,6 +355,13 @@ function displayMusic(data) {
   if (!name) return "—";
   const base = name.split(/[\\/]/).pop().replace(/\.[^.]+$/, "").toUpperCase();
   return MUSIC_NAMES.includes(base) ? base : name;
+}
+
+function displayBackgroundModel(data) {
+  const name = data.backdropModelName || "";
+  if (!name) return "—";
+  const model = data.models?.[name];
+  return model?.format ? `${name} (${model.format})` : name;
 }
 
 function displayMusicSlot(slot) {

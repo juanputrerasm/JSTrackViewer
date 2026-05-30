@@ -164,17 +164,19 @@ function parseBoxSection(lines, sectionHeader, doc, isRamp) {
   if (section < 0 || section + 1 >= lines.length) return;
   const count = parseLeadingInt(lines[section + 1]);
   let cursor = section + 2;
+  let checkpointSequence = 0;
   for (let i = 0; i < count; i++) {
     cursor = nextBlockStart(lines, cursor);
     if (cursor < 0) return;
     const box = parseBoxBlock(lines, cursor, isRamp, doc);
+    if (box && !isRamp && box.type === 6) box.checkpointSequence = checkpointSequence++;
     if (box) doc.boxes.push(box);
     cursor++;
   }
 }
 
 function parseBoxBlock(lines, blockStart, isRamp, doc) {
-  const box = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, length: 64, width: 64, height: 64, modelName: "", mass: 0, type: isRamp ? 8 : 0, flags: 0, checkpointSequence: 0 };
+  const box = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, length: 64, width: 64, height: 64, modelName: "", mass: 0, type: isRamp ? 8 : 0, flags: 0, checkpointSequence: -1 };
   const blockEnd = nextBlockStart(lines, blockStart + 1);
   const endIndex = blockEnd >= 0 ? blockEnd : lines.length;
 

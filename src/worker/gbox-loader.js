@@ -1,5 +1,5 @@
 import { resolveAsset } from "./pod-format.js";
-import { replaceExtension } from "../shared/path-utils.js";
+import { archiveTitle, normalizeArchiveName, replaceExtension } from "../shared/path-utils.js";
 
 /**
  * Loads ground-box layers from companion RA0, RA1, CL0 entries.
@@ -12,9 +12,9 @@ export function loadGroundBoxes(podIndex, getBytes, rawName, gridSize) {
   const ra1Name = replaceExtension(rawName, ".RA1");
   const cl0Name = replaceExtension(rawName, ".CL0");
 
-  const ra0Entry = resolveAsset(podIndex, ra0Name);
-  const ra1Entry = resolveAsset(podIndex, ra1Name);
-  const cl0Entry = resolveAsset(podIndex, cl0Name);
+  const ra0Entry = resolveDataAsset(podIndex, ra0Name);
+  const ra1Entry = resolveDataAsset(podIndex, ra1Name);
+  const cl0Entry = resolveDataAsset(podIndex, cl0Name);
   if (!ra0Entry || !ra1Entry) return [];
 
   const ra0 = getBytes(ra0Entry);
@@ -58,4 +58,12 @@ export function loadGroundBoxes(podIndex, getBytes, rawName, gridSize) {
     }
   }
   return boxes;
+}
+
+function resolveDataAsset(podIndex, name) {
+  const normalized = normalizeArchiveName(name);
+  if (!normalized) return null;
+  if (/[\\/]/.test(normalized)) return resolveAsset(podIndex, normalized);
+  const title = archiveTitle(normalized);
+  return resolveAsset(podIndex, "DATA/" + title) ?? resolveAsset(podIndex, normalized);
 }

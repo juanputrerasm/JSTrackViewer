@@ -2,7 +2,9 @@ import { decodeRawTexture } from "./texture-decoder.js";
 
 const CELL_SIZE = 64;
 const ATLAS_TILE_SIZE = 64;
+const TERRAIN_OVERLAP_PIXELS = 2;
 const MAX_ATLAS_COLS = 64;
+const MAX_ATLAS_WIDTH = 8192;
 
 /**
  * Builds GPU-ready terrain mesh data from RAW heightfield + CLR texture map + palette + texture list.
@@ -13,7 +15,11 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const hs = heightScale ?? 4;
 
   // Build texture atlas
-  const { atlas, atlasWidth, atlasHeight, textureCount, atlasCols, atlasRows } = buildAtlas(textures, palette);
+  const overlapPixels = usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0;
+  const {
+    atlas, atlasWidth, atlasHeight, textureCount, atlasCols, atlasRows,
+    atlasTileSize, atlasPadding, sourceTileSize, uvRects,
+  } = buildAtlas(textures, palette, overlapPixels);
 
   // Allocate buffers: 4 unique vertices per cell (to allow per-cell UV)
   const cellCount = gridSize * gridSize;
@@ -91,23 +97,22 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         }
       }
       if (textureCount <= 1) texIdx = 0;
-      const atlasCol = texIdx % atlasCols;
-      const atlasRow = Math.floor(texIdx / atlasCols);
-      const u0 = atlasCol / atlasCols;
-      const u1 = (atlasCol + 1) / atlasCols;
-      const v0 = atlasRow / atlasRows;
-      const v1 = (atlasRow + 1) / atlasRows;
+      const rect = uvRects[texIdx] ?? uvRects[0];
+      const u0 = rect.x / atlasWidth;
+      const u1 = (rect.x + rect.w) / atlasWidth;
+      const v0 = rect.y / atlasHeight;
+      const v1 = (rect.y + rect.h) / atlasHeight;
 
       // Base UV corners (indexed 0-3): BL=(u0,1), BR=(u1,1), TR=(u1,0), TL=(u0,0)
-      // Matches Java SoftwareTextureSampler.transformTextureCornerIndex:
+      // Matches JTraxx SoftwareTextureSampler.transformTextureCornerIndex:
       //   mirror bit 0 (alignment bit 12): result = (3 - result) & 3
       //   mirror bit 1 (alignment bit 13): result = (1 - result) & 3
       //   final: (rot + result) & 3
       const cU = [u0, u1, u1, u0];
       const cV = [v1, v1, v0, v0];
       // TV/F3: JTraxxMainWindow.flightTerrainTextureRotationQuarterTurns() = 3 extra turns.
-      // Java: (rot + result) & 3, applied after mirror. Corner indices match Three.js vi directly.
-      const effectiveRot = (origin === "TV" || origin === "F3") ? (rot + 3) & 3 : rot;
+      // JTraxx: (rot + result) & 3, applied after mirror. Corner indices match Three.js vi directly.
+      const effectiveRot = (origin === "TV/F3") ? (rot + 3) & 3 : rot;
       const uOff = vBase * 2;
       for (let vi = 0; vi < 4; vi++) {
         let result = vi;
@@ -130,50 +135,66 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     normals: normals.buffer,
     uvs: uvs.buffer,
     indices: indices.buffer,
-    atlas: { rgba: atlas.buffer, width: atlasWidth, height: atlasHeight, textureCount, atlasCols, atlasRows },
+    atlas: {
+      rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
+      textureCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
+    },
   };
 }
 
-function buildAtlas(textures, trackPalette) {
+function buildAtlas(textures, trackPalette, overlapPixels = 0) {
+  const atlasPadding = Math.max(0, overlapPixels | 0);
+  const decodedSlots = textures.map((tex) => decodeTerrainTexture(tex, trackPalette));
+  const sourceTileSize = decodedSlots.reduce((max, slot) => Math.max(max, slot?.width ?? ATLAS_TILE_SIZE), ATLAS_TILE_SIZE);
+  const atlasTileSize = sourceTileSize + atlasPadding * 2;
   // Use ALL slots (including missing ones) so CLR indices map directly to atlas positions.
   const slotCount = textures.length;
   if (slotCount === 0) {
-    const atlas = new Uint8ClampedArray(ATLAS_TILE_SIZE * ATLAS_TILE_SIZE * 4);
-    for (let y = 0; y < ATLAS_TILE_SIZE; y++) {
-      for (let x = 0; x < ATLAS_TILE_SIZE; x++) {
-        const o = (y * ATLAS_TILE_SIZE + x) * 4;
+    const atlas = new Uint8ClampedArray(atlasTileSize * atlasTileSize * 4);
+    for (let y = 0; y < atlasTileSize; y++) {
+      for (let x = 0; x < atlasTileSize; x++) {
+        const o = (y * atlasTileSize + x) * 4;
         const v = ((x >> 3) ^ (y >> 3)) & 1 ? 120 : 80;
         atlas[o] = atlas[o+1] = atlas[o+2] = v; atlas[o+3] = 255;
       }
     }
-    return { atlas, atlasWidth: ATLAS_TILE_SIZE, atlasHeight: ATLAS_TILE_SIZE, textureCount: 1, atlasCols: 1, atlasRows: 1 };
+    return {
+      atlas, atlasWidth: atlasTileSize, atlasHeight: atlasTileSize,
+      textureCount: 1, atlasCols: 1, atlasRows: 1, atlasTileSize, atlasPadding, sourceTileSize,
+      uvRects: [{ x: atlasPadding, y: atlasPadding, w: sourceTileSize, h: sourceTileSize }],
+    };
   }
 
-  const atlasCols = Math.min(slotCount, MAX_ATLAS_COLS);
+  const atlasCols = Math.max(1, Math.min(slotCount, MAX_ATLAS_COLS, Math.floor(MAX_ATLAS_WIDTH / atlasTileSize)));
   const atlasRows = Math.ceil(slotCount / atlasCols);
-  const atlasWidth = atlasCols * ATLAS_TILE_SIZE;
-  const atlasHeight = atlasRows * ATLAS_TILE_SIZE;
+  const atlasWidth = atlasCols * atlasTileSize;
+  const atlasHeight = atlasRows * atlasTileSize;
   const atlas = new Uint8ClampedArray(atlasWidth * atlasHeight * 4);
+  const uvRects = [];
 
   for (let ti = 0; ti < slotCount; ti++) {
-    const tex = textures[ti];
-    const hasData = tex?.data && tex.data.length >= 4096;
-    const act = tex?.actData ?? trackPalette;
-    let decoded = null;
-    if (hasData) {
-      try {
-        decoded = decodeRawTexture(tex.data.slice(0, 4096), act, tex.name);
-      } catch {
-        decoded = null;
-      }
-    }
-    const xOff = (ti % atlasCols) * ATLAS_TILE_SIZE;
-    const yOff = Math.floor(ti / atlasCols) * ATLAS_TILE_SIZE;
-    for (let y = 0; y < ATLAS_TILE_SIZE; y++) {
-      for (let x = 0; x < ATLAS_TILE_SIZE; x++) {
+    const decoded = decodedSlots[ti];
+    const xOff = (ti % atlasCols) * atlasTileSize;
+    const yOff = Math.floor(ti / atlasCols) * atlasTileSize;
+    const sourceWidth = decoded?.width ?? sourceTileSize;
+    const sourceHeight = decoded?.height ?? sourceTileSize;
+    const insetX = atlasPadding > 0 ? atlasPadding * sourceTileSize / sourceWidth : 0;
+    const insetY = atlasPadding > 0 ? atlasPadding * sourceTileSize / sourceHeight : 0;
+    uvRects.push({
+      x: xOff + atlasPadding + insetX,
+      y: yOff + atlasPadding + insetY,
+      w: Math.max(1, sourceTileSize - insetX * 2),
+      h: Math.max(1, sourceTileSize - insetY * 2),
+    });
+    for (let y = 0; y < atlasTileSize; y++) {
+      for (let x = 0; x < atlasTileSize; x++) {
+        const sampleX = Math.max(0, Math.min(sourceTileSize - 1, x - atlasPadding));
+        const sampleY = Math.max(0, Math.min(sourceTileSize - 1, y - atlasPadding));
         const dstOff = ((yOff + y) * atlasWidth + xOff + x) * 4;
         if (decoded) {
-          const srcOff = (y * (decoded.width ?? ATLAS_TILE_SIZE) + x) * 4;
+          const srcX = Math.min(decoded.width - 1, Math.floor(sampleX * decoded.width / sourceTileSize));
+          const srcY = Math.min(decoded.height - 1, Math.floor(sampleY * decoded.height / sourceTileSize));
+          const srcOff = (srcY * decoded.width + srcX) * 4;
           atlas[dstOff]     = decoded.rgba[srcOff];
           atlas[dstOff + 1] = decoded.rgba[srcOff + 1];
           atlas[dstOff + 2] = decoded.rgba[srcOff + 2];
@@ -186,7 +207,21 @@ function buildAtlas(textures, trackPalette) {
     }
   }
 
-  return { atlas, atlasWidth, atlasHeight, textureCount: slotCount, atlasCols, atlasRows };
+  return { atlas, atlasWidth, atlasHeight, textureCount: slotCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize, uvRects };
+}
+
+function usesHiddenTerrainOverlap(origin) {
+  return origin === "MTM2" || origin === "CPR";
+}
+
+function decodeTerrainTexture(tex, trackPalette) {
+  if (!tex?.data || tex.data.length < 4096) return null;
+  const act = tex.actData ?? trackPalette;
+  try {
+    return decodeRawTexture(tex.data, act, tex.name);
+  } catch {
+    return null;
+  }
 }
 
 function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz) {
