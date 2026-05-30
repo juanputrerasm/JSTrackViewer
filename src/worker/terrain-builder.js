@@ -112,7 +112,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       const cV = [v1, v1, v0, v0];
       // TV/F3: JTraxxMainWindow.flightTerrainTextureRotationQuarterTurns() = 3 extra turns.
       // JTraxx: (rot + result) & 3, applied after mirror. Corner indices match Three.js vi directly.
-      const effectiveRot = (origin === "TV/F3") ? (rot + 3) & 3 : rot;
+      const effectiveRot = isTvFamilyOrigin(origin) ? (rot + 3) & 3 : rot;
       const uOff = vBase * 2;
       for (let vi = 0; vi < 4; vi++) {
         let result = vi;
@@ -212,6 +212,10 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
 
 function usesHiddenTerrainOverlap(origin) {
   return origin === "MTM2" || origin === "CPR";
+}
+
+function isTvFamilyOrigin(origin) {
+  return origin === "TV" || origin === "F3" || origin === "TV/F3";
 }
 
 function decodeTerrainTexture(tex, trackPalette) {

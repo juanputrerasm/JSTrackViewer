@@ -74,7 +74,7 @@ function decodeBinPayload(reader, model, headerBytesBeforeVertexCount, applyMagn
     // Legacy shorthand: 65536/(magnifyPower*64) = 1024/magnifyPower.
     let geometryDivisor;
     if (origin === "HB") geometryDivisor = DIVISOR_HB;
-    else if (origin === "TV" || origin === "F3") geometryDivisor = DIVISOR_TV_F3;
+    else if (isTvFamilyOrigin(origin)) geometryDivisor = DIVISOR_TV_F3;
     else geometryDivisor = DIVISOR_LEGACY;
     scale = 65536.0 / (model.magnifyPower * geometryDivisor);
   } else {
@@ -284,6 +284,7 @@ function readUnmappedFace(reader, type, textureName, meshVertexCount) {
 function indicesValid(indices, count) { return indices.every((i) => i >= 0 && i < count); }
 function indicesValidOneBased(indices, count) { return indices.every((i) => i - 1 >= 0 && i - 1 < count); }
 function upper(v) { return (v ?? "").trim().toUpperCase(); }
+function isTvFamilyOrigin(origin) { return origin === "TV" || origin === "F3" || origin === "TV/F3"; }
 
 function representativeColor(textureName) {
   const seed = [...(textureName || "__flat__")].reduce((s, c) => s + c.charCodeAt(0), 0);
