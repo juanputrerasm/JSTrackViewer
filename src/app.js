@@ -208,6 +208,8 @@ export class TrackViewerApp {
 
     if (choices.length === 1) {
       await this._loadTrackChoice(0);
+    } else {
+      this._setStatus(`Found ${choices.length} tracks. Choose one and click Load Track.`);
     }
   }
 

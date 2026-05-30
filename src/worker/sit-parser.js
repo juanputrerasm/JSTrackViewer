@@ -35,7 +35,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
 
   // Line 2: RAW
   const rawName = normalizeArchiveName(lines[2]);
-  const rawEntry = resolveAsset(podIndex, rawName);
+  const rawEntry = resolveTrackDataAsset(podIndex, rawName);
   if (rawEntry) {
     doc.terrain.rawName = rawName;
     doc.terrain.rawData = getBytes(rawEntry);
@@ -43,7 +43,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
 
   // Line 3: CLR
   const clrName = normalizeArchiveName(lines[3]);
-  const clrEntry = resolveAsset(podIndex, clrName);
+  const clrEntry = resolveTrackDataAsset(podIndex, clrName);
   if (clrEntry) {
     doc.terrain.clrName = clrName;
     doc.terrain.clrData = getBytes(clrEntry);
@@ -62,12 +62,12 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
 
   // Line 5: TEX texture list
   const texName = normalizeArchiveName(lines[5]);
-  const texEntry = resolveAsset(podIndex, texName);
+  const texEntry = resolveTrackDataAsset(podIndex, texName);
   if (texEntry) {
     loadTexList(podIndex, getBytes, texEntry, doc, false);
     // TTY
     const ttyName = replaceExtension(texName, ".TTY");
-    const ttyEntry = resolveAsset(podIndex, ttyName);
+    const ttyEntry = resolveTrackDataAsset(podIndex, ttyName);
     if (ttyEntry) parseTty(getBytes(ttyEntry), doc);
   }
 
@@ -75,7 +75,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   if (lines.length > 10) {
     const skyRawName = normalizeArchiveName(lines[10]);
     if (skyRawName && !skyRawName.startsWith("NULL") && skyRawName.endsWith(".RAW")) {
-      const skyEntry = resolveAsset(podIndex, skyRawName);
+      const skyEntry = resolveArtAsset(podIndex, skyRawName);
       if (skyEntry) {
         const skyActName = lines.length > 11 ? normalizeArchiveName(lines[11]) : null;
         const skyActEntry = skyActName ? resolveAsset(podIndex, skyActName) : null;
@@ -324,7 +324,7 @@ function loadTexList(podIndex, getBytes, texEntry, doc, preserveSlots) {
   const count = parseInt(lines[0] ?? "0", 10);
   for (let i = 0; i < count && i + 1 < lines.length; i++) {
     const name = normalizeArchiveName(lines[i + 1]);
-    const dataEntry = resolveAsset(podIndex, name);
+    const dataEntry = resolveArtAsset(podIndex, name);
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
       tex.data = getBytes(dataEntry);
@@ -333,10 +333,26 @@ function loadTexList(podIndex, getBytes, texEntry, doc, preserveSlots) {
     }
     // Per-texture ACT
     const texActName = replaceExtension(name, ".ACT");
-    const texActEntry = resolveAsset(podIndex, texActName);
+    const texActEntry = resolveArtAsset(podIndex, texActName);
     if (texActEntry) tex.actData = getBytes(texActEntry);
     doc.textures.push(tex);
   }
+}
+
+function resolveTrackDataAsset(podIndex, name) {
+  const normalized = normalizeArchiveName(name);
+  if (!normalized) return null;
+  if (/[\\/]/.test(normalized)) return resolveAsset(podIndex, normalized);
+  const title = archiveTitle(normalized);
+  return resolveAsset(podIndex, "DATA/" + title) ?? resolveAsset(podIndex, normalized);
+}
+
+function resolveArtAsset(podIndex, name) {
+  const normalized = normalizeArchiveName(name);
+  if (!normalized) return null;
+  if (/[\\/]/.test(normalized)) return resolveAsset(podIndex, normalized);
+  const title = archiveTitle(normalized);
+  return resolveAsset(podIndex, "ART/" + title) ?? resolveAsset(podIndex, normalized);
 }
 
 function parseTty(bytes, doc) {
