@@ -14,7 +14,7 @@ import { archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 export function listTrackChoices(podIndex) {
   const sitEntries = findSitEntries(podIndex);
   if (sitEntries.length > 0) {
-    return sitEntries.map((e, i) => ({ name: archiveTitle(e.name).replace(/\.SIT$/i, ""), index: i, format: "SIT", entry: e }));
+    return sitEntries.map((e, i) => ({ name: archiveTitle(e.name).replace(/\.SI[T2]$/i, ""), index: i, format: "SIT", entry: e }));
   }
   const lvlEntries = findLvlEntries(podIndex);
   const filtered = lvlEntries.filter((e) => {
@@ -37,7 +37,7 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
       const e = sitEntries[i];
       const fileName = archiveTitle(e.name);
       choices.push({
-        name: await readSitDisplayName(opfsPath, e) ?? fileName.replace(/\.SIT$/i, ""),
+        name: await readSitDisplayName(opfsPath, e) ?? fileName.replace(/\.SI[T2]$/i, ""),
         fileName,
         index: i,
         format: "SIT",

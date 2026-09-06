@@ -5,6 +5,7 @@ const ATLAS_TILE_SIZE = 64;
 const TERRAIN_OVERLAP_PIXELS = 2;
 const MAX_ATLAS_COLS = 64;
 const MAX_ATLAS_WIDTH = 8192;
+const MAX_ATLAS_HEIGHT = 8192;
 
 /**
  * Builds GPU-ready terrain mesh data from RAW heightfield + CLR texture map + palette + texture list.
@@ -145,7 +146,20 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
 function buildAtlas(textures, trackPalette, overlapPixels = 0) {
   const atlasPadding = Math.max(0, overlapPixels | 0);
   const decodedSlots = textures.map((tex) => decodeTerrainTexture(tex, trackPalette));
-  const sourceTileSize = decodedSlots.reduce((max, slot) => Math.max(max, slot?.width ?? ATLAS_TILE_SIZE), ATLAS_TILE_SIZE);
+  let sourceTileSize = decodedSlots.reduce((max, slot) => Math.max(max, slot?.width ?? ATLAS_TILE_SIZE), ATLAS_TILE_SIZE);
+
+  /*
+    HD art can outgrow the atlas. A track with 173 terrain slots at 1024 px would want roughly
+    25 rows of 1028 px, far past what WebGL accepts as one texture, and the upload would just
+    fail. Halve the tile size until the grid fits; tiles are resampled into their cell anyway,
+    so this costs resolution rather than losing the track.
+  */
+  while (sourceTileSize > ATLAS_TILE_SIZE) {
+    const tile = sourceTileSize + atlasPadding * 2;
+    const cols = Math.max(1, Math.min(textures.length, MAX_ATLAS_COLS, Math.floor(MAX_ATLAS_WIDTH / tile)));
+    if (Math.ceil(textures.length / cols) * tile <= MAX_ATLAS_HEIGHT) break;
+    sourceTileSize >>= 1;
+  }
   const atlasTileSize = sourceTileSize + atlasPadding * 2;
   // Use ALL slots (including missing ones) so CLR indices map directly to atlas positions.
   const slotCount = textures.length;
@@ -176,10 +190,11 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
     const decoded = decodedSlots[ti];
     const xOff = (ti % atlasCols) * atlasTileSize;
     const yOff = Math.floor(ti / atlasCols) * atlasTileSize;
-    const sourceWidth = decoded?.width ?? sourceTileSize;
-    const sourceHeight = decoded?.height ?? sourceTileSize;
-    const insetX = atlasPadding > 0 ? atlasPadding * sourceTileSize / sourceWidth : 0;
-    const insetY = atlasPadding > 0 ? atlasPadding * sourceTileSize / sourceHeight : 0;
+    // Inset by a fraction of the tile, derived from the legacy tile size, rather than by a
+    // fixed count of the source image's own pixels. See hdLegacySide above.
+    const borderSide = decoded?.legacySide ?? decoded?.width ?? sourceTileSize;
+    const insetX = atlasPadding > 0 ? atlasPadding * sourceTileSize / borderSide : 0;
+    const insetY = insetX;
     uvRects.push({
       x: xOff + atlasPadding + insetX,
       y: yOff + atlasPadding + insetY,
@@ -218,13 +233,43 @@ function isTvFamilyOrigin(origin) {
   return origin === "TV" || origin === "F3" || origin === "TV/F3";
 }
 
+/*
+  `legacySide` is the size of the 8-bit tile a slot stands for, which once HD art is in play
+  is NOT the size of the image finally sampled.
+
+  It matters because of the terrain border ring. Traxx samples a tile's interior rather than
+  its full extent (tseq64 runs 2..62, OpenGLTerrainRenderer.cpp:8498) and normalises those
+  texel coordinates by the LEGACY width even when a 512 or 1024 pixel HD image has been
+  uploaded in the tile's place. The inset is therefore a fixed FRACTION of the tile, 2/64,
+  not a fixed number of pixels. Insetting an HD tile by two of its own pixels would sample
+  2/512 of it and put the baked border ring back on screen.
+*/
+function hdLegacySide(width) {
+  // Mirrors the fork's HDTexLegacySize: an HD source stands in for a 256 tile if it is at
+  // least that big, and for a 64 tile otherwise.
+  return width >= 256 ? 256 : 64;
+}
+
 function decodeTerrainTexture(tex, trackPalette) {
+  // A true-colour source, already decoded by the worker, wins outright. An HD-only pod has
+  // no .RAW for this slot at all, so it is also the only thing such a pod can use.
+  if (tex?.hdImage?.rgba) {
+    const legacySide = (tex.data && podRawSide(tex.data.length)) || hdLegacySide(tex.hdImage.width);
+    return {
+      name: tex.name,
+      width: tex.hdImage.width,
+      height: tex.hdImage.height,
+      rgba: tex.hdImage.rgba,
+      legacySide,
+    };
+  }
   // decodeRawTexture is the authority on which byte counts are legal tiles; a 32x32 tile is
   // 1024 bytes and used to be rejected by a hardcoded 4096 floor here.
   if (!tex?.data || !podRawSide(tex.data.length)) return null;
   const act = tex.actData ?? trackPalette;
   try {
-    return decodeRawTexture(tex.data, act, tex.name);
+    const decoded = decodeRawTexture(tex.data, act, tex.name);
+    return { ...decoded, legacySide: decoded.width };
   } catch {
     return null;
   }

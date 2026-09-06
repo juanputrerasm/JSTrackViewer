@@ -101,8 +101,16 @@ export function findEntriesByExtension(podIndex, ext) {
   return podIndex.entries.filter((e) => e.title.endsWith(upper));
 }
 
+/*
+  Track scripts, including the Community Patch 3 .SI2 spelling.
+
+  The fork writes WORLD\<stem>.SI2 instead of .SIT when a pod omits its legacy 8-bit
+  fallbacks: the extension IS the visibility switch, because a 1998 install scans only for
+  .SIT and so never lists a track it could not draw. The content is identical, so nothing
+  downstream needs to care which one it came from.
+*/
 export function findSitEntries(podIndex) {
-  return podIndex.entries.filter((e) => e.title.endsWith(".SIT"));
+  return podIndex.entries.filter((e) => e.title.endsWith(".SIT") || e.title.endsWith(".SI2"));
 }
 
 export function findLvlEntries(podIndex) {

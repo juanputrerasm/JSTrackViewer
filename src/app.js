@@ -279,6 +279,17 @@ export class TrackViewerApp {
       ["POD comment",  data.podComment || "—"],
     ];
 
+    // Only shown when the pod carries a Community Patch 3 version record.
+    const version = data.trackVersion;
+    if (version) {
+      const tool = [version.tool, version.toolVersion].filter(Boolean).join(" ");
+      pairs.push(["Track format", version.formatVersion ? `v${version.formatVersion}` : "—"]);
+      if (tool) pairs.push(["Built with", tool]);
+      if (version.built) pairs.push(["Built", version.built]);
+      if (version.hdTextures) pairs.push(["HD textures", version.hdTextures]);
+      if (version.legacyFallback) pairs.push(["Legacy fallback", version.legacyFallback]);
+    }
+
     dl.innerHTML = pairs.map(([k, v]) =>
       `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`
     ).join("");

@@ -1,6 +1,7 @@
 import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
-import { createPaletteResolver } from "./palette-resolver.js";
+import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
+import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -110,8 +111,48 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     neither. See palette-resolver.js for the ranking and why it is that order.
   */
   const palettes = createPaletteResolver(podIndex, syncGetBytes, doc.origin, doc.palette);
+
+  /*
+    Community Patch 3 HD art.
+
+    A texture may have a true-colour ART\<stem>.PNG or .TGA sibling, and an HD-only pod
+    carries no .RAW for it at all. The .RAW name stays the texture's identity throughout, so
+    this only ever attaches a decoded image to the slot that name already refers to.
+
+    A source that the engine could not use (not square, not a power of two, outside 32..1024,
+    or not the format its extension claims) is refused with a reason and the legacy 8-bit
+    tile is used instead. Silently drawing something the game cannot would misrepresent the
+    track.
+  */
+  const hdWarnings = [];
+  // Most pods carry no HD art at all. Checking once keeps them from paying for a sibling
+  // lookup per texture.
+  const podHasHdArt = podIndex.entries.some(
+    (e) => e.title.endsWith(".PNG") || e.title.endsWith(".TGA"));
+  const hdDecode = async (name) => {
+    if (!podHasHdArt) return null;
+    const sibling = findHdSibling(podIndex, name);
+    if (!sibling) return null;
+    try {
+      const image = await decodeTrueColorTexture(
+        syncGetBytes(sibling.entry), sibling.entry.title, sibling.extension);
+      const refusal = hdDimensionRefusal(sibling.entry.title, image.width, image.height);
+      if (refusal) { hdWarnings.push(refusal); return null; }
+      return { width: image.width, height: image.height, rgba: image.rgba };
+    } catch (err) {
+      hdWarnings.push(err.message);
+      return null;
+    }
+  };
+
   for (const tex of doc.textures ?? []) {
-    if (!tex?.data || tex.actData) continue;
+    if (!tex?.name) continue;
+    tex.hdImage = await hdDecode(tex.name);
+  }
+  if (doc.skyTexture?.name) doc.skyTexture.hdImage = await hdDecode(doc.skyTexture.name);
+  for (const tex of doc.textures ?? []) {
+    // An HD slot needs no palette; only the 8-bit path consults one.
+    if (!tex?.data || tex.actData || tex.hdImage) continue;
     tex.actData = palettes.paletteFor(tex.name, null, "terrain") ?? undefined;
   }
   for (const tex of doc.raceTrackTextures ?? []) {
@@ -137,6 +178,17 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     for (const texName of model.textureNames ?? []) {
       if (seen.has(texName)) continue;
       seen.add(texName);
+      // The HD sibling wins where there is one; an HD-only pod has no .RAW to fall back to.
+      const hd = await hdDecode(texName);
+      if (hd) {
+        modelTextures.push({
+          name: texName,
+          rgba: hd.rgba.buffer,
+          width: hd.width,
+          height: hd.height,
+        });
+        continue;
+      }
       const entry = resolveAsset(podIndex, texName) ?? resolveAsset(podIndex, replaceExtension(texName, ".RAW"));
       if (!entry) continue;
       try {
@@ -209,6 +261,27 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   }
   stats.modelWarningCount = modelWarnings.length;
   stats.paletteSources = palettes.sourceSummary();
+  stats.hdTextureCount = modelTextures.length
+    ? modelTextures.filter((t) => t.width > 256 || t.height > 256).length
+    : 0;
+  if (hdWarnings.length) {
+    console.warn(`[JSTrackViewer] ${hdWarnings.length} HD texture(s) refused:\n  `
+      + hdWarnings.join("\n  "));
+  }
+  stats.hdWarnings = hdWarnings;
+
+  /*
+    DATA\<stem>.TXV, the Community Patch 3 track version record.
+
+    Plain ASCII, CRLF, key=value, '#' comments. Six keys are the fork's own (formatVersion,
+    tool, toolVersion, built, legacyFallback, hdTextures) and anything else is a newer tool's
+    key that this build has never heard of. A viewer only reports it, so unknown keys are
+    kept rather than dropped: tolerating them is the whole forward-compatibility mechanism.
+
+    formatVersion 2 means the track uses the box types CP3 added (BOXTYPE_LIGHT /
+    BOXTYPE_MOVING). It is a diagnostic and not a gate; the engine loads either.
+  */
+  const trackVersion = readTxvRecord(podIndex, syncGetBytes, choice);
   stats.modelTextureNames = modelTextures.map((t) => `${t.name} ${t.width}x${t.height}`);
   console.info("[JSTrackViewer] palette sources:", JSON.stringify(palettes.sourceSummary()));
   console.info(`[JSTrackViewer] model textures decoded (${modelTextures.length}):`,
@@ -230,7 +303,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   }
 
   return {
-    origin: doc.origin, podComment: doc.podComment,
+    origin: doc.origin, podComment: doc.podComment, trackVersion,
     fileName: choice.fileName ?? choice.entry?.title ?? "",
     trackName: doc.trackName || choice.name,
     localeName: doc.localeName, trackType: doc.trackType,
@@ -297,6 +370,29 @@ function resolveKeyframeModel(model, loadFrame) {
 // Hellbender's terrain scale is pinned rather than requested. Traxx's ALTITUDESCALE is 3 for
 // everything else, which is now also the requested default, but the HB branch stays explicit
 // because it is deliberately not user-controlled.
+function readTxvRecord(podIndex, getBytes, choice) {
+  const title = choice?.entry?.title ?? "";
+  const stem = title.replace(/\.[^.]+$/, "");
+  if (!stem) return null;
+  const entry = podIndex.entries.find((e) => e.normalizedName === `DATA/${stem}.TXV`)
+    ?? podIndex.entries.find((e) => e.title.toUpperCase() === `${stem}.TXV`);
+  if (!entry) return null;
+  try {
+    const text = new TextDecoder("latin1").decode(getBytes(entry));
+    const record = {};
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq < 1) continue;
+      record[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+    return Object.keys(record).length ? record : null;
+  } catch {
+    return null;
+  }
+}
+
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
   return origin === "HB" ? 3 : (requestedHeightScale ?? 3);
 }

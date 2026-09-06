@@ -67,6 +67,24 @@ export function findArtSibling(podIndex, name, ext) {
   return podIndex.entries.find((e) => e.title.toUpperCase() === target) ?? null;
 }
 
+/*
+  The HD sibling of a texture, if the pod carries one.
+
+  Community Patch 3 packs ART\<stem>.PNG or .TGA beside the legacy pair, and an HD-only pod
+  carries no .RAW at all. Everything downstream still refers to the texture by its .RAW name,
+  which stays the texture's identity; this only answers "is there a true-colour source for it".
+
+  The fork notes this resolution was originally missing on the terrain path while the model
+  paths had it, so an HD-only pod rendered no terrain whatsoever.
+*/
+export function findHdSibling(podIndex, name) {
+  for (const ext of [".PNG", ".TGA"]) {
+    const entry = findArtSibling(podIndex, name, ext);
+    if (entry) return { entry, extension: ext };
+  }
+  return null;
+}
+
 function findByTitle(podIndex, title) {
   const upper = title.toUpperCase();
   return podIndex.entries.find((e) => e.title.toUpperCase() === upper) ?? null;
