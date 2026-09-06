@@ -1,5 +1,6 @@
 import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
+import { createPaletteResolver } from "./palette-resolver.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -28,7 +29,7 @@ self.onmessage = async (event) => {
       const { choiceIndex, heightScale } = payload;
       const choices = await listTrackChoicesAsync(podIndex, podOpfsPath);
       if (choiceIndex < 0 || choiceIndex >= choices.length) throw new Error(`Invalid choice: ${choiceIndex}`);
-      result = await loadTrackAsync(podIndex, podOpfsPath, choices[choiceIndex], heightScale ?? 4);
+      result = await loadTrackAsync(podIndex, podOpfsPath, choices[choiceIndex], heightScale ?? 3);
 
     } else {
       throw new Error(`Unknown message type: ${type}`);
@@ -81,15 +82,44 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   // Hydrate BIN models
   const modelOrigin = doc.origin;
+  const loadModel = (name) => {
+    const entry = resolveAsset(podIndex, name);
+    if (!entry) return null;
+    return resolveKeyframeModel(decodeBinModel(syncGetBytes(entry), name, modelOrigin),
+      (frameName) => {
+        const frameEntry = resolveAsset(podIndex, frameName);
+        return frameEntry ? decodeBinModel(syncGetBytes(frameEntry), frameName, modelOrigin) : null;
+      });
+  };
   for (const box of doc.boxes) {
     const name = box.modelName;
     if (!name || doc.models[name]) continue;
-    const entry = resolveAsset(podIndex, name);
-    if (entry) doc.models[name] = decodeBinModel(syncGetBytes(entry), name, modelOrigin);
+    const model = loadModel(name);
+    if (model) doc.models[name] = model;
   }
   if (doc.backdropModelName && !doc.models[doc.backdropModelName]) {
-    const entry = resolveAsset(podIndex, doc.backdropModelName);
-    if (entry) doc.models[doc.backdropModelName] = decodeBinModel(syncGetBytes(entry), doc.backdropModelName, modelOrigin);
+    const model = loadModel(doc.backdropModelName);
+    if (model) doc.models[doc.backdropModelName] = model;
+  }
+
+  /*
+    Palette resolution.
+
+    Every 8-bit texture in the track goes through one ordered chain rather than the old
+    "same-stem .ACT, else the track palette" pair, because the older titles frequently have
+    neither. See palette-resolver.js for the ranking and why it is that order.
+  */
+  const palettes = createPaletteResolver(podIndex, syncGetBytes, doc.origin, doc.palette);
+  for (const tex of doc.textures ?? []) {
+    if (!tex?.data || tex.actData) continue;
+    tex.actData = palettes.paletteFor(tex.name, null, "terrain") ?? undefined;
+  }
+  for (const tex of doc.raceTrackTextures ?? []) {
+    if (!tex?.data || tex.actData) continue;
+    tex.actData = palettes.paletteFor(tex.name, null, "terrain") ?? undefined;
+  }
+  if (doc.skyTexture?.data && !doc.skyTexture.actData) {
+    doc.skyTexture.actData = palettes.paletteFor(doc.skyTexture.name, null, "terrain") ?? undefined;
   }
 
   // Model textures
@@ -98,6 +128,8 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   const transparentTextureNames = new Set();
   for (const model of Object.values(doc.models)) {
     for (const mesh of model.meshes ?? []) {
+      // `transparent` already accounts for both the legacy 0x11 / 0x33 face types and a
+      // material's BLEND / ALPHATEST / TEXSOLID flags.
       if (mesh.transparent && mesh.textureName) transparentTextureNames.add(mesh.textureName);
     }
   }
@@ -109,11 +141,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       if (!entry) continue;
       try {
         const rawBytes = syncGetBytes(entry);
-        const actEntry = resolveAsset(podIndex, replaceExtension(texName, ".ACT"));
-        const actBytes = actEntry ? syncGetBytes(actEntry) : doc.palette;
-        const options = transparentTextureNames.has(texName)
-          ? { transparentIndexes: [rawBytes[0]] }
-          : undefined;
+        const actBytes = palettes.paletteFor(texName, entry, "model") ?? doc.palette;
+        // Cutout applies only to textures used by a 0x11 / 0x33 face; the key is
+        // palette-black, decided inside decodeRawTexture.
+        const options = transparentTextureNames.has(texName) ? { cutout: true } : undefined;
         const decoded = decodeRawTexture(rawBytes, actBytes, texName, options);
         modelTextures.push({ name: texName, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height });
       } catch { /**/ }
@@ -166,6 +197,23 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     extendedCourseCount: doc.extendedCourses.length,
   };
 
+  // A model whose record walk stopped early is a valid model with fewer polygons, and nothing
+  // about the picture says so. Surface it rather than letting it pass silently.
+  const modelWarnings = [];
+  for (const model of Object.values(doc.models)) {
+    if (model.incomplete) modelWarnings.push(`${model.name}: ${model.loadWarning}`);
+    for (const w of model.warnings ?? []) modelWarnings.push(`${model.name}: ${w}`);
+  }
+  if (modelWarnings.length) {
+    console.warn(`[JSTrackViewer] ${modelWarnings.length} model warning(s):\n  ` + modelWarnings.join("\n  "));
+  }
+  stats.modelWarningCount = modelWarnings.length;
+  stats.paletteSources = palettes.sourceSummary();
+  stats.modelTextureNames = modelTextures.map((t) => `${t.name} ${t.width}x${t.height}`);
+  console.info("[JSTrackViewer] palette sources:", JSON.stringify(palettes.sourceSummary()));
+  console.info(`[JSTrackViewer] model textures decoded (${modelTextures.length}):`,
+    stats.modelTextureNames.join(", "));
+
   const models = {};
   for (const [k, model] of Object.entries(doc.models)) {
     models[k] = {
@@ -173,6 +221,9 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       anchor: model.anchor ?? { x: 0, y: 0, z: 0 },
       meshes: (model.meshes ?? []).map((m) => ({
         textureName: m.textureName, color: m.color, transparent: m.transparent === true,
+        // Material state travels with the mesh: the renderer decides blending, alpha cutoff,
+        // sidedness and emissive from these, not from the face type.
+        solid: m.solid === true, material: m.material ?? null, material2: m.material2 ?? null,
         positions: m.positions.buffer, normals: m.normals.buffer, uvs: m.uvs.buffer,
       })),
     };
@@ -216,8 +267,38 @@ function serializeCourse(course) {
   };
 }
 
+/**
+ * A keyframe control model (ANIMATED_BIN) carries frame NAMES, not polygons. The frame models
+ * are ordinary .BIN entries elsewhere in the pod, so frame 0 is what actually gets drawn.
+ *
+ * This mirrors what the Traxx fork had to add for the same reason: GetAniName(0) is only
+ * useful if the frame it names has itself been loaded, and nothing was loading it, so
+ * keyframed objects drew as empty wireframes.
+ *
+ * The frame's geometry is adopted under the CONTROL model's name, because that is the name
+ * the .SIT refers to and everything downstream keys off it.
+ */
+function resolveKeyframeModel(model, loadFrame) {
+  if (!model || model.format !== "ANIMATED_BIN") return model;
+  for (const frameName of model.frameNames ?? []) {
+    const frame = loadFrame(frameName);
+    if (!frame?.meshes?.length) continue;
+    return {
+      ...frame,
+      name: model.name,
+      format: model.format,
+      frameNames: model.frameNames,
+      resolvedFrame: frameName,
+    };
+  }
+  return model;
+}
+
+// Hellbender's terrain scale is pinned rather than requested. Traxx's ALTITUDESCALE is 3 for
+// everything else, which is now also the requested default, but the HB branch stays explicit
+// because it is deliberately not user-controlled.
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
-  return origin === "HB" ? 3 : (requestedHeightScale ?? 4);
+  return origin === "HB" ? 3 : (requestedHeightScale ?? 3);
 }
 
 function collectTransfers(obj) {

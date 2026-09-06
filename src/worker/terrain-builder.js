@@ -1,4 +1,4 @@
-import { decodeRawTexture } from "./texture-decoder.js";
+import { decodeRawTexture, podRawSide } from "./texture-decoder.js";
 
 const CELL_SIZE = 64;
 const ATLAS_TILE_SIZE = 64;
@@ -219,7 +219,9 @@ function isTvFamilyOrigin(origin) {
 }
 
 function decodeTerrainTexture(tex, trackPalette) {
-  if (!tex?.data || tex.data.length < 4096) return null;
+  // decodeRawTexture is the authority on which byte counts are legal tiles; a 32x32 tile is
+  // 1024 bytes and used to be rejected by a hardcoded 4096 floor here.
+  if (!tex?.data || !podRawSide(tex.data.length)) return null;
   const act = tex.actData ?? trackPalette;
   try {
     return decodeRawTexture(tex.data, act, tex.name);

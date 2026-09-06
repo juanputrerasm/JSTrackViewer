@@ -2,6 +2,7 @@ import { resolveAsset } from "./pod-format.js";
 import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 import { loadGroundBoxes } from "./gbox-loader.js";
 import { loadDefObjects } from "./def-loader.js";
+import { podRawSide } from "./texture-decoder.js";
 
 /**
  * Parses TV-family/HB tracks from a primary LVL entry in a POD archive.
@@ -75,7 +76,8 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
         const skyData = getBytes(skyEntry);
         const skyActEntry = resolveAsset(podIndex, replaceExtension(skyName, ".ACT"));
         const skyAct = skyActEntry ? getBytes(skyActEntry) : doc.palette;
-        doc.skyTexture = { name: skyName, data: skyData, actData: skyAct, width: skyData.length === 65536 ? 256 : 64, height: skyData.length === 65536 ? 256 : 64 };
+        const skySide = podRawSide(skyData.length) || 64;
+        doc.skyTexture = { name: skyName, data: skyData, actData: skyAct, width: skySide, height: skySide };
       }
     }
   }
@@ -133,7 +135,8 @@ function loadTexList(podIndex, getBytes, texEntry, doc) {
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
       tex.data = getBytes(dataEntry);
-      tex.width = tex.data.length === 65536 ? 256 : 64;
+      // Any square power-of-two tile 32..1024, not just 64 and 256 (fork: Pod1RawSide).
+      tex.width = podRawSide(tex.data.length) || 64;
       tex.height = tex.width;
     }
     const texActEntry = resolveTerrainTextureAsset(podIndex, replaceExtension(name, ".ACT"));
@@ -217,7 +220,7 @@ function displayNameForLvl(lines, entryName) {
 }
 
 function inferLvlOrigin(lines) {
-  return lines.some((line) => line.trim() === "!New ground additions") ? "HB" : "TV";
+  return lines.some((line) => line.trim() === "!New ground additions") ? "HB" : "TV/F3";
 }
 
 function prettyLvlName(name) {

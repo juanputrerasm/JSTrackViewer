@@ -208,7 +208,7 @@ function decodeModelTextures(podIndex, getBytes, doc) {
       const actBytes = actEntry ? getBytes(actEntry) : doc.palette;
       try {
         const options = transparentTextureNames.has(name)
-          ? { transparentIndexes: [rawBytes[0]] }
+          ? { cutout: true }
           : undefined;
         const decoded = decodeRawTexture(rawBytes, actBytes, name, options);
         textures.push({ name, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height });

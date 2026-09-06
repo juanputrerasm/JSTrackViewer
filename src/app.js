@@ -14,12 +14,15 @@ export class TrackViewerApp {
     this._currentPodPath = null;
     this._podFilename = "";
     this._podSource = "—";
-    this._heightScale = 4;
+    // Traxx ALTITUDESCALE = 3 (Traxx/TraxxView.h:43). Terrain and object heights both
+    // derive from it, so anything else renders the whole track vertically exaggerated.
+    this._heightScale = 3;
     this._renderFlags = {
       terrain: true, textures: true, grid: false,
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: true,
+      ramps: true,
     };
   }
 
@@ -88,6 +91,7 @@ export class TrackViewerApp {
       "tog-objects":   "objects",
       "tog-billboards": "billboards",
       "tog-checkpoints":"checkpoints",
+      "tog-ramps":     "ramps",
       "tog-gboxes":    "gboxes",
       "tog-cboxes":    "cboxes",
       "tog-water":     "water",

@@ -1,19 +1,103 @@
 import * as THREE from "three";
+import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { TrackCamera } from "./nav.js";
 
 const WATER_COLOR = 0x1a6090;
 const COURSE_COLOR = 0xffdd00;
 const GBOX_COLOR = 0x00ff88;
+// Traxx box types (Include/TrackPODBox.h and cursh2\core\sim.h's enum BoxType).
+const BOXTYPE_CHECKPOINT        = 6;
+const BOXTYPE_NO_COLLIDE_FACING = 8;
+const BOXTYPE_RAMP              = 99;
+
 // Collision box colors matching JTraxx Java constants
 const CBOX_TOP    = 0x8D42FF;
 const CBOX_SIDE   = 0x6A20C8;
 const CBOX_BOTTOM = 0x3F0A80;
 const CBOX_WIRE   = 0x9A4DFF;
+// Traxx draws ramps in a yellow family to tell them apart from the purple collision prisms:
+// BestMatch(200,200,0) / (150,150,0) / (100,100,0) for top, sides and bottom
+// (Traxx/TraxxView.cpp:900-906).
+const RAMP_TOP    = 0xC8C800;
+const RAMP_SIDE   = 0x969600;
+const RAMP_BOTTOM = 0x646400;
+const RAMP_WIRE   = 0xE0E040;
 const GRID_COLOR = 0x444466;
 const AMBIENT_COLOR = 0x888888;
 const SUN_COLOR = 0xfff4e0;
 const BACKGROUND_COLOR = 0xbcd6e7;
 const EMPTY_BACKGROUND_COLOR = 0x151417;
+
+/**
+ * Traxx object rotation, in Traxx space (x east, y north/depth, z up).
+ *
+ * Source of truth is the Traxx editor's object stack, which is identical in the original
+ * and in the Community Patch 3 fork:
+ *
+ *   Traxx/TraxxViewDisplay.cpp:2782-2785     Traxx/OpenGLTerrainRenderer.cpp:2382-2396
+ *     PushZStretch(768)                        ViewStateApplyYRotation(-phi)
+ *     PushZRotation(psi)                       ViewStateApplyXRotation(-theta)
+ *     PushXRotation(theta)                     ViewStateApplyZRotation(-psi)
+ *     PushYRotation(-phi)                      pz *= zstretch/1024
+ *
+ * giving  v_world = S_z(0.75) * Rz(-psi) * Rx(-theta) * Ry(-phi) * v_model + worldpos.
+ *
+ * Note the Z stretch is applied AFTER the rotation, in world space. It is non-uniform, so
+ * it does not commute with the rotation: baking it into the model vertex shears anything
+ * that is pitched or rolled. Callers apply it to the returned r2 row, never to the vertex.
+ *
+ * Returns the three rows of R as arrays of 3.
+ */
+function traxxRotationRows(psi, theta, phi) {
+  const Cp = Math.cos(psi),   Sp = Math.sin(psi);
+  const Ct = Math.cos(theta), St = Math.sin(theta);
+  const Cf = Math.cos(phi),   Sf = Math.sin(phi);
+  return [
+    [ Cp * Cf + Sp * St * Sf,  Sp * Ct,  -Cp * Sf + Sp * St * Cf ],
+    [ -Sp * Cf + Cp * St * Sf, Cp * Ct,   Sp * Sf + Cp * St * Cf ],
+    [ Ct * Sf,                -St,        Ct * Cf ],
+  ];
+}
+
+// Vertical world scale relative to the horizontal one: Traxx is 128 world units per foot
+// horizontally and 96 vertically (Traxx/TraxxView.h:45-61). The 0.75 ratio is exactly the
+// PushZStretch(768) the object stack applies.
+const TRAXX_Z_STRETCH = 0.75;
+
+/**
+ * Object matrix for geometry authored in Traxx local space (BIN models): T * S * R,
+ * where T maps Traxx (jx,jy,jz) -> Three.js (jx, jz, -jy).
+ */
+function traxxModelMatrix(psi, theta, phi, posX, posY, posZ) {
+  const [r0, r1, r2] = traxxRotationRows(psi, theta, phi);
+  const z = TRAXX_Z_STRETCH;
+  return new THREE.Matrix4().set(
+        r0[0],     r0[1],     r0[2], posX,
+    z * r2[0], z * r2[1], z * r2[2], posY,
+       -r1[0],    -r1[1],    -r1[2], posZ,
+            0,         0,         0,    1
+  );
+}
+
+/**
+ * Object matrix for geometry already authored in Three.js axes (the collision prisms and the
+ * ramp wedge): T * S * R * T^-1, i.e. the same rows with columns permuted [c0, c2, -c1].
+ *
+ * Traxx builds its prism from half-extents (width, length, height) on Traxx (x, y, z) and
+ * pushes it through the very same stack as a model (TraxxViewDisplay.cpp:2745-2785), so the
+ * rotation here must match traxxModelMatrix exactly. It previously used +psi, which yawed
+ * every model-less object the wrong way.
+ */
+function traxxPrismMatrix(psi, theta, phi, posX, posY, posZ) {
+  const [r0, r1, r2] = traxxRotationRows(psi, theta, phi);
+  const z = TRAXX_Z_STRETCH;
+  return new THREE.Matrix4().set(
+        r0[0],     r0[2],    -r0[1], posX,
+    z * r2[0], z * r2[2], -z * r2[1], posY,
+       -r1[0],    -r1[2],     r1[1], posZ,
+            0,         0,         0,    1
+  );
+}
 
 export class TrackScene {
   constructor(container) {
@@ -75,6 +159,8 @@ export class TrackScene {
       gboxesWire: new THREE.Group(),
       cboxes:     new THREE.Group(),
       cboxesWire: new THREE.Group(),
+      ramps:      new THREE.Group(),
+      rampsWire:  new THREE.Group(),
       water:      new THREE.Group(),
       trucks:     new THREE.Group(),
       backdrop:   new THREE.Group(),
@@ -167,6 +253,10 @@ export class TrackScene {
     this._groups.gboxesWire.visible = f.gboxes && (f.wireframe === true);
     this._groups.cboxes.visible = f.cboxes;
     this._groups.cboxesWire.visible = f.cboxes && (f.wireframe === true);
+    // A ramp is track the player drives on, not an invisible collision helper, so it follows
+    // the objects toggle rather than the collision-box overlay.
+    this._groups.ramps.visible = f.objects && f.ramps !== false;
+    this._groups.rampsWire.visible = f.objects && f.ramps !== false && (f.wireframe === true);
     this._groups.water.visible = f.water;
     this._groups.trucks.visible = f.trucks !== false;
     this._groups.backdrop.visible = f.backdrop;
@@ -234,6 +324,7 @@ export class TrackScene {
     if (trackData.raceTrackSurfaces?.length) this._buildRaceTrackLayer(trackData);
     this._buildCourses(trackData);
     if (trackData.boxes?.length) this._buildObjects(trackData);
+    this._reportMissingModelTextures(trackData);
     if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
 
@@ -322,14 +413,16 @@ export class TrackScene {
       const srcPos = new Float32Array(mesh.positions);
       const backdropPos = new Float32Array(srcPos.length);
 
-      // Stored positions are in JTraxx-local space: (v - anchor) * [1, 1, 0.75]
-      // Backdrop needs raw scaled positions relative to camera in Three.js axes:
-      //   three.x = local.x + anchor.x   (JTraxx X → Three.js X)
-      //   three.y = local.z / 0.75 + anchor.z  (JTraxx Z → Three.js Y, undo 0.75)
-      //   three.z = -(local.y + anchor.y) (JTraxx Y depth → Three.js -Z)
+      // Stored positions are raw Traxx local space, (v - anchor), unscaled.
+      // The backdrop is NOT an object: Traxx gives it its own stack, PushZStretch(1200)
+      // rather than the objects' 768 (OpenGLTerrainRenderer.cpp:2720-2721), so the object
+      // height stretch must not be applied here. Un-anchor and swap to Three.js axes:
+      //   three.x = local.x + anchor.x    (Traxx X → Three.js X)
+      //   three.y = local.z + anchor.z    (Traxx Z → Three.js Y)
+      //   three.z = -(local.y + anchor.y) (Traxx Y depth → Three.js -Z)
       for (let i = 0; i < srcPos.length; i += 3) {
         backdropPos[i]     = srcPos[i]     + anchor.x;
-        backdropPos[i + 1] = srcPos[i + 2] / 0.75 + anchor.z;
+        backdropPos[i + 1] = srcPos[i + 2] + anchor.z;
         backdropPos[i + 2] = -(srcPos[i + 1] + anchor.y);
       }
 
@@ -524,6 +617,10 @@ export class TrackScene {
     const cboxMatTop    = new THREE.MeshBasicMaterial({ color: CBOX_TOP,    transparent: true, opacity: 0.75 });
     const cboxMatBottom = new THREE.MeshBasicMaterial({ color: CBOX_BOTTOM, transparent: true, opacity: 0.75 });
     const cboxWireMat   = new THREE.LineBasicMaterial({ color: CBOX_WIRE });
+    const rampMatSide   = new THREE.MeshBasicMaterial({ color: RAMP_SIDE,   transparent: true, opacity: 0.75 });
+    const rampMatTop    = new THREE.MeshBasicMaterial({ color: RAMP_TOP,    transparent: true, opacity: 0.75 });
+    const rampMatBottom = new THREE.MeshBasicMaterial({ color: RAMP_BOTTOM, transparent: true, opacity: 0.75 });
+    const rampWireMat   = new THREE.LineBasicMaterial({ color: RAMP_WIRE });
 
     for (const box of trackData.boxes ?? []) {
       if (trackData.origin === "HB" && box.hellbenderUndergroundHidden) continue;
@@ -531,29 +628,100 @@ export class TrackScene {
       const modelName = box.modelName;
       const model = modelName ? trackData.models?.[modelName] : null;
       const renderModel = model?.meshes?.length;
-      const isBillboard = box.type === 8;
-      const isCheckpoint = box.type === 6;
+      const isBillboard = box.type === BOXTYPE_NO_COLLIDE_FACING;
+      const isCheckpoint = box.type === BOXTYPE_CHECKPOINT;
+      const isRamp = box.type === BOXTYPE_RAMP;
 
       if (renderModel) {
         this._buildBinModel(model, box, hs, ws, trackData, { checkpoint: isCheckpoint, billboard: isBillboard });
       }
 
       if (!renderModel) {
+        // Traxx half-extents are width/length/height as authored; THREE.BoxGeometry takes
+        // full sizes, hence the doubling.
         const hw = (box.width  ?? 32) * 2;
         const hh = (box.height ?? 32) * 2;
         const hl = (box.length ?? 32) * 2;
-        const cGeo = this._buildCboxGeometry(hw, hh, hl);
-        const cMesh = new THREE.Mesh(cGeo, [cboxMatSide, cboxMatTop, cboxMatBottom]);
-        this._applyBoxMatrix(cMesh, box, wz * hs, wx, ws - wy);
-        this._groups.cboxes.add(cMesh);
+        const posY = wz * hs;
 
-        const wGeo = new THREE.BoxGeometry(hw, hh, hl);
-        const wEdges = new THREE.EdgesGeometry(wGeo);
-        const wBox = new THREE.LineSegments(wEdges, cboxWireMat);
-        this._applyBoxMatrix(wBox, box, wz * hs, wx, ws - wy);
-        this._groups.cboxesWire.add(wBox);
+        // A ramp with no model is the procedural wedge, not a prism.
+        const geo = isRamp
+          ? this._buildRampGeometry(box.width ?? 32, box.length ?? 32, box.height ?? 32)
+          : this._buildCboxGeometry(hw, hh, hl);
+        const mats = isRamp
+          ? [rampMatSide, rampMatTop, rampMatBottom]
+          : [cboxMatSide, cboxMatTop, cboxMatBottom];
+
+        const cMesh = new THREE.Mesh(geo, mats);
+        this._applyBoxMatrix(cMesh, box, posY, wx, ws - wy);
+        (isRamp ? this._groups.ramps : this._groups.cboxes).add(cMesh);
+
+        const wEdges = new THREE.EdgesGeometry(
+          isRamp ? geo : new THREE.BoxGeometry(hw, hh, hl)
+        );
+        const wBox = new THREE.LineSegments(wEdges, isRamp ? rampWireMat : cboxWireMat);
+        this._applyBoxMatrix(wBox, box, posY, wx, ws - wy);
+        (isRamp ? this._groups.rampsWire : this._groups.cboxesWire).add(wBox);
       }
     }
+  }
+
+  /**
+   * Ramp wedge, transcribed from Traxx's `ramppoly` (Traxx/TraxxView.cpp:876-995).
+   *
+   * Traxx builds the ramp from the SAME eight corners as a collision prism and only varies
+   * the polygon list, so the wedge is a box with corners 4 and 7 (the top of the low edge)
+   * simply not used. In Traxx local space the corners are
+   *   v0..v3 = z=-h, (-w,-l) (-w,+l) (+w,+l) (+w,-l)
+   *   v4..v7 = z=+h, same order
+   * and the slope climbs from the -y edge to the +y edge.
+   *
+   * Faces, straight from the AddPolygon calls:
+   *   bottom  (0,2,1) (2,0,3)
+   *   slope   (0,5,3) (3,5,6)
+   *   sides   (2,3,6) (1,5,0) (5,1,6) (6,1,2)
+   *
+   * Every triangle is emitted with its winding reversed, because Traxx's winding produces
+   * inward normals under the right-hand rule (the same reason BIN meshes render BackSide).
+   *
+   * Authored in Three.js axes so it can share `traxxPrismMatrix` with the collision prisms:
+   * three.x = traxx.x, three.y = traxx.z, three.z = -traxx.y.
+   */
+  _buildRampGeometry(w, l, h) {
+    const v = [
+      [-w, -h,  l],  // 0
+      [-w, -h, -l],  // 1
+      [ w, -h, -l],  // 2
+      [ w, -h,  l],  // 3
+      [-w,  h,  l],  // 4 (unused by the ramp)
+      [-w,  h, -l],  // 5
+      [ w,  h, -l],  // 6
+      [ w,  h,  l],  // 7 (unused by the ramp)
+    ];
+
+    // [tri, materialGroup] with group 0 = sides, 1 = top, 2 = bottom, matching _buildCboxGeometry.
+    const faces = [
+      [[0, 1, 2], 2], [[2, 3, 0], 2],
+      [[0, 3, 5], 1], [[3, 6, 5], 1],
+      [[2, 6, 3], 0], [[1, 0, 5], 0], [[5, 6, 1], 0], [[6, 2, 1], 0],
+    ];
+
+    const positions = new Float32Array(faces.length * 9);
+    const geo = new THREE.BufferGeometry();
+    let o = 0;
+    for (const [tri] of faces) {
+      for (const idx of tri) {
+        positions[o++] = v[idx][0];
+        positions[o++] = v[idx][1];
+        positions[o++] = v[idx][2];
+      }
+    }
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+
+    geo.clearGroups();
+    for (let i = 0; i < faces.length; i++) geo.addGroup(i * 3, 3, faces[i][1]);
+    return geo;
   }
 
   // Box geometry with 3 material groups: sides (0), top (1), bottom (2)
@@ -570,30 +738,70 @@ export class TrackScene {
     return geo;
   }
 
-  // Apply box rotation matrix (using SIT radians directly, cbox uses +psi per Java buildBoxPrism)
+  // Collision prism / ramp wedge orientation. Geometry is authored in Three.js axes, so this
+  // uses the conjugated form; the rotation itself is the same one models get.
   _applyBoxMatrix(obj, box, posY, posX, posZ) {
-    const psi   = box.psi   ?? 0;
-    const theta = box.theta ?? 0;
-    const phi   = box.phi   ?? 0;
-    const Cp = Math.cos(psi),   Sp = Math.sin(psi);
-    const Ct = Math.cos(theta), St = Math.sin(theta);
-    const Cf = Math.cos(phi),   Sf = Math.sin(phi);
-    // Cbox uses +psi (matches Java buildBoxPrism: rotateZ(v, +psi))
-    const Rx0 = Cf*Cp - Sf*St*Sp,  Rx1 = -Cf*Sp - Sf*St*Cp,  Rx2 = -Sf*Ct;
-    const Ry0 = Sp*Ct,              Ry1 =  Cp*Ct,              Ry2 = -St;
-    const Rz0 = Sf*Cp + Cf*St*Sp,  Rz1 = -Sf*Sp + Cf*St*Cp,  Rz2 =  Cf*Ct;
-    // The box geometry is in Three.js space, so apply T*R_cbox*T^{-1}:
-    // Row 0: [Rx0, Rx2, -Rx1, posX]
-    // Row 1: [Rz0, Rz2, -Rz1, posY]
-    // Row 2: [-Ry0, -Ry2, Ry1, posZ]
     obj.matrixAutoUpdate = false;
-    obj.matrix.set(
-       Rx0,  Rx2, -Rx1,  posX,
-       Rz0,  Rz2, -Rz1,  posY,
-      -Ry0, -Ry2,  Ry1,  posZ,
-       0,    0,    0,     1
-    );
+    obj.matrix.copy(traxxPrismMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ));
     obj.matrixWorldNeedsUpdate = true;
+  }
+
+  /**
+   * Build the Three.js material for one BIN mesh.
+   *
+   * Ported from JSPod's BIN viewer (src/preview/bin-preview.js createPreviewMaterial). A mesh
+   * that came from an MRGL_MATERIAL states its own shading; one that did not falls back to
+   * the legacy rule that face types 0x11 / 0x33 are cutouts.
+   *
+   * Legacy BIN meshes are wound opposite to Three.js' default front-face expectation, so
+   * BackSide is the norm and the material's own TWOSIDED flag is what turns that off.
+   */
+  _createModelMaterial(mesh) {
+    const F = MATERIAL_FLAGS;
+    const material = mesh.material;
+    const flags = material?.flags ?? 0;
+    const map = mesh.textureName ? this._modelTexCache[mesh.textureName] : null;
+
+    // Alpha cutouts belong in the opaque queue and must write depth, so ALPHATEST takes
+    // precedence over BLEND when a material carries both.
+    const alphaTested = material ? !!(flags & F.ALPHATEST) : !!mesh.transparent;
+    const blended = material
+      ? !!(flags & F.BLEND) && !alphaTested
+      : false;
+
+    const tint = material && (flags & F.TINT) ? material.tint : [1, 1, 1];
+    const channel = (v) => Math.round(Math.min(1, Math.max(0, v ?? 1)) * 255);
+    const color = map
+      ? new THREE.Color((channel(tint[0]) << 16) | (channel(tint[1]) << 8) | channel(tint[2]))
+      : new THREE.Color(mesh.color ?? 0xaaaaaa);
+
+    const props = {
+      color,
+      map: map ?? null,
+      side: material && (flags & F.TWOSIDED) ? THREE.DoubleSide : THREE.BackSide,
+      transparent: blended,
+      opacity: blended ? Math.min(1, Math.max(0, material?.baseAlpha ?? 1)) : 1,
+      alphaTest: alphaTested
+        ? (flags & F.ALPHAREF ? Math.min(1, Math.max(0, (material?.alphaRef ?? 128) / 255)) : 0.5)
+        : 0,
+      depthWrite: alphaTested || !(flags & F.NOZWRITE),
+      blending: flags & F.ADDITIVE ? THREE.AdditiveBlending : THREE.NormalBlending,
+    };
+
+    // A material that is not marked LIT is drawn unshaded, as the engine does.
+    if (material && !(flags & F.LIT)) return new THREE.MeshBasicMaterial(props);
+
+    // Legacy meshes keep the Lambert shading the rest of the scene uses. A mesh that carries
+    // a real material gets Phong, because specPower and emissive have nowhere to go on a
+    // Lambert material and they are half of what the material is for.
+    if (!material) return new THREE.MeshLambertMaterial(props);
+
+    return new THREE.MeshPhongMaterial({
+      ...props,
+      shininess: Math.max(0, material.specPower ?? 0),
+      emissive: flags & F.EMISSIVE ? new THREE.Color(0xffffff) : new THREE.Color(0x000000),
+      emissiveIntensity: flags & F.EMISSIVE ? Math.min(1, Math.max(0, material.emissive ?? 0)) : 0,
+    });
   }
 
   _buildBinModel(model, box, hs, ws, trackData, options = {}) {
@@ -606,30 +814,10 @@ export class TrackScene {
     const posY = trackData.origin === "HB" ? wz * 3 : wz * hs + (model.baseZ ?? 0) * 0.75;
     const posZ = ws - wy;
 
-    // SIT angles are in RADIANS: psi=yaw (around JTraxx Z height), theta=pitch (X), phi=roll (Y depth)
-    // Java applies: rotateZ(-psi) → rotateX(theta) → rotateY(-phi) in JTraxx local space
-    // Vertices are stored in JTraxx local space with 0.75 on Z, so the matrix is T*R
-    // where T maps (jx,jy,jz) → (jx, jz, -jy) (Three.js axes)
-    const psi   = box.psi   ?? 0;
-    const theta = box.theta ?? 0;
-    const phi   = box.phi   ?? 0;
-
-    const Cp = Math.cos(psi),   Sp = Math.sin(psi);
-    const Ct = Math.cos(theta), St = Math.sin(theta);
-    const Cf = Math.cos(phi),   Sf = Math.sin(phi);
-
-    // Java rotation matrix rows in JTraxx space (R = R_Y(-phi) * R_X(theta) * R_Z(-psi)):
-    const Rx0 = Cf*Cp + Sf*St*Sp,  Rx1 = Cf*Sp - Sf*St*Cp,  Rx2 = -Sf*Ct;
-    const Ry0 = -Ct*Sp,             Ry1 =  Ct*Cp,            Ry2 = -St;
-    const Rz0 = Sf*Cp - Cf*St*Sp,  Rz1 = Sf*Sp + Cf*St*Cp,  Rz2 =  Cf*Ct;
-
-    // Combined T*R matrix: Three.js X←JTraxx X (Rx), Y←JTraxx Z (Rz), Z←(-JTraxx Y) (-Ry)
-    const modelMatrix = new THREE.Matrix4().set(
-       Rx0,  Rx1,  Rx2,  posX,
-       Rz0,  Rz1,  Rz2,  posY,
-      -Ry0, -Ry1, -Ry2,  posZ,
-       0,    0,    0,     1
-    );
+    // SIT angles are in RADIANS: psi=yaw (around Traxx Z height), theta=pitch (X), phi=roll (Y depth).
+    // Model vertices are in raw Traxx local space; the 0.75 height stretch lives in the matrix,
+    // because Traxx applies it after the rotation and it does not commute with one.
+    const modelMatrix = traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ);
 
     const group = new THREE.Group();
     const meshRoot = billboard ? new THREE.Group() : group;
@@ -645,29 +833,30 @@ export class TrackScene {
       geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
       geo.computeBoundingSphere();
 
-      let mat;
-      const texName = mesh.textureName;
-      const alphaOpts = mesh.transparent ? { alphaTest: 0.5 } : {};
-      // Legacy BIN meshes are wound opposite to Three.js' default front-face expectation.
-      // Using BackSide matches the original renderer path, which culls front faces.
-      if (texName && this._modelTexCache[texName]) {
-        mat = new THREE.MeshLambertMaterial({ map: this._modelTexCache[texName], side: THREE.BackSide, ...alphaOpts });
-      } else {
-        const c = mesh.color ?? 0xaaaaaa;
-        const r = ((c >> 16) & 0xff) / 255;
-        const g = ((c >> 8)  & 0xff) / 255;
-        const b = (c & 0xff) / 255;
-        mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(r, g, b), side: THREE.BackSide });
-      }
-      meshRoot.add(new THREE.Mesh(geo, mat));
+      meshRoot.add(new THREE.Mesh(geo, this._createModelMaterial(mesh)));
       wireRoot.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
     }
 
     if (billboard) {
       group.position.set(posX, posY, posZ);
       wireGroup.position.copy(group.position);
-      group.userData.staticQuaternion = group.quaternion.clone();
-      wireGroup.userData.staticQuaternion = wireGroup.quaternion.clone();
+
+      // Facing props are yawed toward the camera each frame, but the 0.75 vertical world
+      // stretch still applies. Three composes local matrices as T*R*S, and a scale of
+      // (1, 0.75, 1) commutes with the pure Y-axis rotation `lookAt` produces, so putting it
+      // on the group's scale is equivalent to Traxx applying it after the rotation.
+      group.scale.set(1, TRAXX_Z_STRETCH, 1);
+      wireGroup.scale.copy(group.scale);
+
+      // The authored orientation, kept so that turning the billboard toggle off restores what
+      // the .SIT actually says rather than snapping the prop to yaw 0. Traxx never billboards
+      // type-8 objects at all: it draws every box with its authored psi/theta/phi, so the
+      // toggle-off state has to equal the ordinary object path exactly.
+      //
+      // This is stored as a full matrix rather than a quaternion on purpose: it carries the
+      // non-uniform 0.75, so it is not a pure rotation and a quaternion cannot represent it.
+      group.userData.staticMatrix = modelMatrix.clone();
+      wireGroup.userData.staticMatrix = modelMatrix.clone();
 
       const localAxisMatrix = new THREE.Matrix4().set(
          1,  0, 0, 0,
@@ -707,12 +896,35 @@ export class TrackScene {
     }
     const orient = (group) => {
       for (const obj of group.children) {
+        // May have been pinned to its authored matrix while the toggle was off.
+        obj.matrixAutoUpdate = true;
         target.set(this._camera.position.x, obj.position.y, this._camera.position.z);
         obj.lookAt(target);
       }
     };
     orient(this._groups.billboards);
     orient(this._groups.billboardsWire);
+  }
+
+  /**
+   * Report any mesh whose texture never made it into the cache. Such a mesh silently falls
+   * back to a colour derived from its texture NAME, which looks like a deliberate flat colour
+   * rather than a missing texture, so it needs saying out loud.
+   */
+  _reportMissingModelTextures(trackData) {
+    const missing = new Map();
+    for (const [modelName, model] of Object.entries(trackData.models ?? {})) {
+      for (const mesh of model.meshes ?? []) {
+        if (!mesh.textureName || this._modelTexCache[mesh.textureName]) continue;
+        if (!missing.has(mesh.textureName)) missing.set(mesh.textureName, []);
+        missing.get(mesh.textureName).push(modelName);
+      }
+    }
+    if (!missing.size) return;
+    const lines = [...missing].map(([tex, models]) => `${tex} (used by ${models.join(", ")})`);
+    console.warn(`[JSTrackViewer] ${missing.size} model texture(s) not in cache, meshes will `
+      + `render in a placeholder colour:\n  ` + lines.join("\n  ")
+      + `\n  cache has: ${Object.keys(this._modelTexCache).join(", ") || "(empty)"}`);
   }
 
   _loadModelTextures(modelTextures) {
@@ -907,11 +1119,16 @@ export class TrackScene {
   }
 }
 
+// With billboarding off, a facing prop falls back to the orientation the .SIT authored, which
+// is what Traxx itself always draws. The stored matrix includes the non-uniform height
+// stretch, so it is applied whole rather than decomposed.
 function resetBillboardGroup(group) {
   for (const obj of group.children) {
-    if (obj.userData.staticQuaternion) {
-      obj.quaternion.copy(obj.userData.staticQuaternion);
-    }
+    const staticMatrix = obj.userData.staticMatrix;
+    if (!staticMatrix) continue;
+    obj.matrixAutoUpdate = false;
+    obj.matrix.copy(staticMatrix);
+    obj.matrixWorldNeedsUpdate = true;
   }
 }
 

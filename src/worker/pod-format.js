@@ -23,7 +23,7 @@ export async function indexPodFile(opfsPodPath) {
   const entries = [];
   for (let i = 0; i < itemCount; i++) {
     const offset = i * ENTRY_SIZE;
-    const name = decodeNullTerminated(decoder, tableBytesView.subarray(offset, offset + ENTRY_NAME_SIZE));
+    const { name, paletteName } = decodePod1NameField(decoder, tableBytesView, offset, ENTRY_NAME_SIZE);
     const length = tableView.getUint32(offset + ENTRY_NAME_SIZE, true);
     const dataOffset = tableView.getUint32(offset + ENTRY_NAME_SIZE + 4, true);
     entries.push({
@@ -31,10 +31,43 @@ export async function indexPodFile(opfsPodPath) {
       normalizedName: normalizeArchiveName(name),
       title: archiveTitle(name),
       length,
-      offset: dataOffset
+      offset: dataOffset,
+      // The .ACT this texture was authored against, when the archive records one.
+      paletteName
     });
   }
   return { comment, entries };
+}
+
+/*
+  A POD1 name field is 32 bytes and can hold TWO NUL-terminated strings: the entry path, and
+  then, for a .RAW texture, the name of the .ACT palette it was authored against.
+
+  Reading only up to the first NUL throws that second string away, which is why so many
+  textures had no palette to resolve to. It is the archive stating the answer outright, so it
+  outranks every heuristic except a same-stem .ACT sitting next to the texture.
+*/
+function decodePod1NameField(decoder, bytes, offset, width) {
+  const limit = Math.min(offset + width, bytes.length);
+  let pathEnd = offset;
+  while (pathEnd < limit && bytes[pathEnd] !== 0) pathEnd++;
+  const name = trimPodString(decoder.decode(bytes.subarray(offset, pathEnd)));
+
+  let paletteName = null;
+  if (name.toUpperCase().endsWith(".RAW") && pathEnd < limit - 1) {
+    const paletteStart = pathEnd + 1;
+    let paletteEnd = paletteStart;
+    while (paletteEnd < limit && bytes[paletteEnd] !== 0) paletteEnd++;
+    const candidate = trimPodString(decoder.decode(bytes.subarray(paletteStart, paletteEnd)));
+    // Only accept a properly terminated string that actually names a palette; the tail of the
+    // field is otherwise junk left over from whatever the packer had in the buffer.
+    if (paletteEnd < limit && candidate.toUpperCase().endsWith(".ACT")) paletteName = candidate;
+  }
+  return { name, paletteName };
+}
+
+function trimPodString(value) {
+  return value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
 }
 
 export async function readPodEntryBytes(opfsPodPath, entry) {

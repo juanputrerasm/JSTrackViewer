@@ -3,6 +3,7 @@ import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/
 import { loadGroundBoxes } from "./gbox-loader.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { loadRaceTrackLayer } from "./racetrack-loader.js";
+import { podRawSide } from "./texture-decoder.js";
 
 /**
  * Parses MTM2/MTM1/CPR tracks from a SIT entry in a POD archive.
@@ -176,7 +177,10 @@ function parseBoxSection(lines, sectionHeader, doc, isRamp) {
 }
 
 function parseBoxBlock(lines, blockStart, isRamp, doc) {
-  const box = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, length: 64, width: 64, height: 64, modelName: "", mass: 0, type: isRamp ? 8 : 0, flags: 0, checkpointSequence: -1 };
+  // BOXTYPE_RAMP is 99 (Include/TrackPODBox.h:37). It used to be tagged 8, which is
+  // TYPE_NO_COLLIDE_FACING, so every ramp was routed into the camera-facing billboard group
+  // and drawn as a billboarded collision prism instead of a wedge.
+  const box = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, length: 64, width: 64, height: 64, modelName: "", mass: 0, type: isRamp ? 99 : 0, flags: 0, checkpointSequence: -1 };
   const blockEnd = nextBlockStart(lines, blockStart + 1);
   const endIndex = blockEnd >= 0 ? blockEnd : lines.length;
 
@@ -328,7 +332,8 @@ function loadTexList(podIndex, getBytes, texEntry, doc, preserveSlots) {
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
       tex.data = getBytes(dataEntry);
-      tex.width = tex.data.length === 65536 ? 256 : 64;
+      // Any square power-of-two tile 32..1024, not just 64 and 256 (fork: Pod1RawSide).
+      tex.width = podRawSide(tex.data.length) || 64;
       tex.height = tex.width;
     }
     // Per-texture ACT
@@ -394,6 +399,15 @@ function inferTerrain(doc) {
   }
 }
 
+// .SIT positions are feet; Traxx stores them as ipos = 2*feet horizontally and feet/2
+// vertically, wrapping negatives into the 16384-unit world (TrackPODFile.cpp Pod1SitToIpos).
+//
+// Traxx itself has to quantise, because ipos is an int: the original truncated with
+// `2*(int)atof(..)`, which lost half-steps and made positions walk downward on every
+// load/save round trip, and the Community Patch 3 fork fixed that by carrying a separate
+// 1/256-of-a-step fraction per axis (xfraction/yfraction/zfraction). A viewer never writes
+// the file back, so it needs neither the split nor the quantisation: keeping the value as a
+// float is strictly more precise than either.
 function parseLegacyWorldTriplet(value, rawBytesPerCell) {
   const parts = value.split(",");
   if (parts.length < 3) return [0, 0, 0];
@@ -401,9 +415,11 @@ function parseLegacyWorldTriplet(value, rawBytesPerCell) {
   let x = 2 * parseFloat(parts[0].trim());
   let y = 2 * parseFloat(parts[2].trim());
   const z = parseFloat(parts[1].trim()) / vDiv;
+  if (!Number.isFinite(x)) x = 0;
+  if (!Number.isFinite(y)) y = 0;
   if (x < 0) x += 16384;
   if (y < 0) y += 16384;
-  return [Math.round(x), Math.round(y), Math.round(z)];
+  return [x, y, Number.isFinite(z) ? z : 0];
 }
 
 function detectSitOrigin(sitLines) {
