@@ -6,6 +6,18 @@ const TURN_SPEED = 80;         // degrees/sec
 const PITCH_SPEED = 60;        // degrees/sec
 const HEIGHT_SPEED_BASE = 2000; // world units/sec
 
+/** .NAV entry type 6, the level's start point. */
+const NAV_START_POINT = 6;
+
+/*
+  How far above the start point's own altitude to place the camera.
+
+  The game starts the player flying, not standing, and the start point's stored altitude is
+  ground level at that square. A fixed lift keeps the opening view clear of the terrain
+  without moving the camera away from the position the level actually names.
+*/
+const START_POINT_EYE_HEIGHT = 400;
+
 export class TrackCamera {
   constructor(camera) {
     this.camera = camera;
@@ -79,6 +91,26 @@ export class TrackCamera {
     this._trackCellSize = cellSize;
     this._trackHeightScale = heightScale;
     const worldSize = gridSize * cellSize;
+
+    /*
+      A TV-family level has no course, so it used to open at the centre of the map every time.
+      Its .NAV start point is the real answer: the position the game drops the player at, and
+      the heading it points them in.
+
+      Heading runs clockwise from north over 65536 units, which is the same convention as
+      `yaw` here, so it converts by scale alone. Pitch and bank are in the file too but the
+      F!Zone manual states the game ignores them.
+    */
+    const startPoint = trackData?.navPoints?.find((p) => p.type === NAV_START_POINT);
+    if (startPoint?.position) {
+      const [ex, ey, altitude] = startPoint.position;
+      this.position.set(ex, altitude * heightScale + START_POINT_EYE_HEIGHT, worldSize - ey);
+      this.yaw = (((startPoint.heading ?? 0) / 65536) * 360 % 360 + 360) % 360;
+      this.pitch = -10;
+      this._applyToCamera();
+      return;
+    }
+
     const first = trackData?.primaryCourse?.segments?.[0];
     if (!first?.start || !first?.end) {
       this.resetToTrackCenter(gridSize, cellSize, heightScale);

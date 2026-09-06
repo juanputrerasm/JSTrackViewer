@@ -47,6 +47,53 @@ const RAMP_TOP    = 0xC8C800;
 const RAMP_SIDE   = 0x969600;
 const RAMP_BOTTOM = 0x646400;
 const RAMP_WIRE   = 0xE0E040;
+/*
+  TV-family marker colours.
+
+  The marker layers stand in for content the viewer cannot draw as geometry: navigation
+  points, tunnel mouths and powerup pickups. They are colour-coded by role rather than
+  textured, and drawn with depth testing off so a marker inside a hill is still findable.
+*/
+const NAV_COLORS = {
+  0: 0xff4444,   // target list
+  1: 0x00ccff,   // tunnel entrance
+  2: 0xffdd00,   // checkpoint
+  3: 0x44ff44,   // jump zone
+  4: 0x0088cc,   // tunnel exit
+  5: 0xff00ff,   // boss
+  6: 0xffffff,   // start point
+};
+const NAV_DEFAULT_COLOR = 0xaaaaaa;
+const NAV_START_POINT = 6;
+const TUNNEL_ENTRANCE_COLOR = 0x00ccff;
+const TUNNEL_EXIT_COLOR = 0x0066aa;
+const POWERUP_COLOR = 0x66ff99;
+const MARKER_HEAD_RADIUS = 22;
+/** Where the label floats above the ground, in world units. */
+const MARKER_LABEL_HEIGHT = 90;
+/** Label height as a fraction of the viewport, since labels do not scale with distance. */
+const LABEL_SCREEN_HEIGHT = 0.035;
+const HEADING_ARROW_LENGTH = 220;
+
+/*
+  The short type tag on a navigation marker.
+
+  Enough to tell an objective from a checkpoint at a glance, and to say which tunnel a tunnel
+  point leads to, without turning the label into a sentence. The full detail is in the
+  Navigation Points panel.
+*/
+function navLabelSuffix(point) {
+  switch (point.type) {
+    case 0: return `target x${point.targets?.length ?? 0}`;
+    case 1: return `enter ${(point.tunnelLevel ?? "").replace(/\.LVL$/, "")}`;
+    case 2: return "checkpoint";
+    case 3: return "jump zone";
+    case 4: return "tunnel exit";
+    case 5: return "boss";
+    case 6: return "start";
+    default: return point.typeName ?? "";
+  }
+}
 const GRID_COLOR = 0x444466;
 const AMBIENT_COLOR = 0x888888;
 const SUN_COLOR = 0xfff4e0;
@@ -133,8 +180,10 @@ export class TrackScene {
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: true,
+      navpoints: true, tunnels: true, powerups: true, animate: true,
     };
     this._heightScale = 4;
+    this._labelTextures = [];
     this._lastTime = 0;
     this._terrainAtlasN = 1;
     this._terrainAtlasCols = 1;
@@ -186,6 +235,9 @@ export class TrackScene {
       cboxesWire: new THREE.Group(),
       ramps:      new THREE.Group(),
       rampsWire:  new THREE.Group(),
+      navPoints:  new THREE.Group(),
+      tunnels:    new THREE.Group(),
+      powerups:   new THREE.Group(),
       water:      new THREE.Group(),
       trucks:     new THREE.Group(),
       backdrop:   new THREE.Group(),
@@ -249,6 +301,7 @@ export class TrackScene {
       // Keep backdrop centered on camera so it never appears to move
       if (this._backdropMesh) this._backdropMesh.position.copy(this._camera.position);
       this._updateBillboards();
+      this._updateTextureAnimations(dt);
       this._renderer.render(this._scene, this._camera);
     };
     requestAnimationFrame((t) => { this._lastTime = t; requestAnimationFrame(loop); });
@@ -282,6 +335,9 @@ export class TrackScene {
     // the objects toggle rather than the collision-box overlay.
     this._groups.ramps.visible = f.objects && f.ramps !== false;
     this._groups.rampsWire.visible = f.objects && f.ramps !== false && (f.wireframe === true);
+    this._groups.navPoints.visible = f.navpoints !== false;
+    this._groups.tunnels.visible = f.tunnels !== false;
+    this._groups.powerups.visible = f.powerups !== false;
     this._groups.water.visible = f.water;
     this._groups.trucks.visible = f.trucks !== false;
     this._groups.backdrop.visible = f.backdrop;
@@ -323,6 +379,11 @@ export class TrackScene {
     this._terrainAtlasSourceTileSize = 64;
     this._backdropMesh = null;
     this._arenaMesh = null;
+    this._terrainRaw = null;
+    for (const texture of this._labelTextures ?? []) texture.dispose();
+    this._labelTextures = [];
+    this._textureAnimations = [];
+    this._animationClock = 0;
     this._modelTexCache = {};
     this._trackData = null;
     this._scene.background = null;
@@ -359,6 +420,10 @@ export class TrackScene {
     this._reportMissingModelTextures(trackData);
     if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
+    if (trackData.navPoints?.length) this._buildNavPoints(trackData);
+    if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
+    if (trackData.powerups?.length) this._buildPowerups(trackData);
+    this._installTextureAnimations(trackData);
 
     this._nav.resetToCourseStart(trackData, this._heightScale);
 
@@ -368,6 +433,9 @@ export class TrackScene {
 
   _buildTerrain(terrainData) {
     const { gridSize, cellSize, positions, normals, uvs, indices, atlas } = terrainData;
+
+    // Kept for marker placement: the raw heightfield is what puts a marker on the ground.
+    this._terrainRaw = terrainData.rawData ? new Uint8Array(terrainData.rawData) : null;
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -577,6 +645,292 @@ export class TrackScene {
       this._groups.courses.add(line);
     };
     addCourse(trackData.primaryCourse, COURSE_COLOR);
+  }
+
+  /*
+    Converts an editor-space position ([x, y, altitude], as .DEF placements use) into scene
+    space. Same transform the object and course builders apply: Z is flipped so editor Y=0
+    (south) lands at the far end of the world, and altitude is scaled by the height scale.
+  */
+  _editorToScene(position, trackData) {
+    const ws = this._worldSize(trackData);
+    return new THREE.Vector3(position[0], position[2] * this._heightScale, ws - position[1]);
+  }
+
+  /*
+    Terrain height, in scene units, under an editor-space position.
+
+    Markers sit on the ground rather than at the height stored in their own record. The stored
+    height is ground level anyway for everything the .DEF places, but .NAV and .PUP records
+    are not all flush with it, and a marker floating over the terrain reads as a position
+    error rather than as a deliberate altitude. Sampling the heightfield makes every marker
+    agree with the surface under it.
+
+    Markers land on cell centres, so averaging the cell's four corners is the bilinear height
+    at the point the marker actually occupies rather than the height of one of its corners.
+  */
+  _terrainHeightAt(editorX, editorY, trackData) {
+    const terrain = trackData.terrain;
+    const raw = this._terrainRaw;
+    if (!raw || !terrain) return 0;
+    const gridSize = terrain.gridSize ?? 256;
+    const bytesPerCell = terrain.rawBytesPerCell ?? 1;
+    const cx = Math.min(gridSize - 1, Math.max(0, Math.floor(editorX / (terrain.cellSize ?? 64))));
+    const cz = Math.min(gridSize - 1, Math.max(0, Math.floor(editorY / (terrain.cellSize ?? 64))));
+
+    let total = 0;
+    for (const [ox, oz] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+      const x = Math.min(gridSize - 1, cx + ox);
+      const z = Math.min(gridSize - 1, cz + oz);
+      const off = (x + z * gridSize) * bytesPerCell;
+      if (bytesPerCell === 1) {
+        total += raw[off] ?? 0;
+      } else {
+        const lo = raw[off] ?? 0;
+        const hi = raw[off + 1] ?? 0;
+        total += hi === 0 ? lo : (lo | (hi << 8)) >>> 6;
+      }
+    }
+    return (total / 4) * this._heightScale;
+  }
+
+  /*
+    An editor-space position dropped onto the terrain surface.
+
+    Falls back to the height stored in the record when the track carries no heightfield, so a
+    marker layer never collapses to y=0 on a track this viewer cannot sample.
+  */
+  _markerGroundPosition(position, trackData) {
+    const point = this._editorToScene(position, trackData);
+    if (this._terrainRaw) point.y = this._terrainHeightAt(position[0], position[1], trackData);
+    return point;
+  }
+
+  /*
+    A text label that keeps a constant size on screen.
+
+    `sizeAttenuation: false` is the point: these are map legends, so a marker on the far side
+    of the world has to stay readable rather than shrink to a pixel. It only works because
+    there are few of them, a handful of navigation points and tunnels per level and 40
+    powerups across every shipped surface level put together.
+
+    The text is drawn to a canvas with a dark outline so it survives over both bright terrain
+    and dark terrain without a backing plate.
+  */
+  _makeLabelSprite(text, color) {
+    const scale = 2;                 // supersample, so the label stays crisp when magnified
+    const fontSize = 26 * scale;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
+    const padding = 8 * scale;
+    canvas.width = Math.ceil(ctx.measureText(text).width) + padding * 2;
+    canvas.height = fontSize + padding * 2;
+
+    // Resizing the canvas resets the context, so the font has to be set again.
+    ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.lineWidth = 5 * scale;
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+    ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+    ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+
+    /*
+      Each label owns its canvas texture, so clearTrack has to release them. The generic
+      teardown there disposes geometry and materials but deliberately not maps, since model
+      textures are shared between meshes; these are not shared, so they are tracked here and
+      disposed by name.
+    */
+    this._labelTextures.push(texture);
+
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: texture, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true,
+    }));
+    sprite.scale.set(LABEL_SCREEN_HEIGHT * (canvas.width / canvas.height), LABEL_SCREEN_HEIGHT, 1);
+    sprite.renderOrder = 1003;
+    return sprite;
+  }
+
+  /*
+    One labelled map marker: a small solid on the ground plus its legend above it.
+
+    Markers are not linked to each other. An entrance and its exit, or two consecutive
+    navigation points, are routinely on opposite sides of the map, and because the viewer
+    draws a single unwrapped copy of the world a line between them would cut straight across
+    terrain the route never crosses. The label carries the association instead.
+
+    Depth testing stays off so a marker inside a hill is still findable, which is the whole
+    reason these layers exist.
+  */
+  _addMapMarker(group, base, color, label) {
+    const geo = new THREE.OctahedronGeometry(MARKER_HEAD_RADIUS, 0);
+    const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
+    const head = new THREE.Mesh(geo, mat);
+    head.position.copy(base).setY(base.y + MARKER_HEAD_RADIUS);
+    head.renderOrder = 1002;
+    group.add(head);
+
+    if (label) {
+      const sprite = this._makeLabelSprite(label, color);
+      sprite.position.copy(base).setY(base.y + MARKER_LABEL_HEIGHT);
+      group.add(sprite);
+    }
+    return head;
+  }
+
+  /*
+    Navigation points from the level's .NAV.
+
+    Numbered NAV1..NAVn in list order, which is the order the level plays, so the sequence is
+    legible from the labels without drawing a route line across a map that does not wrap. The
+    type is appended because it is what distinguishes an objective from a checkpoint, and the
+    start point additionally gets a heading arrow, heading being the one part of its
+    pitch/bank/heading triple that the game uses.
+  */
+  _buildNavPoints(trackData) {
+    const group = this._groups.navPoints;
+    trackData.navPoints.forEach((point, i) => {
+      const base = this._markerGroundPosition(point.position, trackData);
+      const color = NAV_COLORS[point.type] ?? NAV_DEFAULT_COLOR;
+      this._addMapMarker(group, base, color, `NAV${i + 1} ${navLabelSuffix(point)}`);
+      if (point.type === NAV_START_POINT) this._addHeadingArrow(group, base, point.heading, color);
+    });
+  }
+
+  /*
+    The start heading, as an arrow lying on the ground.
+
+    Game headings run clockwise from north over 65536 units, and the scene's north is -Z, so
+    the direction is (sin a, -cos a). That is the same convention TrackCamera.yaw uses, which
+    is why the camera can take the heading unconverted.
+  */
+  _addHeadingArrow(group, base, heading, color) {
+    const a = (heading / 65536) * Math.PI * 2;
+    const dir = new THREE.Vector3(Math.sin(a), 0, -Math.cos(a));
+    const from = base.clone().setY(base.y + MARKER_HEAD_RADIUS);
+    const tip = from.clone().addScaledVector(dir, HEADING_ARROW_LENGTH);
+    const geo = new THREE.BufferGeometry().setFromPoints([from, tip]);
+    const mat = new THREE.LineBasicMaterial({ color, depthTest: false, depthWrite: false });
+    const line = new THREE.Line(geo, mat);
+    line.renderOrder = 1001;
+    group.add(line);
+
+    const headGeo = new THREE.ConeGeometry(24, 64, 8);
+    const head = new THREE.Mesh(headGeo, new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false }));
+    head.position.copy(tip);
+    head.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    head.renderOrder = 1002;
+    group.add(head);
+  }
+
+  /*
+    Tunnel mouths from the level's .TDF.
+
+    Each tunnel contributes two independent markers, "T<n> start" and "T<n> exit", numbered in
+    .TDF order. They are deliberately not joined: a tunnel's two ends are often far apart, and
+    a line between them would imply a path across terrain the tunnel does not follow. Tunnel
+    interiors are separate levels and are not rendered; the mouths are what a map view can
+    honestly show.
+  */
+  _buildTunnelMarkers(trackData) {
+    const group = this._groups.tunnels;
+    trackData.tunnels.forEach((tunnel, i) => {
+      const n = i + 1;
+      const entrance = this._markerGroundPosition(tunnel.entrancePosition, trackData);
+      const exit = this._markerGroundPosition(tunnel.exitPosition, trackData);
+      this._addMapMarker(group, entrance, TUNNEL_ENTRANCE_COLOR, `T${n} start`);
+      this._addMapMarker(group, exit, TUNNEL_EXIT_COLOR, `T${n} exit${tunnel.exitsIntoChamber ? " (chamber)" : ""}`);
+    });
+  }
+
+  /*
+    Loose powerup pickups from the level's .PUP.
+
+    Labelled PUP1..PUPn with the record's type index appended as "t<n>". The index is not
+    expanded into a name: STARTUP.POD carries thirteen POWER*.BIN pickup models, but nothing
+    in any level file maps a .PUP type index onto one of them, and the F!Zone manual describes
+    the powerup list only as an editor enumeration. Reporting the number the level stores is
+    the honest option; inventing a name for it is not.
+  */
+  _buildPowerups(trackData) {
+    const group = this._groups.powerups;
+    trackData.powerups.forEach((powerup, i) => {
+      const base = this._markerGroundPosition(powerup.position, trackData);
+      this._addMapMarker(group, base, POWERUP_COLOR, `PUP${i + 1} t${powerup.type}`);
+    });
+  }
+
+  /*
+    Texture animations from the level's .ANI.
+
+    Two kinds, both reduced by the worker to "write these bytes over this image":
+
+      - model textures, where the frames replace the pixels of one shared DataTexture, so
+        every mesh using that texture animates at once;
+      - terrain slots, where the frames are tile-sized blits into the terrain atlas.
+
+    Nothing here rebuilds geometry or swaps materials, so the cost per frame is one array copy
+    and a needsUpdate flag.
+  */
+  _installTextureAnimations(trackData) {
+    this._textureAnimations = [];
+    this._animationClock = 0;
+
+    for (const animation of trackData.modelTextureAnimations ?? []) {
+      const texture = this._modelTexCache[animation.name];
+      if (!texture) continue;
+      const frames = animation.frames.map((buffer) => new Uint8ClampedArray(buffer));
+      if (frames.length < 2) continue;
+      this._textureAnimations.push({
+        kind: "model", texture, frames, fps: animation.fps, current: -1,
+        target: texture.image.data,
+      });
+    }
+
+    const atlasAnimations = trackData.terrain?.atlas?.animations ?? [];
+    if (atlasAnimations.length && this._terrainAtlasTex) {
+      const atlasData = this._terrainAtlasTex.image.data;
+      const atlasWidth = this._terrainAtlasWidth;
+      for (const animation of atlasAnimations) {
+        const frames = animation.frames.map((buffer) => new Uint8ClampedArray(buffer));
+        if (frames.length < 2) continue;
+        this._textureAnimations.push({
+          kind: "atlas", texture: this._terrainAtlasTex, frames, fps: animation.fps, current: -1,
+          target: atlasData, atlasWidth, x: animation.x, y: animation.y, size: animation.size,
+        });
+      }
+    }
+  }
+
+  _updateTextureAnimations(dt) {
+    const animations = this._textureAnimations;
+    if (!animations?.length) return;
+    if (this._renderFlags.animate === false) return;
+    this._animationClock += dt;
+
+    for (const animation of animations) {
+      const frame = Math.floor(this._animationClock * animation.fps) % animation.frames.length;
+      if (frame === animation.current) continue;
+      animation.current = frame;
+      const source = animation.frames[frame];
+      if (animation.kind === "model") {
+        animation.target.set(source);
+      } else {
+        // Blit one square tile into the atlas, row by row.
+        const { atlasWidth, x, y, size } = animation;
+        for (let row = 0; row < size; row++) {
+          const dst = ((y + row) * atlasWidth + x) * 4;
+          animation.target.set(source.subarray(row * size * 4, (row + 1) * size * 4), dst);
+        }
+      }
+      animation.texture.needsUpdate = true;
+    }
   }
 
   _buildRaceTrackLayer(trackData) {

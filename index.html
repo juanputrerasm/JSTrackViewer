@@ -60,6 +60,10 @@
             <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
             <label><input type="checkbox" id="tog-wireframe"> Wireframe</label>
             <label><input type="checkbox" id="tog-trucks" checked> Trucks</label>
+            <label><input type="checkbox" id="tog-navpoints" checked> Nav points</label>
+            <label><input type="checkbox" id="tog-tunnels" checked> Tunnels</label>
+            <label><input type="checkbox" id="tog-powerups" checked> Powerups</label>
+            <label><input type="checkbox" id="tog-animate" checked> Animate</label>
             <label><input type="checkbox" id="tog-water" checked> Water</label>
             <label><input type="checkbox" id="tog-backdrop" checked> Background</label>
             <label><input type="checkbox" id="tog-shadows" checked> Sun light</label>
@@ -87,6 +91,11 @@
           <dl id="track-info" class="kv-list">
             <dt>Status</dt><dd>No track loaded.</dd>
           </dl>
+        </section>
+
+        <section class="panel" id="nav-panel" hidden>
+          <h2>Navigation Points</h2>
+          <ol id="nav-list" class="nav-list"></ol>
         </section>
 
         <section class="panel" id="stats-panel" hidden>

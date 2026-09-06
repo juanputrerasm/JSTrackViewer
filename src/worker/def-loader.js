@@ -1,7 +1,56 @@
 import { resolveAsset } from "./pod-format.js";
 import { decodeBinModel } from "./bin-decoder.js";
+import { TV_UNITS_PER_HEIGHT_STEP } from "./tv-coords.js";
 
 const TR_ANGLE_TO_RAD = Math.PI * 2.0 / 65536.0;
+
+/*
+  A TV-family enemy definition is a header line followed by a body carrying named separator
+  lines. Terminal Velocity and Fury3 use a 14-line record:
+
+     0  <6 ints>,<complex>.bin,<simple>.bin
+     1  thrust, rotation, fire speed, fire strength, flag
+     2  ...
+     3  ...
+     4  ;NewHit
+     5  <hit / weapon table>
+     6  !NewAtakRet
+     7  attack distance, retreat distance, ...
+     8  <description text>
+     9  #New2ndweapon
+    10  <secondary weapon data>
+    11  %SFX
+    12  <boss fire wav, or null>
+    13  <boss yell wav, or null>
+
+  Hellbender extends the SAME record to 25 lines, appending four more named sections after the
+  boss sound files:
+
+    14  null
+    15  : Path to follow
+    16  0
+    17  = cannonDamage, laserDamage, missileDamage
+    18  65536 / 32768 / 65536
+    21  @ Friendly flag
+    22  0
+    23  { Escape and destroy sound files
+    24  null / <wav>
+
+  The first four separators sit at identical offsets in both, so their presence identifies the
+  shared prefix but NOT the record's length. Treating 14 lines as the whole record breaks
+  Hellbender outright: the last definition's skip lands on ": Path to follow", which is then
+  read as the placement count, and parseDefStructure bails with no objects at all. So the
+  fixed offsets are used only to locate the description, and the body scan still decides where
+  the record ends.
+
+  The description sits at header + 8 in both games ("Cryogenic Container." in HB's HOTH.DEF,
+  "Boss - This crazy guy drives the factories on this world." in Fury3's ATMOS.DEF) and is
+  kept on the placement so the viewer can name what an object actually is.
+*/
+const DEF_BODY_LINES_AFTER_HEADER = 13;
+const DEF_DESCRIPTION_OFFSET = 8;
+const DEF_SEPARATORS = [";NewHit", "!NewAtakRet", "#New2ndweapon", "%SFX"];
+const DEF_SEPARATOR_OFFSETS = [4, 6, 9, 11];
 
 /**
  * Loads TV/F3/HB object placements from a .DEF file.
@@ -22,7 +71,8 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
   const boxes = [];
   const models = {};
 
-  for (const pl of parsed.placements) {
+  for (let placementIndex = 0; placementIndex < parsed.placements.length; placementIndex++) {
+    const pl = parsed.placements[placementIndex];
     if (pl.strength === 0) continue;
     if (pl.defIndex < 0 || pl.defIndex >= parsed.definitions.length) continue;
     const def = parsed.definitions[pl.defIndex];
@@ -56,7 +106,29 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       const wrappedZ = ((gz % g) + g) % g;
       px = wrappedX * cell + half;
       py = wrappedZ * cell + half;
-      pz = Math.max(0, pl.y >> 15);
+      /*
+        The definition's own Y offset is the ONLY thing that lifts a TV/F3 object.
+
+        Placements are authored flush with the ground: across ATMOS.DEF every placement's
+        (y >> 15) equals the heightfield sample at its own cell, with zero error. So an
+        object that hovers in the game hovers because of Enemy Editor field C, "Ground
+        Position from Centroid (X, Y, Z)", which the manual describes as the way "to move an
+        object in any direction from where it would normally be placed into the world" and
+        notes is only ever used on Y.
+
+        The data agrees. Over 1532 definitions in FURY3.POD, FURYSE.POD and TV.pod the X slot
+        is never non-zero and the Z slot is non-zero only in three copies of one line whose
+        intended 51200 was typed "51,200". The 72 definitions that do set Y are the ones that
+        should float: hovercft, octoani, mother, forcegen, bionmssl, radar, roofgun. Without
+        this, every one of them is drawn resting on the terrain.
+
+        The base term keeps its truncating shift rather than becoming a division. More than
+        half of all placement Y values are not multiples of 2^15 (8052 of 15046), so dividing
+        would raise every existing object by a fraction of a step. That is arguably the more
+        faithful reading of a world-unit height, but it is a separate question from this fix,
+        and changing both at once would hide which one moved an object.
+      */
+      pz = Math.max(0, (pl.y >> 15) + def.groundOffsetY / TV_UNITS_PER_HEIGHT_STEP);
     }
 
     boxes.push({
@@ -67,6 +139,14 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       modelName: binName,
       length: 32, width: 32, height: 24,
       type: 0, flags: 0,
+      /*
+        The index into the RAW placement list, which is what .NAV target lists and boss
+        entries name. It is NOT this box's own index: a placement whose definition has no
+        .BIN never becomes a box, so the two lists drift apart.
+      */
+      placementIndex,
+      strength: pl.strength,
+      description: def.description ?? "",
       hellbenderUndergroundHidden: origin === "HB" && pl.y < 0,
     });
   }
@@ -83,8 +163,21 @@ function parseDefStructure(lines) {
   for (let d = 0; d < numDef; d++) {
     idx = findNextEnemyDefinitionHeaderLine(lines, idx);
     if (idx >= lines.length) return null;
-    definitions.push(parseEnemyDefinition(lines[idx++]));
-    idx = skipDefinitionBody(lines, idx, d === numDef - 1);
+    const headerIdx = idx;
+    const description = isFixedDefinitionRecord(lines, headerIdx)
+      ? lines[headerIdx + DEF_DESCRIPTION_OFFSET].trim()
+      : scanDefinitionDescription(lines, headerIdx);
+    definitions.push(parseEnemyDefinition(lines[headerIdx], description));
+    /*
+      Skip past the shared prefix when the separators confirm it, then let the scan find the
+      real end of the record. The jump keeps the scan from mistaking a body line for the next
+      header inside the part of the record whose shape is known; the scan is what copes with
+      Hellbender's longer tail.
+    */
+    const bodyStart = isFixedDefinitionRecord(lines, headerIdx)
+      ? headerIdx + 1 + DEF_BODY_LINES_AFTER_HEADER
+      : headerIdx + 1;
+    idx = skipDefinitionBody(lines, bodyStart, d === numDef - 1);
   }
 
   idx = skipEmpty(lines, idx);
@@ -124,15 +217,71 @@ function findNextEnemyDefinitionHeaderLine(lines, start) {
   return lines.length;
 }
 
-function parseEnemyDefinition(line) {
+/*
+  Parses a definition header: N leading integers, then the complex and simple asset names.
+
+  Every definition in the three shipped archives has exactly six leading integers. Slot 2 is
+  field B (Size) and slots 3, 4, 5 are field C, the (X, Y, Z) ground offset. Slots 0 and 1 are
+  not identified; they are kept so a later reading of them costs nothing.
+*/
+function parseEnemyDefinition(line, description) {
   const p = line.split(",");
-  if (p.length < 2) return { binForHydration: "" };
+  if (p.length < 2) return { binForHydration: "", groundOffsetY: 0, description: "" };
   const complexAsset = p[p.length - 2].trim();
   const simpleAsset = p[p.length - 1].trim();
   const cu = complexAsset.toUpperCase();
   const su = simpleAsset.toUpperCase();
   const binForHydration = cu.endsWith(".BIN") ? cu : su.endsWith(".BIN") ? su : cu;
-  return { complexAsset, simpleAsset, binForHydration };
+
+  const prefix = [];
+  for (let i = 0; i < p.length - 2; i++) {
+    const v = parseInt(p[i].trim(), 10);
+    prefix.push(Number.isFinite(v) ? v : 0);
+  }
+  // Only the canonical six-integer shape is trusted to carry the offset in a known slot.
+  const groundOffsetY = prefix.length === 6 ? prefix[4] : 0;
+  const size = prefix.length === 6 ? prefix[2] : 0;
+
+  return {
+    complexAsset, simpleAsset, binForHydration,
+    prefix, size, groundOffsetY,
+    description: description ?? "",
+  };
+}
+
+/*
+  Recovers the description from a definition that is not in the 14-line form.
+
+  About one definition in ten is a shorter record with no separators, typically four numeric
+  lines then the text (FURY3's CITY-T1.DEF: "Data not available"). The description is the
+  first body line that is neither a numeric CSV row nor an asset name, which recovers all 154
+  of them across the three shipped archives with no false positives.
+*/
+function scanDefinitionDescription(lines, headerIdx) {
+  const limit = Math.min(lines.length, headerIdx + 1 + DEF_BODY_LINES_AFTER_HEADER);
+  for (let i = headerIdx + 1; i < limit; i++) {
+    const t = lines[i].trim();
+    if (t === "" || t.toLowerCase() === "null") continue;
+    if (DEF_SEPARATORS.includes(t)) continue;
+    if (/^-?\d+(\s*,\s*-?\d+)*$/.test(t)) continue;
+    if (/\.(BIN|TXT|WAV|RAW)$/i.test(t)) continue;
+    return t;
+  }
+  return "";
+}
+
+/*
+  True when the four named separators sit at their fixed offsets from this header.
+
+  This identifies the record prefix that Terminal Velocity, Fury3 and Hellbender share. It
+  does NOT mean the record is 14 lines long; see the note at the top of this file.
+*/
+function isFixedDefinitionRecord(lines, headerIdx) {
+  if (headerIdx + DEF_BODY_LINES_AFTER_HEADER >= lines.length) return false;
+  for (let i = 0; i < DEF_SEPARATORS.length; i++) {
+    if (lines[headerIdx + DEF_SEPARATOR_OFFSETS[i]].trim() !== DEF_SEPARATORS[i]) return false;
+  }
+  return true;
 }
 
 function skipDefinitionBody(lines, idx, lastDefinition) {

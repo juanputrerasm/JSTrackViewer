@@ -223,6 +223,50 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     }
   }
 
+  /*
+    Animated model textures (.ANI).
+
+    Measured across FURY3.POD, FURYSE.POD and TV.pod, 515 of the 564 animations name a model
+    texture rather than a terrain slot: fan blades, strobes, screens. Only 49 animate terrain,
+    and those are handled inside the atlas by buildTerrainMesh.
+
+    A model texture is shared by every mesh that names it, so animating it means rewriting one
+    DataTexture's pixels rather than touching materials. That only works when every frame
+    matches the base's dimensions, so frames that do not are dropped and an animation left
+    with fewer than two usable frames is dropped with them.
+  */
+  const modelTextureAnimations = [];
+  if (doc.animations?.length) {
+    const decodedByName = new Map(modelTextures.map((t) => [t.name.toUpperCase(), t]));
+    for (const animation of doc.animations) {
+      const base = decodedByName.get(animation.baseName);
+      if (!base) continue;                       // a terrain animation, or art this pod lacks
+      const frames = [];
+      for (const frameName of animation.frames) {
+        let frame = decodedByName.get(frameName);
+        if (!frame) {
+          const entry = resolveAsset(podIndex, frameName)
+            ?? resolveAsset(podIndex, replaceExtension(frameName, ".RAW"));
+          if (!entry) continue;
+          try {
+            const actBytes = palettes.paletteFor(frameName, entry, "model") ?? doc.palette;
+            const decoded = decodeRawTexture(syncGetBytes(entry), actBytes, frameName);
+            frame = { name: frameName, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height };
+            decodedByName.set(frameName, frame);
+          } catch { continue; }
+        }
+        if (frame.width !== base.width || frame.height !== base.height) continue;
+        frames.push(frame.rgba.slice(0));
+      }
+      if (frames.length < 2) continue;
+      modelTextureAnimations.push({
+        name: base.name, width: base.width, height: base.height,
+        fps: animation.fps > 0 ? animation.fps : 8,
+        frames,
+      });
+    }
+  }
+
   const raceTrackTextures = [];
   for (const tex of doc.raceTrackTextures ?? []) {
     if (!tex?.data) {
@@ -256,7 +300,8 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   // Terrain mesh
   let terrainMesh = null;
   if (doc.terrain.rawData) {
-    terrainMesh = buildTerrainMesh(doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin);
+    terrainMesh = buildTerrainMesh(
+      doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin, doc.animations);
   }
 
   // Sky texture
@@ -275,6 +320,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     groundBoxCount: doc.groundBoxes.length,
     primarySegmentCount: doc.primaryCourse.segments.length,
     extendedCourseCount: doc.extendedCourses.length,
+    navPointCount: doc.navPoints?.length ?? 0,
+    tunnelCount: doc.tunnels?.length ?? 0,
+    powerupCount: doc.powerups?.length ?? 0,
+    animationCount: (terrainMesh?.atlas?.animations?.length ?? 0) + modelTextureAnimations.length,
   };
   if (doc.raceTrackSurfaces?.length) stats.cpr = summarizeRaceTrack(doc, raceTrackFence);
 
@@ -352,6 +401,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     extendedCourses: doc.extendedCourses.map(serializeCourse),
     boxes: doc.boxes.map((b) => ({ ...b, position: [...b.position] })),
     groundBoxes: doc.groundBoxes,
+    navPoints: doc.navPoints ?? [],
+    tunnels: doc.tunnels ?? [],
+    powerups: doc.powerups ?? [],
+    modelTextureAnimations,
     raceTrackTextures,
     raceTrackSurfaces: doc.raceTrackSurfaces ?? [],
     raceTrackFence,

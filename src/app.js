@@ -23,6 +23,7 @@ export class TrackViewerApp {
       cboxes: false, water: true, backdrop: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: true,
       ramps: true,
+      navpoints: true, tunnels: true, powerups: true, animate: true,
     };
   }
 
@@ -99,6 +100,10 @@ export class TrackViewerApp {
       "tog-shadows":   "shadows",
       "tog-wireframe": "wireframe",
       "tog-trucks":    "trucks",
+      "tog-navpoints": "navpoints",
+      "tog-tunnels":   "tunnels",
+      "tog-powerups":  "powerups",
+      "tog-animate":   "animate",
     };
     for (const [id, flag] of Object.entries(toggleMap)) {
       const el = doc.getElementById(id);
@@ -233,6 +238,7 @@ export class TrackViewerApp {
       this._minimap.setTrack(result);
       this._minimap.updateCamera(this._scene.nav);
       this._updateTrackInfo(result);
+      this._updateNavList(result);
       this._setStatus(result.trackName || choice.name);
       // Focus viewport after load
       this._doc.getElementById("viewport")?.focus();
@@ -306,6 +312,14 @@ export class TrackViewerApp {
         ["Course segs",  s.primarySegmentCount],
       ];
       /*
+        TV-family map content that has no MTM equivalent. Each row is only added when the
+        level actually carries that side file, so an MTM track's stats panel is unchanged.
+      */
+      if (s.navPointCount) statsPairs.push(["Nav points", s.navPointCount]);
+      if (s.tunnelCount) statsPairs.push(["Tunnels", s.tunnelCount]);
+      if (s.powerupCount) statsPairs.push(["Powerups", s.powerupCount]);
+      if (s.animationCount) statsPairs.push(["Animated textures", s.animationCount]);
+      /*
         CPR tracks carry a second geometry layer the other games have no equivalent for. The
         names are the track editor's own, so this reads the way CPREdit would have shown it.
       */
@@ -326,12 +340,53 @@ export class TrackViewerApp {
     }
   }
 
+  /*
+    The .NAV list, in the order the level plays.
+
+    This is the level's own route description, so it is shown as an ordered list rather than
+    folded into the stats: which points are objectives, which are checkpoints, which tunnel a
+    tunnel point leads to, and how many enemies a target list names. Hidden entirely for
+    tracks that have no .NAV, which is every MTM-family track.
+  */
+  _updateNavList(data) {
+    const panel = this._doc.getElementById("nav-panel");
+    const list = this._doc.getElementById("nav-list");
+    if (!panel || !list) return;
+    const points = data?.navPoints ?? [];
+    if (!points.length) {
+      panel.hidden = true;
+      list.innerHTML = "";
+      return;
+    }
+    list.innerHTML = points.map((point) => {
+      const detail = [];
+      if (point.type === 0 && point.targets.length) {
+        detail.push(`${point.targets.length} target${point.targets.length === 1 ? "" : "s"}`);
+      }
+      if (point.tunnelLevel) detail.push(point.tunnelLevel.replace(/\.LVL$/, ""));
+      if (point.type === 5) {
+        detail.push(`enemy ${point.bossEnemy}`);
+        if (point.secondaryTargets.length) detail.push(`${point.secondaryTargets.length} shield`);
+        if (point.musicName) detail.push(point.musicName.replace(/\.MOD$/, ""));
+      }
+      if (point.type === 6) detail.push(`heading ${Math.round((point.heading / 65536) * 360)}\u00b0`);
+      if (point.description) detail.push(point.description);
+      const suffix = detail.length ? ` <span class="nav-detail">${escHtml(detail.join(" \u00b7 "))}</span>` : "";
+      return `<li>${escHtml(point.typeName)}${suffix}</li>`;
+    }).join("");
+    panel.hidden = false;
+  }
+
   _clearTrackInfo() {
     const dl = this._doc.getElementById("track-info");
     dl.innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
     const statsPanel = this._doc.getElementById("stats-panel");
     if (statsPanel) statsPanel.hidden = true;
     this._doc.getElementById("track-stats").innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
+    const navPanel = this._doc.getElementById("nav-panel");
+    if (navPanel) navPanel.hidden = true;
+    const navList = this._doc.getElementById("nav-list");
+    if (navList) navList.innerHTML = "";
     this._minimap?.clear();
   }
 

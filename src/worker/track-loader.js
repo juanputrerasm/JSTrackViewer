@@ -6,6 +6,9 @@ import { decodeBinModel } from "./bin-decoder.js";
 import { decodeRawTexture } from "./texture-decoder.js";
 import { archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 
+/** LVL header line 0: 4 is a surface level, 1 is a tunnel interior. */
+const LVL_KIND_TUNNEL = 1;
+
 /**
  * Lists available tracks in a POD index.
  * Returns [{name, index, format}]
@@ -53,16 +56,27 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
   });
   const candidates = filtered.length ? filtered : lvlEntries;
 
-  // Filter tunnel levels by reading the third line of each LVL header
+  /*
+    Keep the surface levels and drop the tunnel interiors.
+
+    Line 0 of a TV-family LVL states which it is outright: 4 for a surface level, 1 for a
+    tunnel. That is checked first because it is the file saying so rather than the loader
+    inferring it. Line 2 remains the fallback, since it is a .TNL spine on a tunnel level and
+    a .RAW heightfield on a surface one, and it also covers any level whose line 0 carries a
+    value neither game uses.
+  */
   const surface = [];
   for (const e of candidates) {
     try {
       // Read only first 512 bytes - enough for the header lines
       const partialEntry = { ...e, length: Math.min(e.length, 512) };
       const bytes = await readPodEntryBytes(opfsPath, partialEntry);
-      const text = new TextDecoder("latin1").decode(bytes);
-      const line2 = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")[2]?.trim().toUpperCase() ?? "";
-      if (!line2.endsWith(".TNL")) surface.push(e);
+      const header = new TextDecoder("latin1").decode(bytes)
+        .replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+      const kind = parseInt(header[0]?.trim() ?? "", 10);
+      const line2 = header[2]?.trim().toUpperCase() ?? "";
+      if (kind === LVL_KIND_TUNNEL || line2.endsWith(".TNL")) continue;
+      surface.push(e);
     } catch {
       surface.push(e);  // include on read error
     }

@@ -3,6 +3,10 @@ import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/
 import { loadGroundBoxes } from "./gbox-loader.js";
 import { loadDefObjects } from "./def-loader.js";
 import { podRawSide } from "./texture-decoder.js";
+import { parseNavPoints } from "./nav-parser.js";
+import { parseTunnelDefs } from "./tdf-parser.js";
+import { parsePowerups } from "./pup-parser.js";
+import { parseAnimations } from "./ani-parser.js";
 
 /**
  * Parses TV-family/HB tracks from a primary LVL entry in a POD archive.
@@ -23,7 +27,13 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   doc.terrain.rawBytesPerCell = 1;
   doc.trackName = displayNameForLvl(lines, lvlEntry.name);
 
-  // Line 2: RAW terrain (or TNL tunnel network - skip for now)
+  /*
+    Line 2: the RAW heightfield, or a .TNL spine when this is a tunnel level.
+
+    Tunnel interiors are not rendered: they are separate levels that only read as tunnels from
+    inside. A surface level's tunnels are surfaced instead as entrance and exit markers, from
+    the .TDF on line 9, which is the complete list including the ones the .NAV leaves out.
+  */
   const rawOrTnl = normalizeArchiveName(lines[2]);
   if (rawOrTnl && !rawOrTnl.startsWith("NULL.") && !rawOrTnl.endsWith(".TNL")) {
     const rawEntry = resolveLvlDataAsset(podIndex, rawOrTnl);
@@ -90,6 +100,67 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
       const { boxes, models } = loadDefObjects(podIndex, getBytes, defTitle, doc.terrain.gridSize, doc.origin);
       doc.boxes.push(...boxes);
       for (const [k, v] of Object.entries(models)) doc.models[k] = v;
+    }
+  }
+
+  /*
+    Lines 7, 8, 9 and 13: the map-content side files.
+
+    Read after the DEF because they share its coordinate space and, in the case of .NAV, index
+    its placement list. Each parser is total: a malformed side file costs its own marker layer
+    and nothing else.
+
+    Terminal Velocity and Fury3 only. Hellbender uses the same header line numbers but not the
+    same record shapes: its .NAV interleaves named sections the TV form has no place for, so
+    the description and the start point's pitch/bank/heading land several lines further down
+    than they do here.
+
+      22
+      6
+      13893632,3997696,32243712
+      !priority,time
+      0,0
+      @Completion sound & completion text (39 chars max)
+      null
+      null: line ignored
+      ; Proximity Sound file
+      null
+      Start for Snow City Level 1
+      0,0,0
+
+    Parsing that with the TV reader yields one bogus point and stops, which would put a wrong
+    marker on the map and open the camera facing the wrong way. Hellbender's variant has not
+    been validated, so it is left unread rather than half-read. It loses little: the whole
+    Hellbender game ships one powerup placement and HOTH.TDF declares no tunnels.
+  */
+  const readsTvSideFiles = doc.origin === "TV/F3";
+
+  if (readsTvSideFiles && lines.length > 7) {
+    const pupName = normalizeArchiveName(lines[7]);
+    if (pupName && !pupName.startsWith("NULL.")) {
+      const pupEntry = resolveLvlDataAsset(podIndex, pupName);
+      if (pupEntry) doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize);
+    }
+  }
+  if (readsTvSideFiles && lines.length > 8) {
+    const aniName = normalizeArchiveName(lines[8]);
+    if (aniName && !aniName.startsWith("NULL.")) {
+      const aniEntry = resolveLvlDataAsset(podIndex, aniName);
+      if (aniEntry) doc.animations = parseAnimations(getBytes(aniEntry));
+    }
+  }
+  if (readsTvSideFiles && lines.length > 9) {
+    const tdfName = normalizeArchiveName(lines[9]);
+    if (tdfName && !tdfName.startsWith("NULL.")) {
+      const tdfEntry = resolveLvlDataAsset(podIndex, tdfName);
+      if (tdfEntry) doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize);
+    }
+  }
+  if (readsTvSideFiles && lines.length > 13) {
+    const navName = normalizeArchiveName(lines[13]);
+    if (navName && !navName.startsWith("NULL.")) {
+      const navEntry = resolveLvlDataAsset(podIndex, navName);
+      if (navEntry) doc.navPoints = parseNavPoints(getBytes(navEntry), doc.terrain.gridSize);
     }
   }
 
@@ -259,5 +330,9 @@ function createDoc(podComment, origin) {
     backdropModelName: null,
     skyTexture: null,
     fogMap: null,
+    navPoints: [],
+    tunnels: [],
+    powerups: [],
+    animations: [],
   };
 }

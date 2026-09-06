@@ -11,7 +11,7 @@ const MAX_ATLAS_HEIGHT = 8192;
  * Builds GPU-ready terrain mesh data from RAW heightfield + CLR texture map + palette + texture list.
  * Returns transferable buffers: positions, normals, uvs, indices, atlas rgba.
  */
-export function buildTerrainMesh(terrain, palette, textures, heightScale, origin) {
+export function buildTerrainMesh(terrain, palette, textures, heightScale, origin, animations) {
   const { gridSize, rawData, clrData, rawBytesPerCell, clrBytesPerCell } = terrain;
   const hs = heightScale ?? 4;
 
@@ -19,8 +19,12 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const overlapPixels = usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0;
   const {
     atlas, atlasWidth, atlasHeight, textureCount, atlasCols, atlasRows,
-    atlasTileSize, atlasPadding, sourceTileSize, uvRects,
+    atlasTileSize, atlasPadding, sourceTileSize, uvRects, decodedSlots,
   } = buildAtlas(textures, palette, overlapPixels);
+
+  const atlasAnimations = buildAtlasAnimations(
+    animations, textures, decodedSlots,
+    { atlasCols, atlasTileSize, sourceTileSize, atlasPadding });
 
   // Allocate buffers: 4 unique vertices per cell (to allow per-cell UV)
   const cellCount = gridSize * gridSize;
@@ -139,8 +143,91 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     atlas: {
       rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
       textureCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
+      animations: atlasAnimations,
     },
   };
+}
+
+/*
+  Terrain texture animations, resolved to atlas blits.
+
+  A .ANI names a base texture slot and the frames that replace it. Since every slot already
+  occupies a fixed tile in the atlas, an animation is just a tile-sized RGBA block written
+  over that tile, which is far cheaper than rebuilding the atlas or giving animated tiles
+  their own material.
+
+  Frames are resampled here, in the worker, exactly the way the static tile was, so the
+  renderer only has to copy bytes. A frame that names a texture the level does not carry is
+  dropped; an animation left with fewer than two usable frames is dropped entirely, which
+  leaves the static base tile already in the atlas.
+*/
+function buildAtlasAnimations(animations, textures, decodedSlots, layout) {
+  if (!animations?.length || !textures?.length) return [];
+  const { atlasCols, atlasTileSize, sourceTileSize, atlasPadding } = layout;
+
+  const slotByName = new Map();
+  for (let i = 0; i < textures.length; i++) {
+    const title = textureTitle(textures[i]?.name);
+    if (title && !slotByName.has(title)) slotByName.set(title, i);
+  }
+
+  const out = [];
+  for (const animation of animations) {
+    const slot = slotByName.get(textureTitle(animation.baseName));
+    if (slot === undefined) continue;
+
+    const frames = [];
+    for (const frameName of animation.frames) {
+      const frameSlot = slotByName.get(textureTitle(frameName));
+      // A frame is itself a terrain slot in every shipped level, so its decode is already done.
+      const decoded = frameSlot !== undefined ? decodedSlots[frameSlot] : null;
+      if (!decoded) continue;
+      frames.push(renderTile(decoded, atlasTileSize, sourceTileSize, atlasPadding).buffer);
+    }
+    if (frames.length < 2) continue;
+
+    out.push({
+      slot,
+      x: (slot % atlasCols) * atlasTileSize,
+      y: Math.floor(slot / atlasCols) * atlasTileSize,
+      size: atlasTileSize,
+      fps: animation.fps > 0 ? animation.fps : 8,
+      frames,
+    });
+  }
+  return out;
+}
+
+function textureTitle(name) {
+  if (!name) return "";
+  const upper = String(name).toUpperCase();
+  const slash = Math.max(upper.lastIndexOf("/"), upper.lastIndexOf("\\"));
+  return slash >= 0 ? upper.slice(slash + 1) : upper;
+}
+
+/*
+  Resamples one decoded texture into a standalone atlas tile.
+
+  Same sampling as the atlas build below, including the padding skirt, so a blitted frame is
+  indistinguishable from the tile it replaces.
+*/
+function renderTile(decoded, atlasTileSize, sourceTileSize, atlasPadding) {
+  const tile = new Uint8ClampedArray(atlasTileSize * atlasTileSize * 4);
+  for (let y = 0; y < atlasTileSize; y++) {
+    for (let x = 0; x < atlasTileSize; x++) {
+      const sampleX = Math.max(0, Math.min(sourceTileSize - 1, x - atlasPadding));
+      const sampleY = Math.max(0, Math.min(sourceTileSize - 1, y - atlasPadding));
+      const srcX = Math.min(decoded.width - 1, Math.floor(sampleX * decoded.width / sourceTileSize));
+      const srcY = Math.min(decoded.height - 1, Math.floor(sampleY * decoded.height / sourceTileSize));
+      const srcOff = (srcY * decoded.width + srcX) * 4;
+      const dstOff = (y * atlasTileSize + x) * 4;
+      tile[dstOff]     = decoded.rgba[srcOff];
+      tile[dstOff + 1] = decoded.rgba[srcOff + 1];
+      tile[dstOff + 2] = decoded.rgba[srcOff + 2];
+      tile[dstOff + 3] = 255;
+    }
+  }
+  return tile;
 }
 
 function buildAtlas(textures, trackPalette, overlapPixels = 0) {
@@ -176,6 +263,7 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
       atlas, atlasWidth: atlasTileSize, atlasHeight: atlasTileSize,
       textureCount: 1, atlasCols: 1, atlasRows: 1, atlasTileSize, atlasPadding, sourceTileSize,
       uvRects: [{ x: atlasPadding, y: atlasPadding, w: sourceTileSize, h: sourceTileSize }],
+      decodedSlots,
     };
   }
 
@@ -222,7 +310,7 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
     }
   }
 
-  return { atlas, atlasWidth, atlasHeight, textureCount: slotCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize, uvRects };
+  return { atlas, atlasWidth, atlasHeight, textureCount: slotCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize, uvRects, decodedSlots };
 }
 
 function usesHiddenTerrainOverlap(origin) {
