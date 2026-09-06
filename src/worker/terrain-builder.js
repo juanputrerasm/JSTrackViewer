@@ -1,6 +1,6 @@
 import { decodeRawTexture, podRawSide } from "./texture-decoder.js";
 
-const CELL_SIZE = 64;
+export const CELL_SIZE = 64;
 const ATLAS_TILE_SIZE = 64;
 const TERRAIN_OVERLAP_PIXELS = 2;
 const MAX_ATLAS_COLS = 64;

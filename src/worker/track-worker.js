@@ -68,7 +68,7 @@ async function getBytes(entry) {
 async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   const { parseSitTrack } = await import("./sit-parser.js");
   const { parseLvlTrack } = await import("./lvl-parser.js");
-  const { buildTerrainMesh } = await import("./terrain-builder.js");
+  const { buildTerrainMesh, CELL_SIZE } = await import("./terrain-builder.js");
   const { decodeBinModel } = await import("./bin-decoder.js");
   const { decodeRawTexture } = await import("./texture-decoder.js");
   const { resolveAsset } = await import("./pod-format.js");
@@ -114,6 +114,13 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   if (doc.backdropModelName && !doc.models[doc.backdropModelName]) {
     const model = loadModel(doc.backdropModelName);
     if (model) doc.models[doc.backdropModelName] = model;
+  }
+  if (doc.arena?.modelName && !doc.models[doc.arena.modelName]) {
+    const model = loadModel(doc.arena.modelName);
+    if (model) doc.models[doc.arena.modelName] = model;
+    // The fork only commits to arena mode once the model is actually in the pod
+    // (TrackPODFile.cpp:2704-2714); a named but absent stadium falls back to the backdrop.
+    else doc.arena = null;
   }
 
   /*
@@ -242,6 +249,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   const terrainHeightScale = effectiveTerrainHeightScale(doc.origin, heightScale);
 
+  const arena = doc.arena
+    ? placeArena(doc.arena, doc.models[doc.arena.modelName], doc.terrain, terrainHeightScale, CELL_SIZE)
+    : null;
+
   // Terrain mesh
   let terrainMesh = null;
   if (doc.terrain.rawData) {
@@ -336,6 +347,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     } : null,
     skyTexture: skyTextureDecoded,
     backdropModelName: doc.backdropModelName ?? null,
+    arena,
     primaryCourse: serializeCourse(doc.primaryCourse),
     extendedCourses: doc.extendedCourses.map(serializeCourse),
     boxes: doc.boxes.map((b) => ({ ...b, position: [...b.position] })),
@@ -496,6 +508,88 @@ function readTxvRecord(podIndex, getBytes, choice) {
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
   return origin === "HB" ? 3 : (requestedHeightScale ?? 3);
 }
+
+/*
+  Where the arena model sits in the world.
+
+  Traxx draws the stadium on its own short stack (TraxxViewDisplay.cpp:562-568, mirrored by
+  the GL path in NativeArenaStackProcessVector, OpenGLTerrainRenderer.cpp:1990-2025):
+
+      trig.PushXYZTranslation((arena.x - gridx) << 6, (arena.y - gridy) << 6,
+                              ALTITUDESCALE * ArenaZPos());
+      trig.PushZStretch(768);
+
+  First push is outermost, so that is v_world = T . S_z(0.75) . v_model, with NO rotation -
+  an arena is always axis aligned. gridx/gridy are the view origin and drop out in absolute
+  world space. The 0.75 is the same object-space stretch models get, NOT the backdrop's 1200.
+
+  The height is not the terrain under arena.x/arena.y. It is the terrain under the model's
+  LOWEST vertex (CTrackPOD::FindArenaAnchor and ArenaZPos, TrackPOD.cpp:892-931): that
+  vertex is where the stadium floor meets the ground, and it is generally not the origin the
+  track records. Sampling at the origin instead buries the arena in a hill or leaves it
+  hanging over a pit.
+
+  FindArenaAnchor works in raw file units and shifts `vx >> 12` to reach grid cells. Decoded
+  positions here have already been divided by 64 (bin-decoder's legacy divisor) and a grid
+  cell is 64 world units, so the same conversion is a floor-divide by 64 - the >>12 is those
+  two 64s. Arenas are an MTM1/MTM2 SIT feature, so the legacy divisor is the only one in play.
+*/
+function placeArena(arena, model, terrain, heightScale, cellSize) {
+  if (!model?.meshes?.length) return null;
+
+  const modelAnchor = model.anchor ?? { x: 0, y: 0, z: 0 };
+
+  // Lowest vertex, un-anchored back to the model's own coordinates because the anchor is a
+  // viewer convention that Traxx's polyobj does not have.
+  let minZ = Infinity;
+  let vx = 0;
+  let vy = 0;
+  for (const mesh of model.meshes) {
+    const p = mesh.positions;
+    for (let i = 0; i < p.length; i += 3) {
+      const z = p[i + 2] + modelAnchor.z;
+      if (z < minZ) {
+        minZ = z;
+        vx = p[i] + modelAnchor.x;
+        vy = p[i + 1] + modelAnchor.y;
+      }
+    }
+  }
+  if (!Number.isFinite(minZ)) return null;
+
+  const ax = Math.floor(vx / cellSize);
+  const ay = Math.floor(vy / cellSize);
+
+  return {
+    modelName: arena.modelName,
+    x: arena.x, y: arena.y, sx: arena.sx, sy: arena.sy,
+    anchorCell: [ax, ay],
+    // Traxx world units, still on Traxx axes; scene.js does the axis swap as it does for
+    // every other model.
+    worldX: arena.x * cellSize,
+    worldY: arena.y * cellSize,
+    groundZ: heightScale * rawHeightAtCell(terrain, arena.x + ax, arena.y + ay),
+  };
+}
+
+
+/* CTrackPODTerrain::GetRawAtPoint (TrackPODTerrain.cpp:385-391): wraps, never clamps. */
+function rawHeightAtCell(terrain, gx, gy) {
+  const raw = terrain?.rawData;
+  const gridSize = terrain?.gridSize ?? 256;
+  if (!raw) return 0;
+
+  const bytesPerCell = terrain.rawBytesPerCell ?? 1;
+  const x = ((gx % gridSize) + gridSize) % gridSize;
+  const y = ((gy % gridSize) + gridSize) % gridSize;
+  const off = (x + y * gridSize) * bytesPerCell;
+
+  if (bytesPerCell === 1) return raw[off] ?? 0;
+  const lo = raw[off] ?? 0;
+  const hi = raw[off + 1] ?? 0;
+  return hi === 0 ? lo : (lo | (hi << 8)) >>> 6;
+}
+
 
 function collectTransfers(obj) {
   const transfers = [];

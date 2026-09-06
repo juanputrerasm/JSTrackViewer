@@ -1,31 +1,54 @@
 import { archiveTitle, normalizeArchiveName, joinPath, replaceExtension } from "../shared/path-utils.js";
 import { readFile, writeBytesToFile } from "../shared/opfs.js";
 
+const POD1_HEADER_SIZE = 84;
 const ENTRY_NAME_SIZE = 32;
 const COMMENT_SIZE = 80;
 const ENTRY_SIZE = 40;
+const LONG_ENTRY_NAME_SIZE = 64;
+const LONG_ENTRY_SIZE = 72;
 const MAX_REASONABLE_ITEMS = 8192;
 
 export async function indexPodFile(opfsPodPath) {
   const file = await readFile(opfsPodPath);
-  if (file.size < 84) throw new Error(`File too small to be a POD archive: ${opfsPodPath}`);
-  const headerBuffer = await file.slice(0, 84).arrayBuffer();
+  if (file.size < POD1_HEADER_SIZE) throw new Error(`File too small to be a POD archive: ${opfsPodPath}`);
+  const headerBuffer = await file.slice(0, POD1_HEADER_SIZE).arrayBuffer();
   const headerView = new DataView(headerBuffer);
   const itemCount = headerView.getInt32(0, true);
   if (itemCount < 1 || itemCount > MAX_REASONABLE_ITEMS) throw new Error(`Suspicious POD item count: ${itemCount}`);
-  const tableBytes = itemCount * ENTRY_SIZE;
-  if (84 + tableBytes > file.size) throw new Error("POD item table exceeds file size");
   const decoder = new TextDecoder("latin1");
   const comment = decodeNullTerminated(decoder, new Uint8Array(headerBuffer, 4, COMMENT_SIZE));
-  const tableBuffer = await file.slice(84, 84 + tableBytes).arrayBuffer();
+
+  // POD1 has no signature that distinguishes its directory variants. Validate the classic
+  // layout first, then retry with Community Patch 3's widened 64-byte name field.
+  const legacy = await tryReadDirectory(file, itemCount, ENTRY_NAME_SIZE, ENTRY_SIZE, decoder);
+  if (legacy) return { format: "POD1", comment, entries: legacy };
+  const extended = await tryReadDirectory(file, itemCount, LONG_ENTRY_NAME_SIZE, LONG_ENTRY_SIZE, decoder);
+  if (extended) return { format: "Extended POD1", comment, entries: extended };
+  throw new Error("POD1 directory is neither a valid 32-byte nor 64-byte layout.");
+}
+
+async function tryReadDirectory(file, itemCount, nameSize, entrySize, decoder) {
+  const tableBytes = itemCount * entrySize;
+  if (POD1_HEADER_SIZE + tableBytes > file.size) return null;
+  const tableBuffer = await file.slice(POD1_HEADER_SIZE, POD1_HEADER_SIZE + tableBytes).arrayBuffer();
   const tableView = new DataView(tableBuffer);
   const tableBytesView = new Uint8Array(tableBuffer);
   const entries = [];
   for (let i = 0; i < itemCount; i++) {
-    const offset = i * ENTRY_SIZE;
-    const { name, paletteName } = decodePod1NameField(decoder, tableBytesView, offset, ENTRY_NAME_SIZE);
-    const length = tableView.getUint32(offset + ENTRY_NAME_SIZE, true);
-    const dataOffset = tableView.getUint32(offset + ENTRY_NAME_SIZE + 4, true);
+    const offset = i * entrySize;
+    const { name, paletteName, pathTerminated } = decodePod1NameField(decoder, tableBytesView, offset, nameSize);
+    const length = tableView.getUint32(offset + nameSize, true);
+    const dataOffset = tableView.getUint32(offset + nameSize + 4, true);
+    if (
+      !pathTerminated ||
+      !name ||
+      !isPlausibleArchivePath(name) ||
+      dataOffset > file.size ||
+      length > file.size - dataOffset
+    ) {
+      return null;
+    }
     entries.push({
       name,
       normalizedName: normalizeArchiveName(name),
@@ -36,7 +59,7 @@ export async function indexPodFile(opfsPodPath) {
       paletteName
     });
   }
-  return { comment, entries };
+  return entries;
 }
 
 /*
@@ -51,6 +74,7 @@ function decodePod1NameField(decoder, bytes, offset, width) {
   const limit = Math.min(offset + width, bytes.length);
   let pathEnd = offset;
   while (pathEnd < limit && bytes[pathEnd] !== 0) pathEnd++;
+  const pathTerminated = pathEnd < limit;
   const name = trimPodString(decoder.decode(bytes.subarray(offset, pathEnd)));
 
   let paletteName = null;
@@ -63,11 +87,15 @@ function decodePod1NameField(decoder, bytes, offset, width) {
     // field is otherwise junk left over from whatever the packer had in the buffer.
     if (paletteEnd < limit && candidate.toUpperCase().endsWith(".ACT")) paletteName = candidate;
   }
-  return { name, paletteName };
+  return { name, paletteName, pathTerminated };
 }
 
 function trimPodString(value) {
   return value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+}
+
+function isPlausibleArchivePath(name) {
+  return !/[\0-\x1f]/.test(name) && !name.includes(":") && name.length <= LONG_ENTRY_NAME_SIZE - 1;
 }
 
 export async function readPodEntryBytes(opfsPodPath, entry) {

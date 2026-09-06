@@ -153,7 +153,9 @@ function parseSitMetadata(sitLines, doc) {
   // Courses
   parseCourses(sitLines, doc);
 
-  // Backdrop
+  // Stadium (arena) then Backdrop. Order matches the SIT itself; the two are alternatives,
+  // and which one wins is settled where the model is actually loaded.
+  parseArena(sitLines, doc);
   parseBackdrop(sitLines, doc);
 
   // Trucks
@@ -267,6 +269,57 @@ function parseCourseBlocks(lines, startCursor, count, course, doc) {
   }
   return { cursor };
 }
+
+/*
+  *** Stadium *** - the arena.
+
+  An arena track carries its model here rather than in the Backdrop block, and the writer
+  then emits backdropCount 0 (TrackPODFile.cpp:5288-5318), so a parser that reads only the
+  Backdrop block sees an arena track as having no model at all. That is why arena tracks
+  currently render with nothing where the stadium should be.
+
+  Two line formats, discriminated by the leading '!' (TrackPODFile.cpp:2686-2737):
+
+    !stadiumFlag,x,z,sx,sz,stadiumModelName      MTM2: placed, with a grid footprint
+    1,120,100,14,14,arena.bin
+
+    stadiumFlag,stadiumModelName                 older form: model only, placed at 0,0
+    1,arena.bin
+
+  A leading flag of 0 means the block is present but the track is not an arena.
+
+  sx/sz are the footprint in grid cells. NEITHER renderer reads them - they exist for the
+  editor's placement UI and for the game's own terrain flattening - so they are carried
+  here for reporting and nothing else. Placement comes from x/z plus the model's own
+  anchor vertex; see placeArena in track-worker.js.
+*/
+function parseArena(sitLines, doc) {
+  const section = indexOfLine(sitLines, "*** Stadium ***");
+  if (section < 0 || section + 2 >= sitLines.length) return;
+
+  const header = (sitLines[section + 1] ?? "").trim();
+  const fields = (sitLines[section + 2] ?? "").split(",");
+  if (!parseLeadingInt(fields[0])) return;
+
+  if (header.startsWith("!stadiumFlag")) {
+    if (fields.length < 6) return;
+    const modelName = normalizeArchiveName(fields[5]);
+    if (!modelName) return;
+    doc.arena = {
+      modelName,
+      x: parseLeadingInt(fields[1]),
+      y: parseLeadingInt(fields[2]),
+      sx: parseLeadingInt(fields[3]),
+      sy: parseLeadingInt(fields[4]),
+    };
+  } else if (header.startsWith("stadiumFlag")) {
+    if (fields.length < 2) return;
+    const modelName = normalizeArchiveName(fields[1]);
+    if (!modelName) return;
+    doc.arena = { modelName, x: 0, y: 0, sx: 0, sy: 0 };
+  }
+}
+
 
 function parseBackdrop(sitLines, doc) {
   const section = indexOfLine(sitLines, "*** Backdrop ***");
@@ -541,6 +594,7 @@ function createDoc(podComment) {
     extendedCourses: [],
     trucks: [],
     backdropModelName: null,
+    arena: null,
     fogMap: null,
   };
 }

@@ -322,6 +322,7 @@ export class TrackScene {
     this._terrainAtlasPadding = 0;
     this._terrainAtlasSourceTileSize = 64;
     this._backdropMesh = null;
+    this._arenaMesh = null;
     this._modelTexCache = {};
     this._trackData = null;
     this._scene.background = null;
@@ -339,8 +340,14 @@ export class TrackScene {
 
     if (trackData.modelTextures) this._loadModelTextures(trackData.modelTextures);
     if (trackData.terrain) this._buildTerrain(trackData.terrain);
-    // Backdrop: prefer BIN model (MTM2), fall back to RAW sky texture (TV/F3/HB)
-    if (trackData.backdropModelName && trackData.models?.[trackData.backdropModelName]) {
+    // An arena REPLACES the backdrop rather than joining it: Traxx suppresses the backdrop
+    // model at load (TrackPODFile.cpp:2758-2759) and again at draw
+    // (TraxxViewDisplay.cpp:307-311, `openglbackdrop = arena.arena == FALSE && ...`).
+    // The stadium is a closed shell, so there is no sky left to show behind it.
+    // Otherwise: prefer BIN model (MTM2), fall back to RAW sky texture (TV/F3/HB).
+    if (trackData.arena && trackData.models?.[trackData.arena.modelName]) {
+      this._buildArena(trackData);
+    } else if (trackData.backdropModelName && trackData.models?.[trackData.backdropModelName]) {
       this._buildBackdropModel(trackData.backdropModelName, trackData);
     } else if (trackData.skyTexture) {
       this._buildBackdropFromTexture(trackData.skyTexture);
@@ -411,6 +418,61 @@ export class TrackScene {
     gridLinGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(lineVerts), 3));
     const gridMat = new THREE.LineBasicMaterial({ color: 0x8888cc, opacity: 0.65, transparent: true });
     this._groups.terrainGrid.add(new THREE.LineSegments(gridLinGeo, gridMat));
+  }
+
+  /*
+    The arena is ordinary world geometry, not a sky.
+
+    That distinction is the whole implementation. A backdrop is drawn with depth testing off,
+    at renderOrder -1, and is re-centred on the camera every frame so it never appears to
+    move. An arena is a stadium standing on the terrain at a fixed grid position: it has to
+    occlude and be occluded, and it must stay put. So it goes through the normal model
+    material and the normal object matrix, and it is deliberately NOT assigned to
+    `_backdropMesh`, which is what the render loop follows the camera with.
+
+    It still lives in the backdrop GROUP, so the existing Backdrop toggle hides it - Traxx
+    gates it on the same `reg.show_backdrop` (TraxxViewDisplay.cpp:275-279).
+
+    Placement (worldX/worldY/groundZ) is computed in the worker; see placeArena there for why
+    the ground sample is taken under the model's lowest vertex rather than under its origin.
+  */
+  _buildArena(trackData) {
+    const arena = trackData.arena;
+    const model = trackData.models?.[arena?.modelName];
+    if (!model?.meshes?.length) return;
+
+    const ws = this._worldSize(trackData);
+    const modelAnchor = model.anchor ?? { x: 0, y: 0, z: 0 };
+
+    /*
+      Traxx transforms the model's own coordinates; this viewer stores them anchor-relative.
+      Rather than rewriting every vertex, fold the anchor into the translation - the arena
+      transform is a translate composed with a Z stretch, so the anchor lands in the offset
+      exactly, and the 0.75 applies to its Z the same way it applies to a vertex.
+
+      With no rotation this is traxxModelMatrix at zero angles, which is used rather than a
+      hand-built matrix so the arena cannot drift from the object path if that math changes.
+    */
+    const posX = arena.worldX + modelAnchor.x;
+    const posY = arena.groundZ + TRAXX_Z_STRETCH * modelAnchor.z;
+    const posZ = (ws - arena.worldY) - modelAnchor.y;
+
+    const group = new THREE.Group();
+    for (const mesh of model.meshes) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
+      geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
+      geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+      geo.computeBoundingSphere();
+      group.add(new THREE.Mesh(geo, this._createModelMaterial(mesh)));
+    }
+
+    group.matrixAutoUpdate = false;
+    group.matrix.copy(traxxModelMatrix(0, 0, 0, posX, posY, posZ));
+    group.matrixWorldNeedsUpdate = true;
+
+    this._arenaMesh = group;
+    this._groups.backdrop.add(group);
   }
 
   _buildBackdropFromTexture(skyTexture) {

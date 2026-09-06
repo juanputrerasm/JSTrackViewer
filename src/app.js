@@ -401,10 +401,15 @@ function displayMusic(data) {
 }
 
 function displayBackgroundModel(data) {
-  const name = data.backdropModelName || "";
+  // An arena stands in for the backdrop rather than accompanying it, so it is what this
+  // field should name. Without this an arena track reports no background model at all,
+  // which is now visibly untrue.
+  const arena = data.arena?.modelName ? data.arena : null;
+  const name = arena?.modelName || data.backdropModelName || "";
   if (!name) return "—";
   const model = data.models?.[name];
-  return model?.format ? `${name} (${model.format})` : name;
+  const format = model?.format ? ` (${model.format})` : "";
+  return arena ? `${name}${format}, arena` : `${name}${format}`;
 }
 
 function displayMusicSlot(slot) {

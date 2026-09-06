@@ -1,147 +1,153 @@
-# JS Track Viewer
+# JSTrackViewer
 
-A pure browser JavaScript 3D viewer for classic Terminal Reality game track/level archives, including **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3/F-Zone**, **Hellbender** and **CART Precision Racing** track data. Drop in a POD or ZIP file from local storage, or point it at a CORS-enabled URL, and the viewer decodes terrain, textures, objects, ground boxes, courses, trucks, water, backdrops, and CPR racetrack layers all client-side. 
+[![JavaScript](https://img.shields.io/badge/JavaScript-ES%20modules-F7DF1E?logo=javascript&logoColor=000)](https://developer.mozilla.org/docs/Web/JavaScript)
+[![Three.js](https://img.shields.io/badge/Three.js-r169-000?logo=threedotjs)](https://threejs.org/)
+[![Platform](https://img.shields.io/badge/platform-web-blue)](https://developer.mozilla.org/docs/Web)
+[![GitHub Pages](https://img.shields.io/badge/demo-GitHub%20Pages-222?logo=github)](https://juanputrerasm.github.io/JSTrackViewer/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 
-JSTrackViewer is based on JTraxx, which in turn is based on the original Traxx track editor for MTM1 & MTM2.
+**A browser-based 3D track viewer for classic Terminal Reality games.**
 
----
+JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terrain, textures, objects, courses, ground boxes, water, backdrops, and game-specific track data in Three.js. It supports tracks from **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3/F-Zone**, **Hellbender**, and **CART Precision Racing**. Archive processing happens locally in the browser.
 
-## Stack
+**Live application:** [Open JSTrackViewer on GitHub Pages](https://juanputrerasm.github.io/JSTrackViewer/)
 
-| Layer | Technology |
-|---|---|
-| 3D rendering | [Three.js](https://threejs.org/) v0.169 (via CDN import map) |
-| Camera controls | Custom free-flight track navigation |
-| Asset storage | [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) (Origin Private File System) |
-| Heavy parsing | [Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API) |
-| ZIP extraction | [fflate](https://github.com/101arrowz/fflate) via CDN |
-| Module system | Native ES modules (no bundler required) |
-| Styling | Vanilla CSS |
-
----
-
-## Getting started
-
-OPFS and module workers require a proper HTTP origin, `file://` won't work. Serve the folder locally:
-
-```bash
-python3 -m http.server 8080
-```
-
-Then open:
-
-```text
-http://localhost:8080/
-```
-
-Live deployment on GitHub Pages:
-
-https://juanputrerasm.github.io/JSTrackViewer/
-
-Load a track by clicking **Open POD/ZIP from disk** and selecting a `.POD` or `.ZIP` file, or paste a CORS-enabled POD/ZIP URL into the URL field. ZIP files are scanned for the first POD inside them. If an archive contains multiple tracks, choose one from the title-bar selector and click **Load Track**.
+![JSTrackViewer displaying the Voodoo Island track from Monster Truck Madness 2](docs/screenshot.jpg)
 
 ---
 
 ## Features
 
-- Load `.POD` archives from local disk or remote URL
-- Load `.ZIP` archives containing POD files from local disk or remote URL
-- Multi-track POD support for archives with multiple `.SIT` or `.LVL` entries
-- OPFS-backed per-session staging, with a **Clear temp** control
-- Navigation minimap with greyscale height map and clickable camera repositioning
-- Viewer toggles for terrain, textures, grid, courses, objects, billboard behavior, checkpoints, ground boxes, collision boxes, wireframe, trucks, water, background, and sunlight
-- Separate track data and stats panels, including background model, music, weather, texture/object/ground-box/course counts
-- Adjustable view distance, sun intensity, and gamma
-- Static BIN model decoding, including textured meshes, known transparent face types, and TV-family/Hellbender scale handling
-- `RAW` + `ACT` texture decoding with fallback palette support
-- Ground box layer support from `RA0`, `RA1`, and `CL0`
-- MTM/MTM2 `.SIT` parsing for terrain, metadata, courses, trucks, objects, and backdrops
-- TV/Fury3-family and Hellbender `.LVL` support, including `.DEF` object placement
-- CPR `.TRK` / `.TTX` racetrack layer support, including walls, wireframe display, and wall-bounded surface rendering
+- **POD and ZIP loading** — open a local archive or fetch one from a URL.
+- **Multi-track archives** — discover and switch between multiple `.SIT` or `.LVL` tracks without reopening the archive.
+- **Broad game support** — inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, and CART Precision Racing track formats.
+- **Modern MTM2 (Community Patch 3) support** — read POD1-64 archives, `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
+- **Detailed track rendering** — display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops.
+- **CPR racetrack layers** — render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
+- **Interactive navigation** — fly through the level, adjust the camera, and jump to a location by clicking the minimap.
+- **Inspection controls** — toggle scene layers and adjust view distance, sunlight, and gamma.
+- **Track diagnostics** — review metadata and statistics for textures, objects, courses, ground boxes, and CPR surface and wall types.
+- **Client-side operation** — archives and extracted assets remain in temporary browser storage.
 
----
+## Supported content
 
-## Controls
+| Content | Support |
+|---|---|
+| POD1 | Original Terminal Reality archive layout with 32-byte directory name fields |
+| POD1-64 (Extended POD1) | POD1-compatible Community Patch 3 layout with 64-byte directory name fields |
+| ZIP | POD archives packaged in ZIP files |
+| SIT | MTM, MTM2, and CART Precision Racing track definitions |
+| LVL + DEF | Terminal Velocity/Fury3-family and Hellbender levels and object placement |
+| TRK + TTX | CART Precision Racing road surfaces, walls, and textures |
+| BIN | Static textured models and game-family scale handling |
+| RAW + ACT | Legacy paletted textures with fallback palette resolution |
+| RA0, RA1, and CL0 | Ground-box and collision data |
+
+“POD1-64” is not a 64-bit archive format or an official new POD version. It identifies the POD1-compatible layout that widens each directory name field from 32 to 64 bytes, allowing Community Patch 3 content to use longer asset paths.
+
+## Requirements
+
+- A modern browser with JavaScript modules, Web Workers, WebGL, and Origin Private File System support
+- An HTTP or HTTPS origin; the application cannot run correctly from `file://`
+- Network access to the Three.js and fflate CDN modules
+
+## Getting started
+
+### Use the hosted application
+
+1. Open [JSTrackViewer on GitHub Pages](https://juanputrerasm.github.io/JSTrackViewer/).
+2. Choose **Open POD/ZIP from disk**, or paste an archive URL and choose **Open from URL**.
+3. Select a track when the archive contains more than one supported track.
+4. Use the keyboard, mouse, and view controls to explore the level.
+
+> [!NOTE]
+> Remote archives must be served over HTTP or HTTPS. Cross-origin servers must also allow the browser request through CORS.
+
+### Run locally
+
+Clone the repository and serve its root directory with any static HTTP server:
+
+```bash
+git clone https://github.com/juanputrerasm/JSTrackViewer.git
+cd JSTrackViewer
+python3 -m http.server 8080
+```
+
+Then open <http://localhost:8080/>. There is no build step and no package installation.
+
+## Viewer controls
 
 | Control | Action |
 |---|---|
-| Arrow Up / Arrow Down | Move forward / backward |
-| Arrow Left / Arrow Right | Turn camera |
-| Page Up / Page Down | Pitch camera |
-| A / Z | Raise / lower camera |
+| Up / Down Arrow | Move forward / backward |
+| Left / Right Arrow | Turn the camera |
+| Page Up / Page Down | Pitch the camera |
+| A / Z | Raise / lower the camera |
 | Mouse drag | Look around |
-| Mouse wheel | Move along view direction |
+| Mouse wheel | Move along the view direction |
 | Home | Reset near course segment 0 |
-| Minimap click | Move to selected map position while keeping camera orientation |
+| Minimap click | Move to the selected map position while preserving camera orientation |
 
----
+## Loading from URLs
 
-## Project structure
+Paste a POD or ZIP location into the URL field and choose **Open from URL**. The viewer accepts absolute, root-relative, and page-relative URLs, for example:
 
 ```text
-index.html
-styles.css
-src/
-  main.js                - entry point
-  app.js                 - UI controller and track loading flow
-  scene.js               - Three.js scene, terrain, objects, overlays
-  nav.js                 - free-flight camera navigation
-  worker-client.js       - promise wrapper around the Web Worker
-  zip-utils.js           - ZIP extraction helper for POD-in-ZIP loading
-  shared/
-    opfs.js              - OPFS read/write helpers
-    path-utils.js        - archive path normalization
-  worker/
-    track-worker.js      - worker message handler
-    track-loader.js      - track choice listing helpers
-    pod-format.js        - POD archive indexing and entry extraction
-    sit-parser.js        - SIT track parser
-    lvl-parser.js        - TV-family/HB LVL track parser
-    def-loader.js        - TV-family/HB DEF object loader
-    gbox-loader.js       - RA0/RA1/CL0 ground box loader
-    racetrack-loader.js  - CPR TRK/TTX racetrack layer loader
-    terrain-builder.js   - terrain mesh and atlas builder
-    bin-decoder.js       - BIN mesh decoder
-    texture-decoder.js   - RAW/ACT texture decoder to RGBA
-    binary-reader.js     - low-level typed binary reader
+https://example.com/tracks/circuit.pod
+/downloads/track-pack.zip
+../archives/track.pod
 ```
 
----
+Relative paths are resolved against the viewer page, and cross-origin URLs must allow CORS. ZIP loading uses the first POD found in the archive.
 
-## Loading From URLs
+## Architecture
 
-The viewer can load archives from the page itself, or from query parameters. This makes it easy to host `JSTrackViewer` on a site and point it at a track archive in another folder on the same domain.
+| Component | Role |
+|---|---|
+| ES modules | Application controller, archive staging, navigation, and scene management |
+| Module Web Worker | POD indexing, track parsing, model decoding, and terrain construction |
+| OPFS | Isolated temporary archive and extracted-asset storage |
+| Three.js r169 | Terrain, model, water, backdrop, lighting, and overlay rendering |
+| fflate | ZIP extraction |
 
-Examples:
-
-- Root-relative path on the same domain: `/JSTrackViewer/?file=/resources/tracks/circuit.pod`
-- Relative path from the viewer folder: `/JSTrackViewer/?file=../archives/track.pod`
-- Full URL: `/JSTrackViewer/?url=https://example.com/resources/tracks/track.pod`
-- ZIP URL: `/JSTrackViewer/?url=https://example.com/resources/tracks/track.zip`
-
-Notes:
-
-- `?file=` and `?url=` are both supported.
-- Relative URLs are resolved from the viewer page location.
-- Root-relative URLs that start with `/` are usually the clearest choice for webmasters.
-- Remote loading still uses browser `fetch()`, so cross-origin URLs must allow CORS.
-- ZIP loading extracts the first `.POD` file found inside the archive.
-
----
+```text
+src/
+├── app.js                  User-interface controller and track-loading flow
+├── scene.js                Three.js scene, terrain, objects, and overlays
+├── nav.js                  Free-flight camera navigation
+├── worker-client.js        Promise wrapper for the module worker
+├── zip-utils.js            POD-in-ZIP extraction
+├── shared/                 OPFS, path, palette, and CPR schema helpers
+└── worker/                 POD, SIT, LVL, TRK, BIN, texture, and terrain decoders
+```
 
 ## Known limitations
 
-- Rendering is inspection-focused; it does not emulate race physics, AI, audio playback, weapons, enemies, checkpoint, tunnels or game scripting.
-- CPR racetrack wall rendering is supported but still approximate compared with the original renderer.
-- TV/F3/HB tunnels are not supported.
-- Animated models or textures are not supported.
-- Ramps are not displayed.
-- TopCrush models are not supported.
-- Models or art not available on the POD file is not rendered.
-- Must be served over `http://localhost` or HTTPS; `file://` is not supported.
+- Rendering is intended for inspection and does not emulate physics, AI, audio, weapons, enemies, or game scripting.
+- CART Precision Racing wall heights are calibrated from the wall art rather than read from the engine, so absolute wall height is approximate.
+- CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
+- CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
+- Terminal Velocity/Fury3 and Hellbender tunnels are not supported.
+- Animated models and textures are not supported.
+- Assets referenced by a track but absent from its POD cannot be rendered.
 
----
+## Format documentation
 
-## License
+- [CART Precision Racing track layer analysis](docs/CPR_TRACK_LAYER_ANALYSIS.md)
+- [CPREdit guide](docs/CPREDIT_GUIDE.md)
 
-This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
+## Related projects
+
+- [JTraxx](https://github.com/juanputrerasm/JTraxx3) — desktop track editor on which JSTrackViewer is based.
+- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer) — browser-based MTM1 and MTM2 truck viewer.
+- [JSPod](https://github.com/juanputrerasm/JSPod) — browser-based POD archive and individual-asset viewer.
+
+JSTrackViewer follows the lineage of JTraxx and the original Traxx track editor for Monster Truck Madness and Monster Truck Madness 2.
+
+## Credits and license
+
+Developed by **Juan Pablo Utreras** for the Monster Truck Madness Guild.
+
+Released under the [Apache License 2.0](LICENSE).
+
+The game names and Terminal Reality are trademarks of their respective owners. This project is an independent community tool and is not affiliated with or endorsed by their owners.
