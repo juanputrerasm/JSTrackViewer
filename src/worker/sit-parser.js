@@ -16,7 +16,7 @@ export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
 
   const lvlName = normalizeArchiveName(sitLines[0]);
   const doc = createDoc(podComment);
-  doc.origin = detectSitOrigin(sitLines);
+  doc.origin = detectSitOrigin(sitLines, sitEntry.title ?? "");
   doc.prefix = prefixFromName(lvlName);
 
   // Parse LVL (embedded terrain references)
@@ -422,11 +422,45 @@ function parseLegacyWorldTriplet(value, rawBytesPerCell) {
   return [x, y, Number.isFinite(z) ? z : 0];
 }
 
-function detectSitOrigin(sitLines) {
-  const content = sitLines.join("\n").toUpperCase();
-  if (content.includes("MTM1") || content.includes("MONSTER TRUCK MADNESS 1")) return "MTM1";
-  if (content.includes("CPR") || content.includes("CART PRECISION RACING")) return "CPR";
-  return "MTM2";
+/*
+  Which game a SIT came from.
+
+  A SIT carries no version field and never names its game. The previous check searched the
+  whole file for "MTM1" and "CPR", and neither string occurs in any of the 47 stock SIT files
+  across the three families (MTM1 14, MTM2 15, CPR 18), so both branches were dead and every
+  track was reported as MTM2.
+
+  The families are told apart by their record schema instead, which is stable because MTM2
+  added records to the MTM1 format and CPR forked that format for open wheel racing:
+
+    CPR   adds a pit stop and driver aid block
+    MTM2  adds weather and stadium records
+    MTM1  has neither
+
+  Every marker below appears in all of its own family's stock SITs and in none of the other
+  two families'. MTM1 is the residual and has no marker of its own, because its schema is a
+  strict subset of MTM2's: "no weather mask and no stadium record" is what being an MTM1
+  track consists of. The cost of that is that a SIT too damaged to carry either record reads
+  as MTM1 rather than MTM2, which loses the terrain overlap in buildAtlas.
+*/
+const CPR_SIT_MARKERS = [
+  "^currentPitStop",
+  "@ap.guy2follow,ap.lineOffset,ap.place,ap.pit",
+  "*** VARLOW ***",
+];
+const MTM2_SIT_MARKERS = [
+  "!ambient sound,track length,weather mask",
+  "!stadiumFlag,x,z,sx,sz,stadiumModelName",
+];
+
+function detectSitOrigin(sitLines, sitTitle = "") {
+  // Community Patch 3 writes .SI2 only for MTM2, so the extension settles it on its own and
+  // covers any fork-specific SIT body this build has not seen.
+  if (sitTitle.toUpperCase().endsWith(".SI2")) return "MTM2";
+  const lines = new Set(sitLines.map((line) => line.trim()));
+  if (CPR_SIT_MARKERS.some((marker) => lines.has(marker))) return "CPR";
+  if (MTM2_SIT_MARKERS.some((marker) => lines.has(marker))) return "MTM2";
+  return "MTM1";
 }
 
 function trackTypeFromValue(v) {
