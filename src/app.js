@@ -151,7 +151,7 @@ export class TrackViewerApp {
       const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name);
       await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
-      this._setStatus(`Error: ${err.message}`);
+      this._showError(`Error: ${err.message}`);
     } finally {
       this._hideLoading();
     }
@@ -168,7 +168,7 @@ export class TrackViewerApp {
       const staged = await this._podBytesFromContainer(new Uint8Array(buffer), name, "URL");
       await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
-      this._setStatus(`Error: ${err.message}`);
+      this._showError(`Error: ${err.message}`);
     } finally {
       this._hideLoading();
     }
@@ -237,7 +237,7 @@ export class TrackViewerApp {
       // Focus viewport after load
       this._doc.getElementById("viewport")?.focus();
     } catch (err) {
-      this._setStatus(`Error loading track: ${err.message}`);
+      this._showError(`Error loading track: ${err.message}`);
       console.error(err);
     } finally {
       this._hideLoading();
@@ -327,16 +327,31 @@ export class TrackViewerApp {
   _setStatus(msg) {
     const el = this._doc.getElementById("status-text");
     if (el) el.textContent = msg;
+    // There is no status bar in the markup, so without this every status line, including
+    // every caught error, went nowhere at all.
+    else console.info(`[JSTrackViewer] ${msg}`);
   }
 
   _showLoading(msg) {
+    this._errorShown = false;
     const overlay = this._doc.getElementById("loading-overlay");
     const msgEl   = this._doc.getElementById("loading-msg");
     if (overlay) overlay.hidden = false;
-    if (msgEl) msgEl.textContent = msg;
+    if (msgEl) { msgEl.textContent = msg; msgEl.style.color = ""; }
+  }
+
+  /** Leave the failure on screen rather than hiding the overlay over a track that never came. */
+  _showError(msg) {
+    console.error(`[JSTrackViewer] ${msg}`);
+    this._errorShown = true;
+    const overlay = this._doc.getElementById("loading-overlay");
+    const msgEl   = this._doc.getElementById("loading-msg");
+    if (overlay) overlay.hidden = false;
+    if (msgEl) { msgEl.textContent = msg; msgEl.style.color = "#ff8080"; }
   }
 
   _hideLoading() {
+    if (this._errorShown) return;
     const overlay = this._doc.getElementById("loading-overlay");
     if (overlay) overlay.hidden = true;
   }

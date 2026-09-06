@@ -9,8 +9,20 @@ let podOpfsPath = null;
 // Cache for POD entry bytes (keyed by "offset_length")
 const _byteCache = new Map();
 
+/*
+  Announce that the module graph evaluated.
+
+  Without this there is no way to tell "the worker died before it could run" from "the worker
+  is alive but slow", and the two look identical: the error event for a module graph that
+  failed to link carries an empty message and no filename, because the failure belongs to no
+  single script. A stale cached module is the usual cause, and one unresolved import kills the
+  whole graph.
+*/
+self.postMessage({ ready: true });
+
 self.onmessage = async (event) => {
   const { id, type, payload } = event.data;
+  if (id === undefined) return;
   try {
     let result;
     if (type === "indexPod") {
