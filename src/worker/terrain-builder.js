@@ -15,6 +15,18 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const { gridSize, rawData, clrData, rawBytesPerCell, clrBytesPerCell } = terrain;
   const hs = heightScale ?? 4;
 
+  /*
+    Horizontal and vertical scale are properties of the terrain, not constants.
+
+    The MTM family is 64 world units per cell and encodes a 16-bit height as a 10.6 fixed
+    point value, which is what the historical `>>> 6` was. 4x4 Evolution is 32 units per cell
+    with a 11.5 fixed point height, so it sets cellSize 32 and heightDivisor 32 and keeps its
+    own units - see evo-coords.js. A descriptor that says nothing gets the MTM values, so
+    every existing track builds exactly as before.
+  */
+  const cellSize = terrain.cellSize ?? CELL_SIZE;
+  const heightDivisor = terrain.heightDivisor ?? null;
+
   // Build texture atlas
   const overlapPixels = usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0;
   const {
@@ -40,16 +52,16 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       const vBase = cell * 4;
       const iBase = cell * 6;
 
-      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz);
-      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz);
-      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1);
-      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1);
+      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz,     heightDivisor);
+      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz,     heightDivisor);
+      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1, heightDivisor);
+      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1, heightDivisor);
 
-      const x0 = cx * CELL_SIZE;
-      const x1 = (cx + 1) * CELL_SIZE;
+      const x0 = cx * cellSize;
+      const x1 = (cx + 1) * cellSize;
       // Flip Z so JTraxx Y=0 (south) maps to large Three.js Z (camera starts south, looks north/-Z)
-      const z0 = (gridSize - cz) * CELL_SIZE;
-      const z1 = (gridSize - cz - 1) * CELL_SIZE;
+      const z0 = (gridSize - cz) * cellSize;
+      const z1 = (gridSize - cz - 1) * cellSize;
 
       // Positions (4 corners of the quad)
       const pOff = vBase * 3;
@@ -135,7 +147,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   }
 
   return {
-    gridSize, cellSize: CELL_SIZE, heightScale: hs,
+    gridSize, cellSize, heightScale: hs,
     positions: positions.buffer,
     normals: normals.buffer,
     uvs: uvs.buffer,
@@ -363,7 +375,7 @@ function decodeTerrainTexture(tex, trackPalette) {
   }
 }
 
-function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz) {
+function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor) {
   if (!rawData) return 0;
   const x = Math.min(cx, gridSize - 1);
   const z = Math.min(cz, gridSize - 1);
@@ -371,6 +383,13 @@ function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz) {
   if (rawBytesPerCell === 1) return rawData[off] ?? 0;
   const lo = rawData[off] ?? 0;
   const hi = rawData[off + 1] ?? 0;
+  /*
+    An explicit divisor means the grid's encoding is known, so divide and keep the fraction.
+    Evo's low five bits are real elevation - ASPEN alone uses 8,617 distinct heights - and
+    shifting them away terraces every slope into 1-unit steps.
+  */
+  if (heightDivisor) return (lo | (hi << 8)) / heightDivisor;
+  // MTM-family fallback: a zero high byte is treated as an 8-bit grid stored two bytes wide.
   if (hi === 0) return lo;
   return (lo | (hi << 8)) >>> 6;
 }

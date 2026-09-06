@@ -95,6 +95,7 @@ function navLabelSuffix(point) {
   }
 }
 const GRID_COLOR = 0x444466;
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const AMBIENT_COLOR = 0x888888;
 const SUN_COLOR = 0xfff4e0;
 const BACKGROUND_COLOR = 0xbcd6e7;
@@ -171,6 +172,36 @@ function traxxPrismMatrix(psi, theta, phi, posX, posY, posZ) {
   );
 }
 
+/** True for the two 4x4 Evolution generations, which share one placement convention. */
+function isEvoOrigin(origin) {
+  return origin === "EVO1" || origin === "EVO2";
+}
+
+/**
+ * Object matrix for 4x4 Evolution geometry.
+ *
+ * Evo is Y-up in both its .SIT placements and its .SMF models, so it needs none of the Traxx
+ * stack: no 0.75 vertical stretch (that ratio is Traxx's 128-vs-96 units per foot, and Evo
+ * has one uniform scale), and no baseZ, which is a .BIN field with no .SMF equivalent.
+ *
+ * The viewer presents the world with Z flipped, which the terrain builder has always done.
+ * That flip is a reflection, so an Evo rotation R becomes F.R.F with F = diag(1,1,-1):
+ * a heading psi about the up axis becomes -psi, a pitch about X becomes -theta, and a roll
+ * about Z is unchanged. Model vertices arrive with Z already negated and their winding
+ * reversed to match (see smf-parser.js), so this only has to carry the rotation.
+ *
+ * The heading is verified against the stock tracks; see evo-coords.js for how, and for why
+ * the pitch/roll assignment is correlated rather than verified.
+ */
+function evoModelMatrix(psi, theta, phi, posX, posY, posZ) {
+  const yaw = new THREE.Matrix4().makeRotationY(-psi);
+  const pitch = new THREE.Matrix4().makeRotationX(-theta);
+  const roll = new THREE.Matrix4().makeRotationZ(phi);
+  const matrix = yaw.multiply(pitch).multiply(roll);
+  matrix.setPosition(posX, posY, posZ);
+  return matrix;
+}
+
 export class TrackScene {
   constructor(container) {
     this._container = container;
@@ -240,6 +271,7 @@ export class TrackScene {
       powerups:   new THREE.Group(),
       water:      new THREE.Group(),
       trucks:     new THREE.Group(),
+      vegetation: new THREE.Group(),
       backdrop:   new THREE.Group(),
     };
     for (const g of Object.values(this._groups)) this._scene.add(g);
@@ -323,6 +355,7 @@ export class TrackScene {
     this._groups.objects.visible = f.objects;
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboards.visible = f.objects;
+    this._groups.vegetation.visible = f.objects;
     this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
     this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
     this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
@@ -420,6 +453,7 @@ export class TrackScene {
     this._reportMissingModelTextures(trackData);
     if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
+    if (trackData.vegetation?.trees?.length) this._buildVegetation(trackData);
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
     if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
     if (trackData.powerups?.length) this._buildPowerups(trackData);
@@ -610,8 +644,20 @@ export class TrackScene {
     const worldSize = gs * cs;
     const y = waterLevel * (this._heightScale);
     const geo = new THREE.PlaneGeometry(worldSize, worldSize);
+    /*
+      Evo states its water colour and opacity in the .LVL rather than leaving it to the
+      viewer, and the two stock tracks differ sharply - BAJBEACH's tropical 0,200,235 against
+      ASPEN's near-white 250,250,250 - so drawing both in one hardcoded blue would misreport
+      the level. Tracks that carry no such record keep the viewer's default.
+    */
+    const evoWater = trackData.water?.color;
     const mat = new THREE.MeshLambertMaterial({
-      color: WATER_COLOR, transparent: true, opacity: 0.6, side: THREE.DoubleSide
+      color: evoWater
+        ? new THREE.Color(evoWater[0] / 255, evoWater[1] / 255, evoWater[2] / 255)
+        : WATER_COLOR,
+      transparent: true,
+      opacity: evoWater ? Math.min(1, Math.max(0, evoWater[3] / 255)) : 0.6,
+      side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
@@ -1205,13 +1251,24 @@ export class TrackScene {
       const modelName = box.modelName;
       const model = modelName ? trackData.models?.[modelName] : null;
       const renderModel = model?.meshes?.length;
-      const isBillboard = box.type === BOXTYPE_NO_COLLIDE_FACING;
+      // Evo 2 names the camera-facing class outright (CNonCollideFacing); MTM uses a type id.
+      const isBillboard = box.type === BOXTYPE_NO_COLLIDE_FACING || box.billboard === true;
       const isCheckpoint = box.type === BOXTYPE_CHECKPOINT;
       const isRamp = box.type === BOXTYPE_RAMP;
 
       if (renderModel) {
         this._buildBinModel(model, box, hs, ws, trackData, { checkpoint: isCheckpoint, billboard: isBillboard });
       }
+
+      /*
+        An Evo box with no model draws nothing.
+
+        Its collision classes carry a `size` rather than the Traxx half-extents, and a third
+        of a stock track's placements are model-less CCollisionBox / CCheckpoint records.
+        Falling through to the prism path would default them all to 32 and bury the track
+        under hundreds of grey cubes that stand for nothing the game draws.
+      */
+      if (!renderModel && isEvoOrigin(trackData.origin)) continue;
 
       if (!renderModel) {
         // Traxx half-extents are width/length/height as authored; THREE.BoxGeometry takes
@@ -1341,7 +1398,11 @@ export class TrackScene {
 
     // Alpha cutouts belong in the opaque queue and must write depth, so ALPHATEST takes
     // precedence over BLEND when a material carries both.
-    const alphaTested = material ? !!(flags & F.ALPHATEST) : !!mesh.transparent;
+    // `textureHasAlpha` is the .SMF case: an .OPA plane or a two-sample .TIF is an opacity
+    // channel whatever the material flag says. See evo-track-loader.js for why it has to win.
+    const alphaTested = material
+      ? !!(flags & F.ALPHATEST)
+      : !!mesh.transparent || mesh.textureHasAlpha === true;
     const blended = material
       ? !!(flags & F.BLEND) && !alphaTested
       : false;
@@ -1355,7 +1416,12 @@ export class TrackScene {
     const props = {
       color,
       map: map ?? null,
-      side: material && (flags & F.TWOSIDED) ? THREE.DoubleSide : THREE.BackSide,
+      /*
+        A .SMF mesh states its sidedness by convention rather than by a flag, and its foliage,
+        fences and banners are all single-sided sheets meant to be seen from behind. They are
+        drawn double-sided; only the legacy .BIN path has a winding to compensate for.
+      */
+      side: mesh.doubleSided || (material && (flags & F.TWOSIDED)) ? THREE.DoubleSide : THREE.BackSide,
       transparent: blended,
       opacity: blended ? Math.min(1, Math.max(0, material?.baseAlpha ?? 1)) : 1,
       alphaTest: alphaTested
@@ -1385,16 +1451,21 @@ export class TrackScene {
     const checkpoint = options.checkpoint === true;
     const billboard = options.billboard === true;
     const [wx, wy, wz] = box.position ?? [0, 0, 0];
+    const evo = isEvoOrigin(trackData.origin);
 
     // World position in Three.js space
     const posX = wx;
-    const posY = trackData.origin === "HB" ? wz * 3 : wz * hs + (model.baseZ ?? 0) * 0.75;
+    const posY = evo ? wz * hs
+      : trackData.origin === "HB" ? wz * 3
+      : wz * hs + (model.baseZ ?? 0) * 0.75;
     const posZ = ws - wy;
 
     // SIT angles are in RADIANS: psi=yaw (around Traxx Z height), theta=pitch (X), phi=roll (Y depth).
     // Model vertices are in raw Traxx local space; the 0.75 height stretch lives in the matrix,
     // because Traxx applies it after the rotation and it does not commute with one.
-    const modelMatrix = traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ);
+    const modelMatrix = evo
+      ? evoModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ)
+      : traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ);
 
     const group = new THREE.Group();
     const meshRoot = billboard ? new THREE.Group() : group;
@@ -1408,6 +1479,8 @@ export class TrackScene {
       geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
       geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
       geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+      // .SMF geometry is indexed; .BIN meshes arrive already expanded to triangle soup.
+      if (mesh.indices) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
       geo.computeBoundingSphere();
 
       meshRoot.add(new THREE.Mesh(geo, this._createModelMaterial(mesh)));
@@ -1422,7 +1495,8 @@ export class TrackScene {
       // stretch still applies. Three composes local matrices as T*R*S, and a scale of
       // (1, 0.75, 1) commutes with the pure Y-axis rotation `lookAt` produces, so putting it
       // on the group's scale is equivalent to Traxx applying it after the rotation.
-      group.scale.set(1, TRAXX_Z_STRETCH, 1);
+      // Evo has no vertical world stretch to preserve while the prop yaws to face the camera.
+      group.scale.set(1, evo ? 1 : TRAXX_Z_STRETCH, 1);
       wireGroup.scale.copy(group.scale);
 
       // The authored orientation, kept so that turning the billboard toggle off restores what
@@ -1435,12 +1509,16 @@ export class TrackScene {
       group.userData.staticMatrix = modelMatrix.clone();
       wireGroup.userData.staticMatrix = modelMatrix.clone();
 
-      const localAxisMatrix = new THREE.Matrix4().set(
-         1,  0, 0, 0,
-         0,  0, 1, 0,
-         0, -1, 0, 0,
-         0,  0, 0, 1
-      );
+      // Traxx model space is Z-up and needs the swap into scene axes; Evo geometry is already
+      // on them, so its billboard root is the identity.
+      const localAxisMatrix = evo
+        ? new THREE.Matrix4()
+        : new THREE.Matrix4().set(
+           1,  0, 0, 0,
+           0,  0, 1, 0,
+           0, -1, 0, 0,
+           0,  0, 0, 1
+        );
       meshRoot.matrixAutoUpdate = false;
       meshRoot.matrix.copy(localAxisMatrix);
       meshRoot.matrixWorldNeedsUpdate = true;
@@ -1462,6 +1540,67 @@ export class TrackScene {
     const targetWireGroup = billboard ? this._groups.billboardsWire : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
     targetGroup.add(group);
     targetWireGroup.add(wireGroup);
+  }
+
+  /*
+    Evo 2 vegetation, drawn with instancing.
+
+    A .VEG places 6,169 trees in BAJBEACH and 11,342 in PEAK out of four models. One mesh per
+    model per draw call is the only way that stays interactive, and it is what the game does
+    too - `maxTrees` is 20,000-25,000 in the stock tracks.
+
+    A tree record carries position, the model slot and a size, but no orientation: the .VEG
+    has no rotation field at all. Leaving every instance at yaw 0 makes a forest of identical
+    cardboard cutouts all facing the same way, so each is turned by a yaw derived from its own
+    record byte. That is a viewer convention, stated here rather than hidden, and it is
+    deterministic so a track looks the same on every load.
+  */
+  _buildVegetation(trackData) {
+    const hs = this._heightScale;
+    const ws = this._worldSize(trackData);
+
+    const byModel = new Map();
+    for (const tree of trackData.vegetation.trees) {
+      if (!byModel.has(tree.modelName)) byModel.set(tree.modelName, []);
+      byModel.get(tree.modelName).push(tree);
+    }
+
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const position = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+
+    for (const [modelName, trees] of byModel) {
+      const model = trackData.models?.[modelName];
+      if (!model?.meshes?.length) continue;
+
+      for (const mesh of model.meshes) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
+        geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
+        geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+        if (mesh.indices) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
+        geo.computeBoundingSphere();
+
+        const instanced = new THREE.InstancedMesh(geo, this._createModelMaterial(mesh), trees.length);
+        for (let i = 0; i < trees.length; i++) {
+          const tree = trees[i];
+          const [wx, wy, wz] = tree.position;
+          position.set(wx, wz * hs, ws - wy);
+          quaternion.setFromAxisAngle(UP_AXIS, tree.yaw ?? 0);
+          // A slot is scaled to the footprint and height its .VEG declares, which is not the
+          // same ratio on both axes for any stock slot.
+          const [sx, sy, sz] = tree.scale ?? [1, 1, 1];
+          scale.set(sx, sy, sz);
+          instanced.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+        }
+        instanced.instanceMatrix.needsUpdate = true;
+        // Trees are scattered across the whole world, so a per-instance frustum test is what
+        // culling has to work from; the merged bounds would span the map and never cull.
+        instanced.computeBoundingSphere();
+        this._groups.vegetation.add(instanced);
+      }
+    }
   }
 
   _updateBillboards() {

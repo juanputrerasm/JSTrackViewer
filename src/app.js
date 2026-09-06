@@ -315,6 +315,16 @@ export class TrackViewerApp {
         TV-family map content that has no MTM equivalent. Each row is only added when the
         level actually carries that side file, so an MTM track's stats panel is unchanged.
       */
+      /*
+        4x4 Evolution content. A .SMF track's models and art are counted because they are the
+        bulk of what it draws, and its vegetation is a separate instanced layer with no
+        equivalent in the other games - a stock Evo 2 track places 6,000-11,000 trees.
+      */
+      if (s.sitVersion) statsPairs.push(["SIT version", `v${s.sitVersion}`]);
+      if (s.modelCount) statsPairs.push(["Models", s.modelCount]);
+      if (s.modelTextureCount) statsPairs.push(["Model textures", s.modelTextureCount]);
+      if (s.shadowTextureCount) statsPairs.push(["Shadow textures", s.shadowTextureCount]);
+      if (s.treeCount) statsPairs.push(["Trees", s.treeCount]);
       if (s.navPointCount) statsPairs.push(["Nav points", s.navPointCount]);
       if (s.tunnelCount) statsPairs.push(["Tunnels", s.tunnelCount]);
       if (s.powerupCount) statsPairs.push(["Powerups", s.powerupCount]);

@@ -87,6 +87,23 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     return v;
   };
 
+  /*
+    4x4 Evolution tracks are a separate ingestion path, not a variant of this one.
+
+    Their .SIT, .LVL and .TEX share nothing but a file extension with the MTM-family ones,
+    their models are text .SMF rather than binary .BIN, and their terrain is a 32-unit cell
+    with 11.5 fixed point heights. Detection is on the .SIT header - line 0 is the literal
+    word `version` - so an Evo track is never handed to the MTM parser, which would read that
+    word as a .LVL filename and then misparse the whole file.
+  */
+  if (choice.format === "SIT") {
+    const { isEvoSit } = await import("./evo/evo-sit-parser.js");
+    if (isEvoSit(syncGetBytes(choice.entry))) {
+      const { loadEvoTrack } = await import("./evo/evo-track-loader.js");
+      return loadEvoTrack(podIndex, syncGetBytes, choice.entry);
+    }
+  }
+
   let doc;
   if (choice.format === "SIT") {
     doc = parseSitTrack(podIndex, syncGetBytes, choice.entry, podIndex.comment);

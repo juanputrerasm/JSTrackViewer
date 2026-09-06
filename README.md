@@ -8,7 +8,7 @@
 
 **A browser-based 3D track viewer for classic Terminal Reality games.**
 
-JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terrain, textures, objects, courses, ground boxes, water, backdrops, and game-specific track data in Three.js. It supports tracks from **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3/F-Zone**, **Hellbender**, and **CART Precision Racing**. Archive processing happens locally in the browser.
+JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terrain, textures, objects, courses, ground boxes, water, backdrops, and game-specific track data in Three.js. It supports tracks from **Monster Truck Madness**, **Monster Truck Madness 2**, **Terminal Velocity**, **Fury3/F-Zone**, **Hellbender**, **CART Precision Racing**, **4x4 Evolution**, and **4x4 Evolution 2**. Archive processing happens locally in the browser.
 
 **Live application:** [Open JSTrackViewer on GitHub Pages](https://juanputrerasm.github.io/JSTrackViewer/)
 
@@ -20,7 +20,7 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 
 - **POD and ZIP loading** — open a local archive or fetch one from a URL.
 - **Multi-track archives** — discover and switch between multiple `.SIT` or `.LVL` tracks without reopening the archive.
-- **Broad game support** — inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, and CART Precision Racing track formats.
+- **Broad game support** — inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, CART Precision Racing, and 4x4 Evolution 1/2 track formats.
 - **Modern MTM2 (Community Patch 3) support** — read POD1-64 archives, `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
 - **Detailed track rendering** — display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops.
 - **CPR racetrack layers** — render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
@@ -35,12 +35,19 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 |---|---|
 | POD1 | Original Terminal Reality archive layout with 32-byte directory name fields |
 | POD1-64 (Extended POD1) | POD1-compatible Community Patch 3 layout with 64-byte directory name fields |
+| POD2 | Indexed archive layout used by 4x4 Evolution 1 and 2 |
 | ZIP | POD archives packaged in ZIP files |
 | SIT | MTM, MTM2, and CART Precision Racing track definitions |
+| SIT v6 / v7 | 4x4 Evolution 1 and 2 scene scripts, placements, and course centrelines |
 | LVL + DEF | Terminal Velocity/Fury3-family and Hellbender levels and object placement |
+| LVL + TEX + CLR | 4x4 Evolution terrain manifest, texture table, and tile-index grid |
 | TRK + TTX | CART Precision Racing road surfaces, walls, and textures |
 | BIN | Static textured models and game-family scale handling |
+| SMF | 4x4 Evolution static models, versions 2 to 4, including bump materials |
+| VEG | 4x4 Evolution 2 vegetation, drawn with instancing |
 | RAW + ACT | Legacy paletted textures with fallback palette resolution |
+| RAW + ACT + OPA | 4x4 Evolution paletted textures with an 8-bit opacity plane |
+| TIFF | 4x4 Evolution 2 palette-indexed art, with an optional alpha sample |
 | RA0, RA1, and CL0 | Ground-box and collision data |
 
 “POD1-64” is not a 64-bit archive format or an official new POD version. It identifies the POD1-compatible layout that widens each directory name field from 32 to 64 bytes, allowing Community Patch 3 content to use longer asset paths.
@@ -128,11 +135,17 @@ src/
 - CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
 - CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
 - Terminal Velocity/Fury3 and Hellbender tunnels are not supported.
+- 4x4 Evolution `.SDW` baked shadow overlays and `.RTD` grids are read and carried but not drawn, so tracks that paint shadow tiles render without them.
+- 4x4 Evolution 2 material stages beyond diffuse and alpha - bump, cubic reflection, gloss, and projected shadows - are not reproduced.
+- 4x4 Evolution vegetation is grounded on the drawn terrain surface and yawed by a viewer convention, because a `.VEG` record carries no orientation and its own elevation sits below the surface; `treeBiasY` is parsed but not applied.
+- 4x4 Evolution water height is read on a half-unit scale, established from the stock tracks rather than from engine source; see the format analysis for the evidence.
+- Standalone downloadable 4x4 Evolution `.LTE` tracks are not supported; they are a compressed format that reuses assets the track does not carry.
 - Animated models and textures are not supported.
 - Assets referenced by a track but absent from its POD cannot be rendered.
 
 ## Format documentation
 
+- [4x4 Evolution 1/2 track rendering analysis](docs/4X4_EVO_TRACK_RENDERING_ANALYSIS.md)
 - [CART Precision Racing track layer analysis](docs/CPR_TRACK_LAYER_ANALYSIS.md)
 - [CPREdit guide](docs/CPREDIT_GUIDE.md)
 

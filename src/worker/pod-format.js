@@ -9,8 +9,38 @@ const LONG_ENTRY_NAME_SIZE = 64;
 const LONG_ENTRY_SIZE = 72;
 const MAX_REASONABLE_ITEMS = 8192;
 
+/*
+  POD2, the container 4x4 Evolution 1 and 2 ship their tracks in.
+
+    0x00  4   "POD2"
+    0x04  4   archive CRC-32/MPEG-2 over 0x08..EOF
+    0x08  80  NUL-terminated comment, which is the track's display name
+    0x58  4   directory entry count
+    0x5c  4   audit record count
+    0x60  n*20 directory records
+    ...   variable-length NUL-terminated name table, then payloads
+
+  Each 20-byte record is five little-endian uint32: name-table offset, payload length,
+  absolute payload offset, Unix timestamp, payload CRC-32/MPEG-2.
+
+  Unlike POD1 this is a real indexed format with a signature, so it is detected outright
+  rather than by trying a layout and seeing whether the offsets come out plausible. The CRCs
+  are read but not verified: a viewer that refuses a track because one byte of a .WAV it will
+  never play went bad is worse than one that draws the track.
+*/
+const POD2_SIGNATURE = "POD2";
+const POD2_COMMENT_OFFSET = 0x08;
+const POD2_COUNT_OFFSET = 0x58;
+const POD2_TABLE_OFFSET = 0x60;
+const POD2_ENTRY_SIZE = 20;
+const POD2_MAX_ITEMS = 65536;
+
 export async function indexPodFile(opfsPodPath) {
   const file = await readFile(opfsPodPath);
+  if (file.size < 4) throw new Error(`File too small to be a POD archive: ${opfsPodPath}`);
+  const signature = new TextDecoder("latin1").decode(
+    new Uint8Array(await file.slice(0, 4).arrayBuffer()));
+  if (signature === POD2_SIGNATURE) return readPod2(file);
   if (file.size < POD1_HEADER_SIZE) throw new Error(`File too small to be a POD archive: ${opfsPodPath}`);
   const headerBuffer = await file.slice(0, POD1_HEADER_SIZE).arrayBuffer();
   const headerView = new DataView(headerBuffer);
@@ -26,6 +56,66 @@ export async function indexPodFile(opfsPodPath) {
   const extended = await tryReadDirectory(file, itemCount, LONG_ENTRY_NAME_SIZE, LONG_ENTRY_SIZE, decoder);
   if (extended) return { format: "Extended POD1", comment, entries: extended };
   throw new Error("POD1 directory is neither a valid 32-byte nor 64-byte layout.");
+}
+
+async function readPod2(file) {
+  if (file.size < POD2_TABLE_OFFSET) throw new Error("File too small to be a POD2 archive.");
+  const headBuffer = await file.slice(0, POD2_TABLE_OFFSET).arrayBuffer();
+  const headView = new DataView(headBuffer);
+  const decoder = new TextDecoder("latin1");
+  const comment = decodeNullTerminated(
+    decoder, new Uint8Array(headBuffer, POD2_COMMENT_OFFSET, COMMENT_SIZE));
+  const itemCount = headView.getUint32(POD2_COUNT_OFFSET, true);
+  if (itemCount < 1 || itemCount > POD2_MAX_ITEMS) {
+    throw new Error(`Suspicious POD2 item count: ${itemCount}`);
+  }
+
+  const tableSize = itemCount * POD2_ENTRY_SIZE;
+  const nameTableOffset = POD2_TABLE_OFFSET + tableSize;
+  if (nameTableOffset > file.size) throw new Error("POD2 directory exceeds the file.");
+  const tableView = new DataView(
+    await file.slice(POD2_TABLE_OFFSET, nameTableOffset).arrayBuffer());
+
+  /*
+    The name table runs from the end of the directory to the first payload. Reading to the
+    first payload rather than to EOF keeps a corrupt path offset from walking into megabytes
+    of texture data looking for a NUL.
+  */
+  let firstPayload = file.size;
+  for (let i = 0; i < itemCount; i++) {
+    const offset = tableView.getUint32(i * POD2_ENTRY_SIZE + 8, true);
+    if (offset >= nameTableOffset && offset < firstPayload) firstPayload = offset;
+  }
+  const nameTable = new Uint8Array(await file.slice(nameTableOffset, firstPayload).arrayBuffer());
+
+  const entries = [];
+  for (let i = 0; i < itemCount; i++) {
+    const record = i * POD2_ENTRY_SIZE;
+    const pathOffset = tableView.getUint32(record + 0, true);
+    const length = tableView.getUint32(record + 4, true);
+    const dataOffset = tableView.getUint32(record + 8, true);
+    const timestamp = tableView.getUint32(record + 12, true);
+    if (pathOffset >= nameTable.length) throw new Error(`POD2 entry ${i} names a path outside the name table.`);
+    if (dataOffset > file.size || length > file.size - dataOffset) {
+      throw new Error(`POD2 entry ${i} payload lies outside the file.`);
+    }
+    let end = pathOffset;
+    while (end < nameTable.length && nameTable[end] !== 0) end++;
+    if (end >= nameTable.length) throw new Error(`POD2 entry ${i} has an unterminated path.`);
+    const name = trimPodString(decoder.decode(nameTable.subarray(pathOffset, end)));
+    if (!name) throw new Error(`POD2 entry ${i} has an empty path.`);
+    entries.push({
+      name,
+      normalizedName: normalizeArchiveName(name),
+      title: archiveTitle(name),
+      length,
+      offset: dataOffset,
+      timestamp,
+      // POD2 has no per-entry palette field; Evo pairs an .ACT with a .RAW by stem instead.
+      paletteName: null,
+    });
+  }
+  return { format: "POD2", comment, entries };
 }
 
 async function tryReadDirectory(file, itemCount, nameSize, entrySize, decoder) {
@@ -153,6 +243,9 @@ export function resolveAsset(podIndex, title) {
     findEntry(podIndex, "DATA/" + archiveTitle(upper)) ??
     findEntry(podIndex, "ART/" + archiveTitle(upper)) ??
     findEntry(podIndex, "MODELS/" + archiveTitle(upper)) ??
+    // Evo keeps its manifest in LEVELS\ and its scene script in WORLD\.
+    findEntry(podIndex, "LEVELS/" + archiveTitle(upper)) ??
+    findEntry(podIndex, "WORLD/" + archiveTitle(upper)) ??
     null
   );
 }

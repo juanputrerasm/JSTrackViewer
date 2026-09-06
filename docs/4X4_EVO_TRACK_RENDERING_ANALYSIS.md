@@ -35,16 +35,97 @@ ingestion projects.
 
 | Input | Container | Terrain/world description | Custom assets | JSTrackViewer status |
 |---|---|---|---|---|
-| Evo 1 complete track | POD2 | SIT v6 + LVL v1 + 16-bit grids + TEX v1 | SMF, indexed RAW/ACT, OPA | Not loadable |
-| Evo 2 complete track | POD2 | SIT v7 + LVL v1 + same core grids + TEX v1 | SMF, RAW/ACT/OPA, indexed TIFF, VEG; optional WAT | Not loadable |
-| Evo 1 downloadable track | Standalone binary LTE | Compressed/packed terrain and track state | Designed to reuse installed assets | Codec/schema unresolved; not loadable |
+| Evo 1 complete track | POD2 | SIT v6 + LVL v1 + 16-bit grids + TEX v1 | SMF, indexed RAW/ACT, OPA | **Implemented** |
+| Evo 2 complete track | POD2 | SIT v7 + LVL v1 + same core grids + TEX v1 | SMF, RAW/ACT/OPA, indexed TIFF, VEG; optional WAT | **Implemented** |
+| Evo 1 downloadable track | Standalone binary LTE | Compressed/packed terrain and track state | Designed to reuse installed assets | Explicitly deferred |
+| Evo 2 downloadable track | No sample or catalog evidence found | — | — | Probably unsupported; require a counterexample before implementing |
 
 The fastest credible milestone is complete Evo 1 POD rendering. It needs POD2,
 an Evo LVL/TEX path, SIT v6 handling, and an SMF decoder. Much of the current
 terrain atlas code can then be reused after correcting Evo scale and palette
 resolution. Evo 2 builds on that base but needs SIT v7, TIFF with indexed alpha,
-VEG, and richer material/lighting behavior. LTE should be a separate research
-spike: it is not a small wrapper around the POD files.
+VEG, and richer material/lighting behavior.
+
+**Project decision:** standalone track LTE is on hold. The user would have to
+supply the stock data referenced by the compact track, and that data may be spread
+across more than one POD with game-specific mount order and override rules. Until
+the codec, dependency identifiers, required archives, and lookup precedence are
+known, LTE is outside the JSTrackViewer implementation scope. The retained LTE
+analysis is research context only, not a planned milestone.
+
+## Implementation status
+
+Both complete-POD paths are implemented and load the four stock tracks with no
+warnings: `ASPEN.POD` and `THEHILL.POD` (Evo 1, SIT v6) and `BAJBEACH.pod` and
+`PEAK.pod` (Evo 2, SIT v7).
+
+| Area | Module | State |
+|---|---|---|
+| POD2 container | `src/worker/pod-format.js` | Signature-detected before POD1; bounds-checked |
+| Evo detection | `evo/evo-sit-parser.js` (`isEvoSit`) | On the `.SIT` header, before a parser is chosen |
+| SIT v6 / v7 | `evo/evo-sit-parser.js` | Both, plus the course centrelines |
+| LVL v1, WAT v1 | `evo/evo-lvl-parser.js` | Label-driven |
+| TEX v1 | `evo/evo-tex-parser.js` | Ordinary and shadow groups kept separate |
+| Terrain | `evo/evo-coords.js` + `terrain-builder.js` | Native 32-unit cell, 11.5 fixed point heights |
+| Models | `evo/smf-parser.js` | v2-v4, multi-group, v1 bump materials, animation frames |
+| Indexed art | `evo/evo-image.js` | RAW + per-texture ACT + OPA opacity plane |
+| Evo 2 TIFF | `evo/tiff-decoder.js` | Palette, 1 or 2 samples, uncompressed |
+| Vegetation | `evo/veg-parser.js` + `scene.js` | VEG v6, drawn with instancing |
+| Orchestration | `evo/evo-track-loader.js` | Produces the viewer's normal result shape |
+
+Carried but not yet drawn: the `.SDW` shadow overlay, the `.RTD` grid, and
+`.WAT`-driven water animation. Standalone `.LTE` remains out of scope.
+
+### What this work established beyond the original analysis
+
+Four things were measured against the stock corpus rather than assumed, and they
+change the recommendations this document originally made:
+
+1. **SIT v7 needs no per-class schema table.** Every value line inside a brace
+   instance carries a `// fieldName` comment naming its field. Checked across all
+   874 instances of both Evo 2 stock tracks: 11 distinct classes, zero unlabeled
+   lines. A label-driven reader therefore handles unknown classes and inserted
+   fields for free, which is strictly better than the per-class schema adapters
+   originally proposed. This largely retires open question 5.
+2. **Evo is Y-up, and `size` proves the model axis order.** The Evo 2 `size` field
+   equals the model's XYZ extent for all 57 distinct stock models, so `.SMF` is
+   read (x, height, z) rather than inferred from a few bounding boxes.
+3. **`wOrient`'s third component is the heading.** Scoring runs of elongated props
+   against the direction to their neighbours gives -psi 83%/67% versus +psi 65%/30%
+   on PEAK and BAJBEACH. The first two components are pitch and roll; no available
+   test separates a pitch/roll swap, so that assignment stays correlated.
+4. **Grid lookup order matters.** Evo 1 tracks ship the track logo as
+   `ART\<track>.RAW` alongside the `DATA\<track>.RAW` heightfield, so a
+   title-only lookup silently finds the 64 KB logo and the track loses its terrain.
+   `DATA\` is searched first.
+5. **`.LVL` water height is on a half-unit scale.** It is not in the world units
+   the rest of the file uses. At face value it floods 48% of ASPEN and 93% of
+   BAJBEACH and submerges all three tracks' racing lines; halved, every course
+   clears the water. BAJBEACH then confirms it three ways: a dead-flat sea floor at
+   136 over 22,182 cells, `SK1RAFT.SMF` floating at 182.2, and two piers at 173.8
+   and 175.5 - all consistent with a surface at 179 and impossible at 358. The
+   shoreline it produces is the skull-shaped island the track's own `.WAT` base name
+   names, with both lagoons filled; ASPEN's is a river winding along its valley.
+6. **`.SMF` V is not flipped.** Evo's V runs top-down and so does a
+   `THREE.DataTexture` (`flipY` defaults to false), so the conventions already
+   agree. Correlating model Y against V over every stock group, 50 of the 53 with a
+   clear vertical gradient map higher Y to lower V. The Blender add-on's flip exists
+   only because Blender's V is bottom-up; copying it renders every texture upside
+   down.
+7. **Vegetation models are centred, not based, on their origin.** PINE100 spans
+   Y -50..+50 and JUNGLE115 -57.5..+57.5, so placing the origin at ground level
+   buries half of every tree. They are also scaled non-uniformly: no stock slot's
+   `treeSizeX`/`treeSizeY` matches its art, and the two axes differ by different
+   ratios in all eight.
+8. **Vegetation transparency is not in the material flag.** All six stock tree
+   models write the `.SMF` transparent flag as 0 while naming a two-sample `.TIF`
+   whose second sample is opacity. The presence of an alpha channel - an `.OPA`
+   plane or that second sample - is the material intent.
+
+The terrain grid index is `raw[x + z * 256]`, chosen by measurement: comparing
+every stock `wPos` against the terrain beneath it, that ordering lands within a
+mean of 12-33 units while the transposed and row-flipped readings are off by
+65-407.
 
 ## What the `4x4e` repositories actually establish
 
@@ -152,8 +233,12 @@ that every track contains every extension.
 
 | Sample | Game | Entries | Render-relevant inventory |
 |---|---|---:|---|
+| `ASPEN.POD` | Evo 1 stock | 2,026 | 996 ACT, 998 RAW, 21 SMF, 5 OPA; one each of LVL/SIT/TEX/CLR/RAW-height/RTD/SDW |
+| `THEHILL.POD` | Evo 1 stock | 2,106 | 1,029 ACT, 1,031 RAW, 32 SMF, 8 OPA; same core world files |
 | `Jyard.pod` | Evo 1 stock/demo | 1,982 | 965 ACT, 967 RAW, 35 SMF, 9 OPA; one each of LVL/SIT/TEX/CLR/RAW-height/RTD/SDW |
 | `ZONA.pod` | Evo 1 stock/demo | 1,736 | 843 ACT, 845 RAW, 35 SMF, 7 OPA; same core world files |
+| `BAJBEACH.pod` | Evo 2 stock | 1,668 | 808 ACT, 809 RAW, 24 SMF, 13 TIF, 5 OPA, one VEG and WAT; same core world files |
+| `PEAK.pod` | Evo 2 stock | 2,150 | 1,042 ACT, 1,043 RAW, 41 SMF, 7 TIF, 8 OPA, one VEG and WAT; same core world files |
 | `DEN1.pod` | Evo 2 custom | 602 | 271 ACT, 272 RAW, 33 SMF, 14 TIF, 3 OPA, one VEG and WAT; same core world files |
 | `STG2ROAD.pod` | Evo 2 custom | 1,980 | 933 ACT, 934 RAW, 62 SMF, 30 TIF, 5 OPA, one VEG; same core world files |
 
@@ -375,9 +460,10 @@ bits 12..13  mirror
 bits 14..15  quarter-turn rotation
 ```
 
-That packing is compatible with the samples (all inspected stock/sample CLR flags
-happen to be zero), and should be retained, but add a fixture containing nonzero
-Evo mirror/rotation flags before declaring it verified for Evo-authored maps.
+That packing is compatible with the samples (all eight inspected stock/custom CLR
+grids have zero in the upper four bits), and should be retained, but add a fixture
+containing nonzero Evo mirror/rotation flags before declaring it verified for
+Evo-authored maps.
 
 ### TEX v1: terrain and shadow texture table
 
@@ -407,8 +493,9 @@ one “friction” or the second one “rotation” in the normalized API withou
 **Correlated:** SDW is another 131,072-byte, 256-by-256 `uint16` grid. In the Evo 1
 samples, non-sentinel values exactly cover the TEX table's appended shadow range;
 for example Jyard's ordinary count is 432, shadow count is 494, and SDW references
-432 through 925. `0x8000` is overwhelmingly the empty/no-overlay value. One Evo 2
-sample also uses `0x4000`; its exact meaning is unknown. Render SDW as a second
+432 through 925. `0x8000` is overwhelmingly the empty/no-overlay value. `0x4000`
+occurs sparsely in both generations (`THEHILL` and `PEAK`, eight cells each), so it
+is not an Evo 2-only addition; its exact meaning is unknown. Render SDW as a second
 terrain layer only after confirming sentinel/flag behavior and UV alignment.
 
 Ignoring SDW produces recognizable but visibly incomplete terrain on tracks with
@@ -417,18 +504,19 @@ painted/baked shadow tiles. It is not required for the first geometry milestone.
 ### RTD: unresolved per-cell grid
 
 **Verified shape, unknown meaning:** RTD is also a 131,072-byte `uint16` grid.
-Jyard's is all zero; the other samples contain dense high-entropy values. No RTD
-reader exists in either requested repository, and the values do not behave like a
-simple texture index. It may include driving-surface or terrain-detail information,
-but that is not established. Preserve it as an opaque optional grid and defer it
-until an A/B render or original reader trace proves a visual role.
+Jyard and ASPEN are all zero; the other inspected samples contain dense values. No
+RTD reader exists in either requested repository, and the values do not behave like
+a simple texture index. It may include driving-surface or terrain-detail
+information, but that is not established. Preserve it as an opaque optional grid
+and defer it until an A/B render or original reader trace proves a visual role.
 
-### SMF v4: static model geometry
+### SMF v2-v4: static model geometry
 
-Both Evo 1 and Evo 2 samples use text `C3DModel` files whose second line is version
-4. This format is substantially documented by Dummiesman's open-source Blender
-SMFImportExport add-on. Comparing its reader/writer with the sampled models gives
-the following grammar:
+Both games use text `C3DModel` files. All inspected Evo 2 stock models are version
+4. Most inspected Evo 1 stock models are version 4, but ASPEN also contains two
+version 2 files and one version 3 file. Dummiesman's open-source Blender
+SMFImportExport add-on supports these version gates. Comparing its reader/writer
+with the sampled models gives the following grammar:
 
 ```text
 "C3DModel"
@@ -491,8 +579,17 @@ Implement the reader as a counted state machine and validate every count and fac
 index. This is much safer than guessing the vertex/index boundary from commas.
 The Blender add-on skips extra animation frames, but their counted location is now
 known; JSTrackViewer can likewise preserve or skip them without desynchronizing.
-More samples are still needed to validate animation meaning, every group-name/LOD
-combination, empty bump names, and unusual object/material versions.
+The stock BAJBEACH corpus contains a real 30-frame SMF group, providing a useful
+animation fixture; all other groups in the four newly inspected stock tracks have
+one frame. ASPEN also supplies v2/v3 compatibility fixtures. More samples are still
+needed to validate animation timing/meaning, every group-name/LOD combination,
+empty bump names, and unusual object/material versions.
+
+The stock corpus also verifies Evo 2 `v1` bump materials: eight BAJBEACH groups and
+two PEAK groups use them. Evo 1 uses legacy materials in these samples. Observed
+group names include case variants of `OPAQUE`, `OPAQUEL`, `TRANSP`, `TRANSPI`,
+`TRANSPE`, and `TRANSPL`; matching should be case-insensitive while preserving the
+source spelling.
 
 JSTrackViewer's existing `BIN` decoder is not reusable as a byte-layout parser,
 but its normalized mesh/material output and scene hydration path are good targets
@@ -551,7 +648,8 @@ The coordinates are already world coordinates. The fourth per-tree value is in
 the byte range in observed files, but its exact random seed/model/color selection
 semantics are **unknown**. Preserve it. A baseline renderer can deterministically
 choose one of the four models from it, then refine that mapping from visual tests.
-VEG should use instancing; the samples permit 5,000 or 10,000 trees.
+VEG should use instancing; observed declared maxima range from 5,000 in custom
+tracks to 25,000 in stock BAJBEACH.
 
 ### WAT v1 and LVL water
 
@@ -569,7 +667,7 @@ height exists.
 | Terrain core | 256² 16-bit RAW/CLR/RTD/SDW, TEX v1 | Same observed core | Share terrain parser |
 | LVL | v1, same observed labels | v1, same observed labels | Share label-driven Evo LVL parser |
 | SIT objects | v6 sequential label/value boxes | v7 class registry + brace objects | Separate object decoders |
-| Models | SMF v4 | SMF v4 | One parser; retain normals/material metadata |
+| Models | SMF v2-v4 observed | SMF v4 observed | One version-gated parser; retain normals/material metadata |
 | Indexed images | RAW + ACT + OPA | RAW + ACT + OPA | Share decoder |
 | TIFF | Not present in inspected Evo 1 stock samples | Common for model/vegetation/map art | Evo 2 decoder requirement |
 | Vegetation | No VEG in inspected stock samples | VEG v6 | Evo 2 instanced vegetation pass |
@@ -582,13 +680,22 @@ while using SIT version to select the scene parser.
 
 ## Downloadable LTE tracks versus complete POD tracks
 
+> **Status: deferred.** Do not implement standalone LTE loading as part of Evo
+> POD2 support. In addition to the unknown codec, LTE does not appear self-contained:
+> correct rendering would require the user to provide one or more compatible stock
+> PODs and the viewer to reproduce the game's archive mount/override precedence.
+> The necessary dependency and precedence rules are not yet known.
+
 ### What is verified
 
-The public Evo 1 LTE catalog contains standalone files, and four inspected downloads
-were approximately 52-71 KB. They share the initial bytes
-`32 2a 44 11 60 04 45 ...`, contain no useful cleartext manifest or filenames, are
-not ZIP/gzip/tar/POD, and end in dense bit-oriented data. The exact format signature,
-field table, compression, and checksums remain unknown.
+The public Evo 1 LTE catalog contains standalone files. Six inspected downloads,
+including `WORKAHEAD.LTE` and `Caverav.lte`, range from 31,009 to 84,021 bytes. All
+share the seven-byte prefix `32 2a 44 11 60 04 45`; the eighth byte varies. Their
+byte entropy is approximately 7.87-7.96 bits/byte, consistent with strong
+compression or other entropy coding. They contain no useful cleartext manifest or
+filenames and are not ZIP/gzip/tar/POD. Some, but not all, happen to end in CRLF,
+so that is not a reliable terminator. The exact magic, field table, compression,
+and checksums remain unknown.
 
 Community Dreamcast documentation explains the design pressure: downloadable tracks
 were stored on the VMU, while an uncompressed 256x256 16-bit heightmap alone is
@@ -604,6 +711,25 @@ grids, texture tables, models, palettes, opacity maps, and other assets. An LTE
 decoder will therefore need an installed/base-asset catalog or a deliberate set of
 viewer substitutes after it reconstructs the terrain and placements. A standalone
 LTE cannot be expected to provide the same custom-art freedom as a POD.
+
+### Is LTE an Evo 1-only track format?
+
+**High-confidence inference, not executable-code proof:** treat downloadable track
+LTE as Evo 1-only. The community archive has a large, explicitly Evo 1 LTE catalog,
+whereas its Evo 2 catalog distributes ZIPs containing complete POD2 tracks. No Evo 2
+track LTE sample was found in the supplied installation or public searches. The VMU
+download feature is specifically documented for Evo 1 on Dreamcast; Evo 2 was not
+released for Dreamcast.
+
+Both supplied `STARTUP.POD` archives contain an entry named `FOG\VGA.LTE`. This is
+important contrary evidence to a naive extension check: Evo 2 can contain a file
+whose extension is `.LTE`, but that asset is a fog lookup/table also present in Evo
+1, not a downloadable track. Detect standalone track LTE by its binary signature
+and input context, never by extension alone inside a POD.
+
+JSTrackViewer should scope its standalone LTE decoder to Evo 1 unless an actual Evo
+2 track LTE or original Evo 2 loader path is produced. This keeps an evidence-based
+escape hatch without spending implementation effort on a likely nonexistent format.
 
 ### What must not be assumed yet
 
@@ -641,6 +767,9 @@ parser implementation task.
 
 ### Current hard failures
 
+Every item below has been addressed; they are kept as the record of what the
+implementation had to change, and of what remains.
+
 1. **POD2 is rejected.** `src/worker/pod-format.js` starts by interpreting byte 0
    as a POD1 item count. For `POD2`, that integer is nonsensical and indexing stops.
 2. **SIT header is misread.** `src/worker/sit-parser.js` treats line 0 as the LVL
@@ -652,7 +781,7 @@ parser implementation task.
    typed braces. The current parser expects MTM-style `ipos/theta,phi,psi` blocks.
 5. **Scale is wrong.** Terrain builder fixes cells at 64 and truncates 16-bit height
    with `>>> 6`; Evo evidence supports cell 32 and height `/32` in native units.
-6. **Models are missing.** The viewer decodes BIN, not text SMF v4.
+6. **Models are missing.** The viewer decodes BIN, not text SMF v2-v4.
 7. **Texture association is incomplete.** Evo needs palette per RAW and optional
    same-stem OPA alpha; there is no single LVL ACT.
 8. **TIFF is missing.** Evo 2 indexed/alpha TIFF cannot use the existing PNG/TGA
@@ -662,6 +791,10 @@ parser implementation task.
 10. **Standalone LTE is not accepted or decoded.** The file input permits only
     `.pod,.zip`; the loader also extracts only the first POD from ZIP.
 
+Resolved by this work: 1-8 in full, and 9 in part - vegetation is implemented and
+drawn, while the SDW overlay and the Evo 2 material/lighting stages are parsed and
+carried but not yet rendered. Item 10 remains deliberately out of scope.
+
 The current code may store a legacy LVL-referenced `.LTE` blob, but never decodes
 or renders it. That is not partial support for the standalone Evo LTE format.
 
@@ -670,7 +803,7 @@ or renders it. That is not partial support for the standalone Evo LTE format.
 ### Phase 0 — fixtures and format boundaries
 
 - Add legally redistributable/minimal synthetic fixtures for POD2, Evo LVL/TEX,
-  SIT v6, SIT v7, SMF v4, OPA, TIFF, VEG, SDW, and malformed variants.
+  SIT v6, SIT v7, SMF v2-v4, OPA, TIFF, VEG, SDW, and malformed variants.
 - Add format detection before parsing: POD2 magic, SIT version, SMF magic/version,
   TIFF byte order/magic.
 - Add structured warnings for preserved unknown fields.
@@ -703,7 +836,7 @@ and water height match fixtures; Evo 1/Evo 2 terrain is recognizable.
 ### Phase 3 — Evo 1 complete POD
 
 - Parse SIT v6 `wPos/wOrient/model` records and course lines.
-- Implement SMF v4 multi-group mesh/material decoding with bounds/count checks.
+- Implement SMF v2-v4 multi-group mesh/material decoding with bounds/count checks.
 - Resolve RAW/ACT/OPA model materials and map visible box types to scene policies.
 - Ignore physics fields explicitly, not by losing record synchronization.
 
@@ -722,20 +855,24 @@ native positions, scale, and orientation with opaque/alpha materials.
 Acceptance: an Evo 2 track renders all static scene classes without parser
 desynchronization, with TIFF alpha and stable vegetation placement.
 
-### Phase 5 — LTE research and implementation
+### Deferred — LTE research and implementation
 
-Keep this behind a separate input type and feature flag until the codec is known.
-Do not let LTE experiments complicate POD2/SIT/LVL code. Its output should be the
-same normalized TrackDoc plus a list of unresolved stock dependencies.
+This is not an active implementation phase. Reconsider it only after the codec and
+asset identifiers are understood and there is a concrete product decision for how
+users supply all required stock archives. Any future design must support multiple
+POD sources, deterministic mount/override precedence, dependency diagnostics, and
+an explicit distinction between a standalone track LTE and an internal asset such
+as `FOG\VGA.LTE`.
 
-Acceptance must use golden files with known editor inputs, not only “looks plausible.”
+Future acceptance must use golden files with known editor inputs and known base-POD
+sets, not only “looks plausible.”
 
 ## Suggested normalized data additions
 
 Avoid naming unresolved source fields prematurely. A minimal extension could be:
 
 ```js
-track.source = { family: "EVO", game: 1 | 2, container: "POD2" | "LTE", sitVersion };
+track.source = { family: "EVO", game: 1 | 2, container: "POD2", sitVersion };
 track.terrain = {
   gridSize: 256,
   cellSize: 32,
@@ -781,19 +918,27 @@ should not need to infer that an Evo position differs from an MTM `ipos` positio
 
 ## Open questions, in priority order
 
-1. What is the LTE bitstream/header/compression schema?
-2. What do TEX `param0` and `param1` mean for rendering and surface metadata?
-3. What exactly does RTD encode, and does it affect a static view?
-4. What is SDW `0x4000`, and how are any orientation flags packed?
-5. What do the first three SMF material scalars and the fourth object-info integer
+1. What do TEX `param0` and `param1` mean for rendering and surface metadata?
+2. What exactly does RTD encode, and does it affect a static view?
+3. What is SDW `0x4000`, and how are any orientation flags packed?
+4. What do the first three SMF material scalars and the fourth object-info integer
    mean, and which complete set of object names participates in v4 LOD switching?
-6. How does SIT v7's common prefix vary across all 15 class/schema combinations?
-7. How does the VEG record byte choose tree variant, tint, or scale?
-8. Which Evo 2 shader/material combinations materially affect track assets, and
+5. ~~How does SIT v7's common prefix vary across all 15 class/schema combinations?~~
+   Answered in practice: every instance field is self-labeling, so a reader does
+   not need to know. See the implementation status section above.
+6. How does the VEG record byte choose tree variant, tint, or scale? Related: what
+   is `treeBiasY` for, and why does a `.VEG` record's own y sit a median 5 units
+   below the interpolated terrain, never above it? The viewer grounds trees on the
+   drawn surface and leaves both values unapplied rather than guessing.
+7. Which Evo 2 shader/material combinations materially affect track assets, and
    how are they selected from SMF/TEX metadata?
 
-These questions should remain visible in code and fixtures. The first blocks LTE;
-questions 2-8 do not block a useful complete-POD preview.
+These questions should remain visible in code and fixtures, but none blocks a
+useful complete-POD preview.
+
+Deferred LTE questions are: its bitstream/header/compression schema, how it names
+stock dependencies, which POD set each environment requires, and the game's archive
+mount/override precedence. They should not shape the current implementation.
 
 ## Evidence and references
 
@@ -810,11 +955,22 @@ questions 2-8 do not block a useful complete-POD preview.
 - `/Users/juanpabloutreras/dev/JPod/docs/POD_FORMAT.md`
 - `/Users/juanpabloutreras/dev/JSPod/src/worker/pod-format.js`
 
-Representative samples were inspected in `/private/tmp` and are intentionally not
-added to the repository. Evo 1 samples came from the public 4x4 Evolution test/demo
-installer; Evo 2 and LTE samples came from the community track archive. Reproduce
-the analysis from sources with appropriate redistribution rights before turning a
-sample into a committed test fixture.
+Additional stock samples were inspected in place, read-only:
+
+- `/Users/juanpabloutreras/games/evo1/ASPEN.POD`
+- `/Users/juanpabloutreras/games/evo1/THEHILL.POD`
+- `/Users/juanpabloutreras/games/evo1/WORKAHEAD.LTE`
+- `/Users/juanpabloutreras/games/evo1/Caverav.lte`
+- `/Users/juanpabloutreras/games/evo2/BAJBEACH.pod`
+- `/Users/juanpabloutreras/games/evo2/PEAK.pod`
+- both installations' `STARTUP.POD`, solely to distinguish `FOG\VGA.LTE` from a
+  standalone track LTE
+
+Earlier representative samples were inspected in `/private/tmp` and are
+intentionally not added to the repository. Evo 1 samples came from the public 4x4
+Evolution test/demo installer; Evo 2 and LTE samples came from the community track
+archive. Reproduce the analysis from sources with appropriate redistribution rights
+before turning a sample into a committed test fixture.
 
 ### Public references
 
