@@ -502,6 +502,7 @@ function createDoc(podComment) {
     groundBoxes: [],
     raceTrackTextures: [],
     raceTrackSurfaces: [],
+    raceTrackFence: null,
     primaryCourse: { segments: [] },
     extendedCourses: [],
     trucks: [],

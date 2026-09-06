@@ -1,6 +1,31 @@
 import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { TrackCamera } from "./nav.js";
+import {
+  CPR_WALL_LAYERS,
+  CPR_WALL_PART_HEIGHT_FT,
+  CPR_TEXTURE_SLICE_COUNT,
+  CPR_CROSS_SECTION_MIDPOINT,
+  cprTextureIndex,
+  cprTextureSlice,
+  cprTextureU,
+  cprFeetToWorldY,
+} from "./shared/cpr-track-schema.js";
+
+// The u1..u4 a CPR section falls back to when the .TRK has none: 16.16 fixed point for 4.0
+// and 250.0 over a 0..256 space, i.e. one mapping across the section with a two pixel inset.
+const CPR_DEFAULT_SECTION_U_INNER = 262144;
+const CPR_DEFAULT_SECTION_U_OUTER = 16384000;
+
+/*
+  The racetrack layer sits on the terrain rather than above it, so where the two are coplanar
+  they can z-fight at distance. A constant depth nudge fixes that without moving anything.
+
+  Units only, with no slope factor: these materials are shared between the road and the
+  walls, and a slope factor would be amplified enormously on a wall seen edge on, which would
+  pull it in front of geometry it should be behind.
+*/
+const CPR_DEPTH_NUDGE = { polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -2 };
 
 const WATER_COLOR = 0x1a6090;
 const COURSE_COLOR = 0xffdd00;
@@ -498,21 +523,57 @@ export class TrackScene {
 
     const textures = trackData.raceTrackTextures ?? [];
     const materials = textures.map((tex, i) => this._makeRaceTrackMaterial(tex, i));
-    if (!materials.length) materials.push(new THREE.MeshLambertMaterial({ color: 0x717178 }));
+    if (!materials.length) materials.push(new THREE.MeshLambertMaterial({ color: 0x717178, ...CPR_DEPTH_NUDGE }));
+    /*
+      Catch fencing is not one of the track's own textures, so its material is appended past
+      the end of the list. Buckets can then key on it like any other material index, while
+      normalizeRaceTextureIndex keeps clamping into the real textures only.
+
+      Built on first use: most tracks have no fenced walls at all, and an unused material
+      holding a 256x256 DataTexture never reaches a mesh, so clearTrack would never dispose
+      it.
+    */
+    const textureCount = materials.length;
+    let fenceMaterialIndex = -1;
+    const fenceMaterial = () => {
+      if (fenceMaterialIndex < 0) {
+        fenceMaterialIndex = materials.length;
+        materials.push(this._makeFenceMaterial(trackData.raceTrackFence));
+      }
+      return fenceMaterialIndex;
+    };
 
     const hs = this._heightScale;
     const ws = this._worldSize(trackData);
     const rawBytesPerCell = trackData.terrain?.rawBytesPerCell ?? 1;
+    const zDivisor = rawBytesPerCell === 2 ? 4 : 2;
+    // Wall heights go through the same transform as track altitude so they stay consistent
+    // with the surface when the height scale slider moves.
+    const partHeight = cprFeetToWorldY(CPR_WALL_PART_HEIGHT_FT, hs, zDivisor);
     const roadBuckets = new Map();
     const wallBuckets = new Map();
 
-    const pointToWorld = (point, yBias = 8) => {
-      if (!point || point.length < 3) return [0, yBias, 0];
+    /*
+      No vertical bias.
+
+      A CPR track altitude is in feet and the terrain RAW stores the same quantity scaled, so
+      point[1] / zDivisor lands on the terrain height under the track directly. Checked
+      against Laguna: sampling the terrain beneath the centreline of every segment gives the
+      track sitting a median of 1.07 terrain units above it, with 95% of points between
+      +0.08 and +1.84, which is exactly what "Match ground alt" produces (it levels the
+      ground to the minimum altitude under the track, and banking drops one side below that).
+
+      The layer used to be lifted an extra 8 world units on top of that, roughly 11 feet,
+      which is what made the track look like it hovered and the surrounding objects look
+      buried. Coplanar z-fighting is a depth buffer problem, so it is solved with
+      polygonOffset on the material instead of by moving the geometry.
+    */
+    const pointToWorld = (point) => {
+      if (!point || point.length < 3) return [0, 0, 0];
       const wx = 2 * Math.trunc(point[0]);
       const wy = 2 * Math.trunc(point[2]);
-      const zDivisor = rawBytesPerCell === 2 ? 4 : 2;
       const wz = point[1] / zDivisor;
-      return [wx, wz * hs + yBias, ws - wy];
+      return [wx, wz * hs, ws - wy];
     };
 
     const bucketFor = (buckets, materialIndex) => {
@@ -542,39 +603,118 @@ export class TrackScene {
       if (laneCount < 1) continue;
 
       for (let lane = 0; lane < laneCount; lane++) {
-        if (!isRaceLaneInsideWalls(a, b, lane)) continue;
-        const texIdx = normalizeRaceTextureIndex(a.textureIndexes?.[lane] ?? 0, materials.length);
+        /*
+          A cross section slot collapsed on both segments has no area. Skipping those is what
+          drops the unused slots and the pit lane band on tracks that have no pit lane there,
+          and it reads that from the geometry rather than inferring it from where walls are.
+        */
+        if (isDegenerateSlot(a, lane) && isDegenerateSlot(b, lane)) continue;
+        const coords = a.textureCoordinates?.[lane];
+        const texIdx = normalizeRaceTextureIndex(
+          cprTextureIndex(coords?.[0] ?? a.textureIndexes?.[lane] ?? 0), textureCount);
         const p0 = pointToWorld(aPts[lane]);
         const p1 = pointToWorld(bPts[lane]);
         const p2 = pointToWorld(bPts[lane + 1]);
         const p3 = pointToWorld(aPts[lane + 1]);
         const len = Math.max(1, Math.hypot(p1[0] - p0[0], p1[2] - p0[2]));
-        const width = Math.max(1, Math.hypot(p3[0] - p0[0], p3[2] - p0[2]));
-        const uRepeat = Math.max(1, width / 256);
         const vRepeat = Math.max(1, len / 256);
+        /*
+          U comes from the file, not from the section width.
+
+          Road textures are half-carriageway tiles with the white edge line baked into one
+          side (RD4A left, RD4B right), so tiling U across the width repeats that line over
+          the road surface. The stored u1..u4 map the tile across the section exactly once.
+          Order follows the quad: u1 at p0, u2 at p3, u3 at p1, u4 at p2.
+        */
+        const uP0 = cprTextureU(coords?.[1] ?? CPR_DEFAULT_SECTION_U_INNER);
+        const uP3 = cprTextureU(coords?.[2] ?? CPR_DEFAULT_SECTION_U_OUTER);
+        const uP1 = cprTextureU(coords?.[3] ?? CPR_DEFAULT_SECTION_U_INNER);
+        const uP2 = cprTextureU(coords?.[4] ?? CPR_DEFAULT_SECTION_U_OUTER);
         addQuad(roadBuckets, texIdx, p0, p1, p2, p3, [
-          0, 1,
-          0, 1 - vRepeat,
-          uRepeat, 1 - vRepeat,
-          uRepeat, 1,
+          uP0, 1,
+          uP1, 1 - vRepeat,
+          uP2, 1 - vRepeat,
+          uP3, 1,
         ]);
       }
 
+      /*
+        Direction across the cross section on this segment, first point to last, which runs
+        toward increasing pointOffset. Used below to work out which face of a wall is the one
+        anybody ever sees.
+      */
+      const acrossFrom = pointToWorld(aPts[0]);
+      const acrossTo = pointToWorld(aPts[aPts.length - 1]);
+      const acrossX = acrossTo[0] - acrossFrom[0];
+      const acrossZ = acrossTo[2] - acrossFrom[2];
+
       const pointCount = Math.min(aPts.length, bPts.length);
       for (let pointIndex = 0; pointIndex < pointCount; pointIndex++) {
-        const wallType = Math.max(a.wallTypes?.[pointIndex] ?? 0, b.wallTypes?.[pointIndex] ?? 0);
-        if (wallType <= 0) continue;
-        const p0 = pointToWorld(aPts[pointIndex], 10);
-        const p1 = pointToWorld(bPts[pointIndex], 10);
-        const wallHeight = Math.min(18, 6 + wallType * 2);
-        const p2 = [p1[0], p1[1] + wallHeight, p1[2]];
-        const p3 = [p0[0], p0[1] + wallHeight, p0[2]];
-        const wallValue = selectRaceWallTexture(a.wallTextures?.[pointIndex], b.wallTextures?.[pointIndex]);
-        const texIdx = normalizeRaceTextureIndex(wallValue, materials.length);
+        // A wall belongs to the segment its record is stored on and spans forward to the
+        // next one, so the owning segment decides whether a panel exists at all.
+        const layers = CPR_WALL_LAYERS[a.wallTypes?.[pointIndex] ?? 0];
+        if (!layers) continue;
+        /*
+          wallTexture is four parts per point, one per stacked panel, and how many of them
+          are real depends on the wall type. Note the array stays populated after a wall is
+          deleted: the guide says so outright ("it doesn't remove the texture at all"), which
+          is why the parts are only read once the wall type says there is a wall here.
+        */
+        const parts = a.wallTextures?.[pointIndex] ?? [];
+        const p0 = pointToWorld(aPts[pointIndex]);
+        const p1 = pointToWorld(bPts[pointIndex]);
         const len = Math.max(1, Math.hypot(p1[0] - p0[0], p1[2] - p0[2]));
         const uRepeat = Math.max(1, len / 256);
-        const vRepeat = Math.max(1, wallHeight / 64);
-        addQuad(wallBuckets, texIdx, p0, p1, p2, p3, raceWallUvs(wallValue, uRepeat, vRepeat));
+
+        /*
+          Which face of this wall looks at the track.
+
+          The quad runs along the track and is extruded straight up, so its front face normal
+          is horizontal and perpendicular to the run: T x up, which is (-Tz, 0, Tx). A wall
+          below the cross section midpoint should face increasing pointOffset and one at or
+          above it should face the other way. When the front face points away, the only face
+          anyone can see is the back one, and a back face draws its texture mirrored.
+
+          This cannot be decided from the point index alone. pointToWorld mirrors Z
+          (ws - wy), which reverses the handedness of the whole layer, so what the file calls
+          the left of the track lands on the driver's right. Testing the geometry as it
+          actually reaches world space keeps this correct whatever that transform does.
+        */
+        const normalX = -(p1[2] - p0[2]);
+        const normalZ = p1[0] - p0[0];
+        const facing = pointIndex < CPR_CROSS_SECTION_MIDPOINT ? 1 : -1;
+        const seenFromBehind = (normalX * acrossX + normalZ * acrossZ) * facing < 0;
+        const uLo = seenFromBehind ? uRepeat : 0;
+        const uHi = seenFromBehind ? 0 : uRepeat;
+
+        let base = 0;
+        for (const layer of layers) {
+          const top = base + layer.units * partHeight;
+          const q0 = [p0[0], p0[1] + base, p0[2]];
+          const q1 = [p1[0], p1[1] + base, p1[2]];
+          const q2 = [p1[0], p1[1] + top,  p1[2]];
+          const q3 = [p0[0], p0[1] + top,  p0[2]];
+          if (layer.fence) {
+            addQuad(wallBuckets, fenceMaterial(), q0, q1, q2, q3, [
+              uLo, 1, uHi, 1, uHi, 0, uLo, 0,
+            ]);
+          } else {
+            const value = parts[layer.part] ?? parts[0] ?? 0;
+            const texIdx = normalizeRaceTextureIndex(cprTextureIndex(value), textureCount);
+            /*
+              The four sub textures in a wall RAW are stacked vertically as 256x64 strips,
+              one advertising panel each, so the slice picks a V band and U stays free to run
+              along the wall. THREE.DataTexture does not flip Y, so image row 0 is v = 0 and
+              strip s covers v in [s/4, (s+1)/4].
+            */
+            const vTop = cprTextureSlice(value) / CPR_TEXTURE_SLICE_COUNT;
+            const vBottom = vTop + 1 / CPR_TEXTURE_SLICE_COUNT;
+            addQuad(wallBuckets, texIdx, q0, q1, q2, q3, [
+              uLo, vBottom, uHi, vBottom, uHi, vTop, uLo, vTop,
+            ]);
+          }
+          base = top;
+        }
       }
     }
 
@@ -602,10 +742,31 @@ export class TrackScene {
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.needsUpdate = true;
-      return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
+      return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide, ...CPR_DEPTH_NUDGE });
     }
     const fallback = [0x717178, 0x5c5c62, 0x8b8b91, 0x6b6048, 0x7a785f][index % 5];
-    return new THREE.MeshLambertMaterial({ color: fallback, side: THREE.DoubleSide });
+    return new THREE.MeshLambertMaterial({ color: fallback, side: THREE.DoubleSide, ...CPR_DEPTH_NUDGE });
+  }
+
+  /*
+    Catch fencing for CPR wall types 3 and 5.
+
+    ART\CATCH3D.RAW is a colour-keyed cutout, already decoded that way in the worker, so
+    alphaTest is the right tool here rather than blending: a transparent material would need
+    per-fragment sorting against the walls and terrain behind it, and the fence is a hard
+    on/off mask with no partial coverage to preserve.
+  */
+  _makeFenceMaterial(fence) {
+    if (fence?.rgba && fence.width > 0 && fence.height > 0) {
+      const tex = new THREE.DataTexture(new Uint8ClampedArray(fence.rgba), fence.width, fence.height, THREE.RGBAFormat);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide, alphaTest: 0.5, ...CPR_DEPTH_NUDGE });
+    }
+    return new THREE.MeshLambertMaterial({
+      color: 0x9a9a9a, side: THREE.DoubleSide, transparent: true, opacity: 0.3,
+    });
   }
 
   _buildObjects(trackData) {
@@ -1132,40 +1293,27 @@ function resetBillboardGroup(group) {
   }
 }
 
-function isRaceLaneInsideWalls(surfaceA, surfaceB, lane) {
-  const wallIndexes = [];
-  const collect = (wallTypes) => {
-    for (let i = 0; i < (wallTypes?.length ?? 0); i++) {
-      if ((wallTypes[i] ?? 0) > 0) wallIndexes.push(i);
-    }
-  };
-  collect(surfaceA.wallTypes);
-  collect(surfaceB.wallTypes);
-  if (wallIndexes.length < 2) return true;
-  const leftWall = Math.min(...wallIndexes);
-  const rightWall = Math.max(...wallIndexes);
-  return lane >= leftWall && lane < rightWall;
+/*
+  Whether a cross section slot is collapsed to zero width on this segment.
+
+  pointOffset is the lateral offset of each point from the centreline, in feet, and is the
+  direct answer. At Laguna segment 0 it runs -48, -48, -48, -36, -24, -24, 0, 24 ... so the
+  two Left unused slots and every pit slot are flat against their neighbour.
+
+  Falling back to comparing the world positions covers a track whose pointOffset block failed
+  to parse, since a collapsed slot repeats its coordinates in plist as well.
+*/
+function isDegenerateSlot(surface, lane) {
+  const offsets = surface.pointOffsets;
+  if (offsets && offsets.length > lane + 1) return offsets[lane] === offsets[lane + 1];
+  const points = surface.points ?? [];
+  const a = points[lane];
+  const b = points[lane + 1];
+  if (!a || !b) return true;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
-function normalizeRaceTextureIndex(value, textureCount) {
+function normalizeRaceTextureIndex(index, textureCount) {
   if (textureCount <= 0) return 0;
-  const idx = (value ?? 0) & 0x0FFF;
-  return idx >= 0 && idx < textureCount ? idx : 0;
-}
-
-function selectRaceWallTexture(aValues, bValues) {
-  const first = (aValues ?? [])[0] ?? (bValues ?? [])[0];
-  return Number.isFinite(first) ? first : 0;
-}
-
-function raceWallUvs(value, uRepeat, vRepeat) {
-  const tile = (((value ?? 0) >> 12) & 3) / 4;
-  const u0 = tile;
-  const u1 = tile + 0.25 * uRepeat;
-  return [
-    u0, 1,
-    u1, 1,
-    u1, 1 - vRepeat,
-    u0, 1 - vRepeat,
-  ];
+  return index >= 0 && index < textureCount ? index : 0;
 }

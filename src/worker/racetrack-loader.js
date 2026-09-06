@@ -12,6 +12,7 @@ export function loadRaceTrackLayer(podIndex, getBytes, rawName, doc) {
 
   const ttxEntry = resolveAsset(podIndex, replaceExtension(trkEntry.title ?? trkName, ".TTX")) ?? resolveAsset(podIndex, replaceExtension(trkName, ".TTX"));
   if (ttxEntry) parseRaceTrackTextures(podIndex, getBytes, ttxEntry, doc);
+  doc.raceTrackFence = loadCatchFence(podIndex, getBytes);
 
   const surfaceCount = parseIntValue(lines[countLabel + 1], 0);
   let cursor = indexOfLine(lines, "pointCount", countLabel + 2);
@@ -21,6 +22,31 @@ export function loadRaceTrackLayer(podIndex, getBytes, rawName, doc) {
     doc.raceTrackSurfaces.push(parsed.surface);
     cursor = parsed.nextIndex;
   }
+}
+
+/*
+  The catch fencing on wall types 3 and 5 is not one of the four wallTexture entries.
+
+  CPREDIT.EXE references art\catch3d.raw / art\catch.raw and their palettes by name, and both
+  ship in STARTUP.POD rather than in any track POD, so they never appear in a .TTX. That is
+  why the TRK has no fence texture to point at: the fence is implied by the wall type.
+
+  Prefer CATCH3D, which is the 256x256 hardware-accelerated version, over the 64x64 software
+  one. Returning null is normal and expected when a single track POD is loaded on its own,
+  and the worker synthesizes a stand-in in that case.
+*/
+function loadCatchFence(podIndex, getBytes) {
+  for (const name of ["ART/CATCH3D.RAW", "ART/CATCH.RAW"]) {
+    const entry = resolveAsset(podIndex, name);
+    if (!entry) continue;
+    const actEntry = resolveAsset(podIndex, replaceExtension(name, ".ACT"));
+    return {
+      name: archiveTitle(name),
+      data: getBytes(entry),
+      actData: actEntry ? getBytes(actEntry) : null,
+    };
+  }
+  return null;
 }
 
 function parseRaceTrackTextures(podIndex, getBytes, ttxEntry, doc) {

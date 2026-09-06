@@ -2,6 +2,7 @@ import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
 import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
 import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
+import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -235,6 +236,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     }
   }
 
+  const raceTrackFence = doc.raceTrackSurfaces?.length
+    ? decodeCatchFence(doc, decodeRawTexture)
+    : null;
+
   const terrainHeightScale = effectiveTerrainHeightScale(doc.origin, heightScale);
 
   // Terrain mesh
@@ -260,6 +265,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     primarySegmentCount: doc.primaryCourse.segments.length,
     extendedCourseCount: doc.extendedCourses.length,
   };
+  if (doc.raceTrackSurfaces?.length) stats.cpr = summarizeRaceTrack(doc, raceTrackFence);
 
   // A model whose record walk stopped early is a valid model with fewer polygons, and nothing
   // about the picture says so. Surface it rather than letting it pass silently.
@@ -336,9 +342,91 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     groundBoxes: doc.groundBoxes,
     raceTrackTextures,
     raceTrackSurfaces: doc.raceTrackSurfaces ?? [],
+    raceTrackFence,
     trucks: doc.trucks,
     models, modelTextures, stats,
   };
+}
+
+/*
+  The catch fence texture for CPR wall types 3 and 5.
+
+  ART\CATCH3D.RAW is a colour-keyed cutout in exactly the sense decodeRawTexture already
+  implements: the mesh is grey, everything else is palette index 0, which resolves to pure
+  black. So it decodes with cutout on, the same way glass and grille faces do.
+
+  It lives in STARTUP.POD, not in a track POD, so loading LAGUNA.POD on its own will not find
+  it. Rather than dropping the fence entirely, fall back to a synthesized panel with the same
+  construction as the original, measured off ART\CATCH3D.RAW:
+
+    4px frame, vertical posts at x 126..129, horizontal rails at y 63..66, 126..131, 190..193,
+    and thin cables every 12 rows starting at y 15.
+*/
+function decodeCatchFence(doc, decodeRawTexture) {
+  const fence = doc.raceTrackFence;
+  if (fence?.data) {
+    try {
+      const decoded = decodeRawTexture(fence.data, fence.actData ?? doc.palette, fence.name, { cutout: true });
+      return { name: fence.name, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height, synthesized: false };
+    } catch {
+      // fall through to the synthesized panel
+    }
+  }
+  return synthesizeCatchFence();
+}
+
+/*
+  CPR-only breakdown for the stats panel.
+
+  Both tables are named by the editor itself, so this reports what CPREdit would have shown
+  the track's author rather than raw numbers. The surface type is the second column of the
+  .TTX and belongs to the texture, not the section, which is why it is counted over textures.
+*/
+function summarizeRaceTrack(doc, fence) {
+  const wallCounts = new Array(CPR_WALL_TYPE_NAMES.length).fill(0);
+  for (const surface of doc.raceTrackSurfaces) {
+    for (const type of surface.wallTypes ?? []) {
+      if (type > 0 && type < wallCounts.length) wallCounts[type]++;
+    }
+  }
+  const surfaceCounts = new Array(CPR_SURFACE_TYPES.length).fill(0);
+  for (const tex of doc.raceTrackTextures ?? []) {
+    const flag = tex.flags ?? 0;
+    if (flag >= 0 && flag < surfaceCounts.length) surfaceCounts[flag]++;
+  }
+  return {
+    segmentCount: doc.raceTrackSurfaces.length,
+    wallCount: wallCounts.reduce((sum, n) => sum + n, 0),
+    wallTypes: CPR_WALL_TYPE_NAMES
+      .map((name, i) => ({ name, count: wallCounts[i] }))
+      .filter((entry, i) => i > 0 && entry.count > 0),
+    surfaceTypes: CPR_SURFACE_TYPES
+      .map((name, i) => ({ name, count: surfaceCounts[i] }))
+      .filter((entry) => entry.count > 0),
+    fenceSource: fence?.synthesized ? "synthesized" : (fence ? fence.name : "none"),
+  };
+}
+
+function synthesizeCatchFence() {
+  const SIDE = 256;
+  const rgba = new Uint8ClampedArray(SIDE * SIDE * 4);
+  const plot = (x, y, level) => {
+    if (x < 0 || y < 0 || x >= SIDE || y >= SIDE) return;
+    const o = (y * SIDE + x) * 4;
+    rgba[o] = rgba[o + 1] = rgba[o + 2] = level;
+    rgba[o + 3] = 255;
+  };
+  const hLine = (y, level) => { for (let x = 0; x < SIDE; x++) plot(x, y, level); };
+  const vLine = (x, level) => { for (let y = 0; y < SIDE; y++) plot(x, y, level); };
+
+  for (let i = 15; i < SIDE; i += 12) hLine(i, 0x6e);            // cables
+  for (const y of [63, 64, 65, 66, 126, 127, 128, 129, 130, 131, 190, 191, 192, 193]) hLine(y, 0xa0); // rails
+  for (const x of [126, 127, 128, 129]) vLine(x, 0xc0);          // centre post
+  for (let i = 0; i < 4; i++) {                                  // frame
+    hLine(i, 0xc0); hLine(SIDE - 1 - i, 0xc0);
+    vLine(i, 0xc0); vLine(SIDE - 1 - i, 0xc0);
+  }
+  return { name: "CATCH3D (synthesized)", rgba: rgba.buffer, width: SIDE, height: SIDE, synthesized: true };
 }
 
 function serializeCourse(course) {

@@ -305,6 +305,17 @@ export class TrackViewerApp {
         ["Ground boxes", s.groundBoxCount],
         ["Course segs",  s.primarySegmentCount],
       ];
+      /*
+        CPR tracks carry a second geometry layer the other games have no equivalent for. The
+        names are the track editor's own, so this reads the way CPREdit would have shown it.
+      */
+      if (s.cpr) {
+        statsPairs.push(["Track segments", s.cpr.segmentCount]);
+        statsPairs.push(["Walls", s.cpr.wallCount]);
+        for (const { name, count } of s.cpr.wallTypes) statsPairs.push([`  ${name}`, count]);
+        for (const { name, count } of s.cpr.surfaceTypes) statsPairs.push([`  ${name} textures`, count]);
+        statsPairs.push(["Catch fence", s.cpr.fenceSource]);
+      }
       statsDl.innerHTML = statsPairs.map(([k, v]) =>
         `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`
       ).join("");
