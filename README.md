@@ -18,19 +18,19 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 
 ## Features
 
-- **POD and ZIP loading** — open a local archive or fetch one from a URL.
-- **Multi-track archives** — discover and switch between multiple `.SIT` or `.LVL` tracks without reopening the archive.
-- **Broad game support** — inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, CART Precision Racing, and 4x4 Evolution 1/2 track formats.
-- **Modern MTM2 (Community Patch 3) support** — read POD1-64 archives, `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
-- **Detailed track rendering** — display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops.
+- **POD and ZIP loading**: open a local archive or fetch one from a URL.
+- **Multi-track archives**: discover and switch between multiple `.SIT` or `.LVL` tracks without reopening the archive.
+- **Broad game support**: inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, CART Precision Racing, and 4x4 Evolution 1/2 track formats.
+- **Modern MTM2 (Community Patch 3) support**: read POD1-64 archives, `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
+- **Detailed track rendering**: display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops.
 - **Route markers**: numbered checkpoint markers for MTM, MTM2, CART Precision Racing and 4x4 Evolution 1/2, plus the navigation point, tunnel and powerup markers for Terminal Velocity, Fury3 and Hellbender.
 - **Hellbender level data**: the underground cavern layer with its own terrain, ground boxes and objects, plus navigation points with their objective text, animated textures, tunnels, powerups, and the per-world planet and mission names.
-- **CPR racetrack layers** — render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
+- **CPR racetrack layers**: render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
 - **Sun position**: every game states where its sun is, and the viewer reads it, names the compass point, and lets you move it. MTM, MTM2, CART Precision Racing, Terminal Velocity, Fury3 and Hellbender store it as a fixed-point vector on `.LVL` line 17; 4x4 Evolution stores the same thing as `lightSourceVector`.
-- **Interactive navigation** — fly through the level, adjust the camera, and jump to a location by clicking the minimap.
-- **Inspection controls** — toggle scene layers and adjust view distance, sunlight, and gamma. Sidebar panels collapse from their headings. Layer toggles and track data fields are shown only where the loaded track has that content, so an MTM track offers no tunnel or navigation controls and only CPR offers a racetrack layer.
-- **Track diagnostics** — review metadata and statistics for textures, objects, courses, ground boxes, and CPR surface and wall types.
-- **Client-side operation** — archives and extracted assets remain in temporary browser storage.
+- **Interactive navigation**: fly through the level, adjust the camera, and jump to a location by clicking the minimap.
+- **Inspection controls**: toggle scene layers and adjust view distance, sunlight, and gamma. Sidebar panels collapse from their headings. Layer toggles and track data fields are shown only where the loaded track has that content, so an MTM track offers no tunnel or navigation controls and only CPR offers a racetrack layer.
+- **Track diagnostics**: review metadata and statistics for textures, objects, courses, ground boxes, and CPR surface and wall types.
+- **Client-side operation**: archives and extracted assets remain in temporary browser storage.
 
 ## Supported content
 
@@ -159,9 +159,9 @@ src/
 
 ## Related projects
 
-- [JTraxx](https://github.com/juanputrerasm/JTraxx3) — desktop track editor on which JSTrackViewer is based.
-- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer) — browser-based MTM1 and MTM2 truck viewer.
-- [JSPod](https://github.com/juanputrerasm/JSPod) — browser-based POD archive and individual-asset viewer.
+- [JTraxx](https://github.com/juanputrerasm/JTraxx3): desktop track editor on which JSTrackViewer is based.
+- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer): browser-based MTM1 and MTM2 truck viewer.
+- [JSPod](https://github.com/juanputrerasm/JSPod): browser-based POD archive and individual-asset viewer.
 
 JSTrackViewer follows the lineage of JTraxx and the original Traxx track editor for Monster Truck Madness and Monster Truck Madness 2.
 

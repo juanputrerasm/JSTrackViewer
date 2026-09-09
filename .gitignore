@@ -80,3 +80,6 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,macos,visualstudiocode
+### Project ###
+# Third-party game manual kept locally, not redistributed
+docs/fzone for fury3 manual.txt

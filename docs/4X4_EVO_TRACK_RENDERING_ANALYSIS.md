@@ -8,10 +8,13 @@ vehicle data, AI, race rules, sound, menus, and gameplay. It follows only the da
 needed to discover a track, build its terrain, place its visible objects, and render
 its materials, sky, water, shadows, and vegetation.
 
-The two requested repositories are:
+The two reference repositories are the open-source reverse-engineering projects by
+Americus Maximus, which this analysis relies on and credits:
 
-- `/Users/juanpabloutreras/dev/4x4e` — reverse-engineered Evo 1 Build 57 renderer/runtime interfaces.
-- `/Users/juanpabloutreras/dev/4x4e2` — reverse-engineered Evo 2 Build 139 renderer/runtime interfaces.
+- `4x4e` — reverse-engineered Evo 1 Build 57 renderer/runtime interfaces:
+  <https://github.com/americusmaximus/4x4e>
+- `4x4e2` — reverse-engineered Evo 2 Build 139 renderer/runtime interfaces:
+  <https://github.com/americusmaximus/4x4e2>
 
 The most important caveat is that neither repository currently contains the game
 layer that parses POD, LTE, LVL, SIT, TEX, SMF, VEG, or the terrain grids. They are
@@ -129,6 +132,12 @@ mean of 12-33 units while the transposed and row-flipped readings are off by
 
 ## What the `4x4e` repositories actually establish
 
+The `4x4e` and `4x4e2` repositories referenced throughout this section are
+Americus Maximus's open-source reverse-engineering projects
+(<https://github.com/americusmaximus/4x4e> and
+<https://github.com/americusmaximus/4x4e2>). All renderer-contract findings below
+are derived from that work.
+
 ### Shared facts
 
 Both projects expose the same broad renderer-module architecture: indexed polygon
@@ -217,11 +226,11 @@ The NUL-terminated, variable-length name table immediately follows the directory
 Optional 312-byte audit records follow payloads. For viewing, audit records and CRC
 validation can initially be optional, but all bounds must still be validated.
 
-This layout is already implemented in nearby workspace projects:
+This layout is already implemented in the sibling JSPod and JPod projects:
 
-- `/Users/juanpabloutreras/dev/JSPod/src/worker/pod-format.js`
-- `/Users/juanpabloutreras/dev/JPod/docs/POD_FORMAT.md`, section 6
-- `/Users/juanpabloutreras/dev/JPod/src/main/java/.../PodArchiveReader.java`
+- JSPod: `src/worker/pod-format.js`
+- JPod: `docs/POD_FORMAT.md`, section 6
+- JPod: `PodArchiveReader.java`
 
 Port the indexed reader rather than extending the POD1 layout heuristics. Detect
 `POD2` by signature before attempting POD1.
@@ -1010,31 +1019,36 @@ mount/override precedence. They should not shape the current implementation.
 
 ## Evidence and references
 
-### Local source
+### Source evidence
 
-- `/Users/juanpabloutreras/dev/4x4e/README.MD`
-- `/Users/juanpabloutreras/dev/4x4e/Source/TRX/Renderers.Basic.Vertexes.hxx`
-- `/Users/juanpabloutreras/dev/4x4e/Source/TRX/Renderers.Modules.Export.hxx`
-- `/Users/juanpabloutreras/dev/4x4e2/README.MD`
-- `/Users/juanpabloutreras/dev/4x4e2/Source/TRX/Renderers.Basic.Vertexes.hxx`
-- `/Users/juanpabloutreras/dev/4x4e2/Source/TRX/Renderers.Modules.Export.hxx`
-- `/Users/juanpabloutreras/dev/4x4e2/Source/R.DirectX.8.0.TL/Assets/`
-- `/Users/juanpabloutreras/dev/JSTrackViewer/src/worker/`
-- `/Users/juanpabloutreras/dev/JPod/docs/POD_FORMAT.md`
-- `/Users/juanpabloutreras/dev/JSPod/src/worker/pod-format.js`
+From `americusmaximus/4x4e` (<https://github.com/americusmaximus/4x4e>):
 
-Additional stock samples were inspected in place, read-only:
+- `README.MD`
+- `Source/TRX/Renderers.Basic.Vertexes.hxx`
+- `Source/TRX/Renderers.Modules.Export.hxx`
 
-- `/Users/juanpabloutreras/games/evo1/ASPEN.POD`
-- `/Users/juanpabloutreras/games/evo1/THEHILL.POD`
-- `/Users/juanpabloutreras/games/evo1/WORKAHEAD.LTE`
-- `/Users/juanpabloutreras/games/evo1/Caverav.lte`
-- `/Users/juanpabloutreras/games/evo2/BAJBEACH.pod`
-- `/Users/juanpabloutreras/games/evo2/PEAK.pod`
+From `americusmaximus/4x4e2` (<https://github.com/americusmaximus/4x4e2>):
+
+- `README.MD`
+- `Source/TRX/Renderers.Basic.Vertexes.hxx`
+- `Source/TRX/Renderers.Modules.Export.hxx`
+- `Source/R.DirectX.8.0.TL/Assets/`
+
+From sibling projects in this workspace:
+
+- JSTrackViewer: `src/worker/`
+- JPod: `docs/POD_FORMAT.md`
+- JSPod: `src/worker/pod-format.js`
+
+Additional stock samples were inspected in place, read-only, from local Evo 1 and
+Evo 2 installations:
+
+- Evo 1: `ASPEN.POD`, `THEHILL.POD`, `WORKAHEAD.LTE`, `Caverav.lte`
+- Evo 2: `BAJBEACH.pod`, `PEAK.pod`
 - both installations' `STARTUP.POD`, solely to distinguish `FOG\VGA.LTE` from a
   standalone track LTE
 
-Earlier representative samples were inspected in `/private/tmp` and are
+Earlier representative samples were inspected in a temporary directory and are
 intentionally not added to the repository. Evo 1 samples came from the public 4x4
 Evolution test/demo installer; Evo 2 and LTE samples came from the community track
 archive. Reproduce the analysis from sources with appropriate redistribution rights
@@ -1052,6 +1066,10 @@ before turning a sample into a committed test fixture.
   <https://www.4x4evolution.net/doku.php?id=4x4_evolution_2_-_tracks>
 - Dreamcast/VMU limitations:
   <https://www.4x4evolution.net/doku.php?id=4x4_evolution_-_dreamcast>
+- Americus Maximus, 4x4 Evolution reverse-engineering projects, the primary source
+  for the renderer-contract sections of this document:
+  <https://github.com/americusmaximus/4x4e> and
+  <https://github.com/americusmaximus/4x4e2>
 - `podextract`, independent POD1-versus-POD2 format evidence:
   <https://github.com/foone/podextract>
 - Dummiesman's SMFImportExport is a useful next source for completing the SMF
