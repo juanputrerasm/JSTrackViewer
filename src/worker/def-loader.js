@@ -147,7 +147,14 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       placementIndex,
       strength: pl.strength,
       description: def.description ?? "",
-      hellbenderUndergroundHidden: origin === "HB" && pl.y < 0,
+      /*
+        A Hellbender placement below zero stands in the cavern under the level, not on the
+        ground: 2,862 of the 2,950 such placements in the shipped game land between the cavern
+        floor and ceiling their own cell states (hb-underground.js). The viewer used to drop
+        them, because with no cavern drawn they were objects buried in a hillside; now that it
+        draws one, they are that room's contents and travel with it.
+      */
+      hellbenderUnderground: origin === "HB" && pl.y < 0,
     });
   }
   return { boxes, models };

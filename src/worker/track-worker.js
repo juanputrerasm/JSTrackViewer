@@ -1,5 +1,7 @@
 import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
+import { collectMtmCheckpoints } from "./checkpoint-list.js";
+import { HB_UNDERGROUND_BIAS } from "./hb-underground.js";
 import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
 import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
@@ -316,9 +318,42 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   // Terrain mesh
   let terrainMesh = null;
+  let undergroundFloor = null;
+  let undergroundCeiling = null;
   if (doc.terrain.rawData) {
+    /*
+      Hellbender draws three surfaces off one texture list: the ground, and the floor and
+      ceiling of the cavern beneath it. They share one atlas - see buildTerrainMesh - because
+      building three costs three times the memory and, worse, the same transferable buffer
+      cannot be handed to the main thread twice.
+    */
+    const { buildSharedAtlas } = await import("./terrain-builder.js");
+    const sharedAtlas = doc.underground
+      ? buildSharedAtlas(doc.textures, doc.palette, doc.origin)
+      : null;
+
     terrainMesh = buildTerrainMesh(
-      doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin, doc.animations);
+      doc.terrain, doc.palette, doc.textures, terrainHeightScale, doc.origin, doc.animations,
+      sharedAtlas);
+
+    if (doc.underground) {
+      const cavern = doc.underground;
+      const base = {
+        gridSize: doc.terrain.gridSize,
+        cellSize: doc.terrain.cellSize,
+        rawBytesPerCell: 1,
+        clrBytesPerCell: 2,
+        heightOffset: HB_UNDERGROUND_BIAS,
+        cellMask: cavern.mask,
+        reusesAtlas: true,
+      };
+      undergroundFloor = buildTerrainMesh(
+        { ...base, rawData: cavern.floorHeights, clrData: cavern.floorClr },
+        doc.palette, doc.textures, terrainHeightScale, doc.origin, null, sharedAtlas);
+      undergroundCeiling = buildTerrainMesh(
+        { ...base, rawData: cavern.ceilingHeights, clrData: cavern.ceilingClr, faceDown: true },
+        doc.palette, doc.textures, terrainHeightScale, doc.origin, null, sharedAtlas);
+    }
   }
 
   // Sky texture
@@ -330,13 +365,18 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     } catch { /**/ }
   }
 
+  const checkpoints = collectMtmCheckpoints(doc.boxes);
+
   const stats = {
     gridSize: doc.terrain.gridSize,
     textureCount: doc.textures.length,
     objectCount: doc.boxes.length,
     groundBoxCount: doc.groundBoxes.length,
+    cavernCellCount: doc.underground?.hollowCellCount ?? 0,
+    undergroundBoxCount: doc.undergroundBoxes?.length ?? 0,
     primarySegmentCount: doc.primaryCourse.segments.length,
     extendedCourseCount: doc.extendedCourses.length,
+    checkpointCount: checkpoints.length,
     navPointCount: doc.navPoints?.length ?? 0,
     tunnelCount: doc.tunnels?.length ?? 0,
     powerupCount: doc.powerups?.length ?? 0,
@@ -404,7 +444,8 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     localeName: doc.localeName, trackType: doc.trackType,
     gameType: doc.gameType, weatherMask: doc.weatherMask,
     musicName: doc.musicName, prefix: doc.prefix,
-    ambientSound: doc.ambientSound, waterLevel: doc.waterLevel,
+    ambientSound: doc.ambientSound, redbookTrack: doc.redbookTrack ?? null,
+    waterLevel: doc.waterLevel,
     sunVector: doc.sunVector, sunIntensity: doc.sunIntensity, shadowIntensity: doc.shadowIntensity,
     terrain: terrainMesh ? {
       ...terrainMesh,
@@ -418,6 +459,11 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     extendedCourses: doc.extendedCourses.map(serializeCourse),
     boxes: doc.boxes.map((b) => ({ ...b, position: [...b.position] })),
     groundBoxes: doc.groundBoxes,
+    undergroundFloor,
+    undergroundCeiling,
+    undergroundBoxes: doc.undergroundBoxes ?? [],
+    briefing: doc.briefing ?? null,
+    checkpoints,
     navPoints: doc.navPoints ?? [],
     tunnels: doc.tunnels ?? [],
     powerups: doc.powerups ?? [],

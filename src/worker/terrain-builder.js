@@ -11,9 +11,32 @@ const MAX_ATLAS_HEIGHT = 8192;
  * Builds GPU-ready terrain mesh data from RAW heightfield + CLR texture map + palette + texture list.
  * Returns transferable buffers: positions, normals, uvs, indices, atlas rgba.
  */
-export function buildTerrainMesh(terrain, palette, textures, heightScale, origin, animations) {
+/** Builds the shared texture atlas a set of buildTerrainMesh calls can pass to each other. */
+export function buildSharedAtlas(textures, palette, origin) {
+  return buildAtlas(textures, palette, usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0);
+}
+
+export function buildTerrainMesh(terrain, palette, textures, heightScale, origin, animations, sharedAtlas) {
   const { gridSize, rawData, clrData, rawBytesPerCell, clrBytesPerCell } = terrain;
   const hs = heightScale ?? 4;
+
+  /*
+    Three optional properties, all of them for Hellbender's underground.
+
+    A Hellbender level is one 128-square grid carrying two worlds: the surface, and a cavern
+    system beneath it whose floor and ceiling are two more byte heightfields on the same grid.
+    Those are stored biased, one full byte below the surface band, and they only mean anything
+    in the cells the level says are hollow. See hb-underground.js.
+
+      heightOffset  added to every sampled height, so a biased grid lands in the right band
+      cellMask      one byte per cell, zero meaning this cell is not part of this surface
+      faceDown      wind the quads the other way and flip the normals, for a ceiling that is
+                    only ever seen from below (terrain materials are FrontSide)
+      reusesAtlas   this mesh is drawn with another mesh's atlas, so return none of its own
+  */
+  const heightOffset = terrain.heightOffset ?? 0;
+  const cellMask = terrain.cellMask ?? null;
+  const faceDown = terrain.faceDown === true;
 
   /*
     Horizontal and vertical scale are properties of the terrain, not constants.
@@ -27,12 +50,21 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const cellSize = terrain.cellSize ?? CELL_SIZE;
   const heightDivisor = terrain.heightDivisor ?? null;
 
-  // Build texture atlas
+  /*
+    Build the texture atlas, or reuse one.
+
+    A Hellbender level draws three surfaces - ground, cavern floor, cavern ceiling - out of one
+    texture list, and an atlas for 205 64x64 tiles is about 3 MB. Building it once and passing
+    it to all three keeps that at 3 MB rather than 9, and matters more than the memory: the
+    atlas buffer is transferred to the main thread, and transferring the same ArrayBuffer twice
+    detaches it. So exactly one of the three returns it - the surface, which is what builds the
+    material - and the other two set `reusesAtlas` and return none, to be drawn with it.
+  */
   const overlapPixels = usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0;
   const {
     atlas, atlasWidth, atlasHeight, textureCount, atlasCols, atlasRows,
     atlasTileSize, atlasPadding, sourceTileSize, uvRects, decodedSlots,
-  } = buildAtlas(textures, palette, overlapPixels);
+  } = sharedAtlas ?? buildAtlas(textures, palette, overlapPixels);
 
   const atlasAnimations = buildAtlasAnimations(
     animations, textures, decodedSlots,
@@ -52,10 +84,20 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       const vBase = cell * 4;
       const iBase = cell * 6;
 
-      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz,     heightDivisor);
-      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz,     heightDivisor);
-      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1, heightDivisor);
-      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1, heightDivisor);
+      /*
+        A masked-out cell keeps its four vertices but emits no triangles, so the buffers stay
+        one quad per cell and every existing index calculation is unchanged. The alternative,
+        compacting the arrays, would make the cell-to-vertex mapping depend on the mask.
+      */
+      if (cellMask && !cellMask[cell]) {
+        for (let k = 0; k < 6; k++) indices[iBase + k] = vBase;
+        continue;
+      }
+
+      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz,     heightDivisor) + heightOffset;
+      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz,     heightDivisor) + heightOffset;
+      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1, heightDivisor) + heightOffset;
+      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1, heightDivisor) + heightOffset;
 
       const x0 = cx * cellSize;
       const x1 = (cx + 1) * cellSize;
@@ -78,10 +120,11 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       const nz = d1x * d2y - d1y * d2x;
       const nl = Math.hypot(nx, ny, nz) || 1;
       const nnx = nx / nl, nny = ny / nl, nnz = nz / nl;
+      const facing = faceDown ? -1 : 1;
       for (let v = 0; v < 4; v++) {
-        normals[(vBase + v) * 3 + 0] = nnx;
-        normals[(vBase + v) * 3 + 1] = nny;
-        normals[(vBase + v) * 3 + 2] = nnz;
+        normals[(vBase + v) * 3 + 0] = nnx * facing;
+        normals[(vBase + v) * 3 + 1] = nny * facing;
+        normals[(vBase + v) * 3 + 2] = nnz * facing;
       }
 
       // UV from CLR texture index (with mirror + rotation support)
@@ -140,9 +183,14 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         uvs[uOff + vi * 2 + 1] = cV[ci2];
       }
 
-      // Indices (2 triangles)
-      indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 1; indices[iBase + 2] = vBase + 2;
-      indices[iBase + 3] = vBase;     indices[iBase + 4] = vBase + 2; indices[iBase + 5] = vBase + 3;
+      // Indices (2 triangles), wound the other way for a surface seen from below.
+      if (faceDown) {
+        indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 2; indices[iBase + 2] = vBase + 1;
+        indices[iBase + 3] = vBase;     indices[iBase + 4] = vBase + 3; indices[iBase + 5] = vBase + 2;
+      } else {
+        indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 1; indices[iBase + 2] = vBase + 2;
+        indices[iBase + 3] = vBase;     indices[iBase + 4] = vBase + 2; indices[iBase + 5] = vBase + 3;
+      }
     }
   }
 
@@ -152,7 +200,8 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     normals: normals.buffer,
     uvs: uvs.buffer,
     indices: indices.buffer,
-    atlas: {
+    // A reusing call must not hand back an atlas it does not own; see the note above.
+    atlas: terrain.reusesAtlas === true ? null : {
       rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
       textureCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
       animations: atlasAnimations,

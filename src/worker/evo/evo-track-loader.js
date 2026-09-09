@@ -11,6 +11,7 @@ import {
   EVO_CELL_SIZE, EVO_GRID_SIZE, EVO_HEIGHT_DIVISOR, EVO_WATER_HEIGHT_DIVISOR,
   evoPositionToBox, evoOrientToAngles, evoHeightAt,
 } from "./evo-coords.js";
+import { collectEvoCheckpoints } from "../checkpoint-list.js";
 
 /*
   Loads one 4x4 Evolution track out of a POD2 archive into the viewer's normalized result.
@@ -164,6 +165,25 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
     };
   });
 
+  const checkpoints = collectEvoCheckpoints(boxes);
+
+  /*
+    The starting grid, in the shape the viewer's existing truck layer already draws: a box
+    position and a psi. Evo needs no special case there - the marker is a flat arrow built
+    from (sin psi, -cos psi) in scene space, which is exactly the heading convention Evo
+    placements use once the Z flip is folded in. See evo-sit-parser.js.
+  */
+  const trucks = sit.vehicles.map((vehicle, index) => {
+    const { psi, theta, phi } = evoOrientToAngles(vehicle.orient);
+    return {
+      index,
+      name: vehicle.name,
+      position: evoPositionToBox(vehicle.position),
+      psi, theta, phi,
+      courseToFollow: vehicle.courseToFollow,
+    };
+  });
+
   const trees = buildTreeInstances(veg, rawData, models);
 
   const courses = sit.courses.map((course) => ({
@@ -210,8 +230,9 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
     extendedCourses: courses.slice(1),
 
     boxes,
+    checkpoints,
     groundBoxes: [],
-    trucks: [],
+    trucks,
     vegetation: veg ? {
       version: veg.version,
       maxTrees: veg.maxTrees,
@@ -232,6 +253,8 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
       textureCount: textures.length,
       shadowTextureCount: tex.shadow.length,
       objectCount: boxes.length,
+      checkpointCount: checkpoints.length,
+      truckCount: trucks.length,
       // The stats panel reads this for every track; Evo has no ground-box layer.
       groundBoxCount: 0,
       modelCount: Object.keys(models).length,

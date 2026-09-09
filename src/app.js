@@ -22,8 +22,8 @@ export class TrackViewerApp {
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: true,
-      ramps: true,
-      navpoints: true, tunnels: true, powerups: true, animate: true,
+      navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
+      racetrack: true, underground: true,
     };
   }
 
@@ -92,19 +92,22 @@ export class TrackViewerApp {
       "tog-objects":   "objects",
       "tog-billboards": "billboards",
       "tog-checkpoints":"checkpoints",
-      "tog-ramps":     "ramps",
       "tog-gboxes":    "gboxes",
       "tog-cboxes":    "cboxes",
+      "tog-racetrack": "racetrack",
+      "tog-underground": "underground",
       "tog-water":     "water",
       "tog-backdrop":  "backdrop",
       "tog-shadows":   "shadows",
       "tog-wireframe": "wireframe",
       "tog-trucks":    "trucks",
       "tog-navpoints": "navpoints",
+      "tog-cpmarkers": "cpmarkers",
       "tog-tunnels":   "tunnels",
       "tog-powerups":  "powerups",
       "tog-animate":   "animate",
     };
+    this._toggleMap = toggleMap;
     for (const [id, flag] of Object.entries(toggleMap)) {
       const el = doc.getElementById(id);
       if (!el) continue;
@@ -238,7 +241,7 @@ export class TrackViewerApp {
       this._minimap.setTrack(result);
       this._minimap.updateCamera(this._scene.nav);
       this._updateTrackInfo(result);
-      this._updateNavList(result);
+      this._applyLayerAvailability(this._scene.layerPresence());
       this._setStatus(result.trackName || choice.name);
       // Focus viewport after load
       this._doc.getElementById("viewport")?.focus();
@@ -268,22 +271,52 @@ export class TrackViewerApp {
     this._doc.getElementById("track-select").innerHTML = "";
   }
 
+  /*
+    Track Data, carrying only the fields the track's own file has.
+
+    Every row below except the first four is a field some of these games write and others do
+    not, and a row printed for a field the file never carried is a claim about the track: a
+    CPR .SIT has no ambient sound or weather mask, an MTM 1 one has neither of those nor a
+    water height, and a TV-family .LVL header has none of the four. Those used to be reported
+    as slot 0 in clear weather with no water, which is the parser's defaults being read back
+    as if they were data.
+
+    So a field is shown when the file states it and omitted when it does not. "None" and 0
+    still appear where the file really says so - `!waterHeight 0` is a track with no water,
+    which is not the same as a track that cannot have any.
+  */
   _updateTrackInfo(data) {
     const dl = this._doc.getElementById("track-info");
+    const background = displayBackgroundModel(data);
     const pairs = [
       ["File",         data.fileName || "—"],
       ["Origin",       this._podSource],
       ["Name",         data.trackName || "—"],
-      ["Locale",       data.localeName || "—"],
-      ["Type",         data.trackType || "—"],
       ["Game",         data.origin || "—"],
-      ["Background",   displayBackgroundModel(data)],
-      ["Music",        displayMusic(data)],
-      ["Weather",      displayWeather(data.weatherMask)],
-      ["Water level",  data.waterLevel > 0 ? data.waterLevel : "None"],
-      ["Ambient",      displayMusicSlot(data.ambientSound)],
-      ["POD comment",  data.podComment || "—"],
     ];
+    if (data.localeName) pairs.push(["Locale", data.localeName]);
+    /*
+      A Hellbender level's .TXT states where it is and what the mission is, which is what it
+      has instead of the "Race Track Locale" and race type every other game writes. The label
+      is the file's own - PLANET, AREA, LOCATION and OBJECTIVE all occur - so it is shown as
+      authored. See hb-briefing.js.
+    */
+    if (data.briefing?.heading) {
+      pairs.push([data.briefing.headingLabel ?? "Location", data.briefing.heading]);
+    }
+    if (data.briefing?.mission) {
+      pairs.push([data.briefing.missionLabel ?? "Mission", data.briefing.mission]);
+    }
+    if (data.trackType && data.trackType !== "UNKNOWN") pairs.push(["Type", data.trackType]);
+    if (background !== "—") pairs.push(["Background", background]);
+    if (data.musicName) pairs.push(["Music", displayMusic(data)]);
+    if (data.weatherMask != null) pairs.push(["Weather", displayWeather(data.weatherMask)]);
+    if (data.waterLevel != null) {
+      pairs.push(["Water level", data.waterLevel > 0 ? data.waterLevel : "None"]);
+    }
+    if (data.ambientSound != null) pairs.push(["Ambient", displayAmbientSound(data)]);
+    if (data.redbookTrack != null) pairs.push(["Redbook track", String(data.redbookTrack)]);
+    if (data.podComment) pairs.push(["POD comment", data.podComment]);
 
     // Only shown when the pod carries a Community Patch 3 version record.
     const version = data.trackVersion;
@@ -304,13 +337,23 @@ export class TrackViewerApp {
     const statsDl = this._doc.getElementById("track-stats");
     if (data.stats) {
       const s = data.stats;
+      /*
+        Grid size, textures and objects are true of every track. Everything below is a layer
+        some of these games have and others do not, so a zero is almost always "this game has
+        no such thing" rather than "this track has none of them": Evo has no ground-box layer
+        at all and no Hellbender level has a course. Those rows are omitted for the same
+        reason their View Options toggles are.
+      */
       const statsPairs = [
         ["Grid size",    `${s.gridSize}×${s.gridSize}`],
         ["Textures",     s.textureCount],
         ["Objects",      s.objectCount],
-        ["Ground boxes", s.groundBoxCount],
-        ["Course segs",  s.primarySegmentCount],
       ];
+      if (s.groundBoxCount) statsPairs.push(["Ground boxes", s.groundBoxCount]);
+      // Hellbender's cavern, which is a second world on the same grid; see hb-underground.js.
+      if (s.cavernCellCount) statsPairs.push(["Cavern cells", s.cavernCellCount]);
+      if (s.undergroundBoxCount) statsPairs.push(["Cavern boxes", s.undergroundBoxCount]);
+      if (s.primarySegmentCount) statsPairs.push(["Course segs", s.primarySegmentCount]);
       /*
         TV-family map content that has no MTM equivalent. Each row is only added when the
         level actually carries that side file, so an MTM track's stats panel is unchanged.
@@ -325,6 +368,8 @@ export class TrackViewerApp {
       if (s.modelTextureCount) statsPairs.push(["Model textures", s.modelTextureCount]);
       if (s.shadowTextureCount) statsPairs.push(["Shadow textures", s.shadowTextureCount]);
       if (s.treeCount) statsPairs.push(["Trees", s.treeCount]);
+      if (s.checkpointCount) statsPairs.push(["Checkpoints", s.checkpointCount]);
+      if (s.truckCount) statsPairs.push(["Grid slots", s.truckCount]);
       if (s.navPointCount) statsPairs.push(["Nav points", s.navPointCount]);
       if (s.tunnelCount) statsPairs.push(["Tunnels", s.tunnelCount]);
       if (s.powerupCount) statsPairs.push(["Powerups", s.powerupCount]);
@@ -351,40 +396,22 @@ export class TrackViewerApp {
   }
 
   /*
-    The .NAV list, in the order the level plays.
+    Shows only the toggles the loaded track has something for.
 
-    This is the level's own route description, so it is shown as an ordered list rather than
-    folded into the stats: which points are objectives, which are checkpoints, which tunnel a
-    tunnel point leads to, and how many enemies a target list names. Hidden entirely for
-    tracks that have no .NAV, which is every MTM-family track.
+    A View Options panel that offers Tunnels, Powerups and Nav points on an MTM track, or
+    Ground boxes on an Evo one, is nineteen controls of which a third do nothing. Which ones
+    those are is answered by the scene, from the layers it actually built, rather than by a
+    table here of what each game is supposed to carry - see TrackScene.layerPresence.
+
+    Passing null restores the full set, which is the right state with no track loaded: nothing
+    is known to be absent yet.
   */
-  _updateNavList(data) {
-    const panel = this._doc.getElementById("nav-panel");
-    const list = this._doc.getElementById("nav-list");
-    if (!panel || !list) return;
-    const points = data?.navPoints ?? [];
-    if (!points.length) {
-      panel.hidden = true;
-      list.innerHTML = "";
-      return;
+  _applyLayerAvailability(presence) {
+    for (const [id, flag] of Object.entries(this._toggleMap ?? {})) {
+      const input = this._doc.getElementById(id);
+      const row = input?.closest("label");
+      if (row) row.hidden = presence ? presence[flag] === false : false;
     }
-    list.innerHTML = points.map((point) => {
-      const detail = [];
-      if (point.type === 0 && point.targets.length) {
-        detail.push(`${point.targets.length} target${point.targets.length === 1 ? "" : "s"}`);
-      }
-      if (point.tunnelLevel) detail.push(point.tunnelLevel.replace(/\.LVL$/, ""));
-      if (point.type === 5) {
-        detail.push(`enemy ${point.bossEnemy}`);
-        if (point.secondaryTargets.length) detail.push(`${point.secondaryTargets.length} shield`);
-        if (point.musicName) detail.push(point.musicName.replace(/\.MOD$/, ""));
-      }
-      if (point.type === 6) detail.push(`heading ${Math.round((point.heading / 65536) * 360)}\u00b0`);
-      if (point.description) detail.push(point.description);
-      const suffix = detail.length ? ` <span class="nav-detail">${escHtml(detail.join(" \u00b7 "))}</span>` : "";
-      return `<li>${escHtml(point.typeName)}${suffix}</li>`;
-    }).join("");
-    panel.hidden = false;
   }
 
   _clearTrackInfo() {
@@ -393,10 +420,7 @@ export class TrackViewerApp {
     const statsPanel = this._doc.getElementById("stats-panel");
     if (statsPanel) statsPanel.hidden = true;
     this._doc.getElementById("track-stats").innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
-    const navPanel = this._doc.getElementById("nav-panel");
-    if (navPanel) navPanel.hidden = true;
-    const navList = this._doc.getElementById("nav-list");
-    if (navList) navList.innerHTML = "";
+    this._applyLayerAvailability(null);
     this._minimap?.clear();
   }
 
@@ -455,6 +479,19 @@ function nameFromUrl(url) {
   }
 }
 
+/*
+  MTM 2's nine soundtrack stems, which are the .WAV files in its MUSIC.POD.
+
+  This list names a MUSIC file, and only a music file. It used to name the ambient sound slot
+  too, which put "AZTEC (0)" on the info panel of every CPR, Evo, MTM 1, TV and Fury3 track in
+  the viewer. Three separate things were wrong with that:
+
+    - MTM 1 and CPR .SITs have no ambient-sound line at all, and neither does a TV-family
+      .LVL, so the 0 being named was a default the parser invented, not a value from the file;
+    - the ambient slot is not an index into this list even in MTM 2, where AZTEC's own track
+      is on slot 2 and slot 0 belongs to Torture Pit;
+    - Evo carries a real ambient slot, but nothing maps its numbering onto anything.
+*/
 const MUSIC_NAMES = ["AZTEC", "BREAK", "FARM", "GRAVEX", "ROCKX", "SCRAP", "SPLASH", "SURF", "VOODOO"];
 const WEATHER_NAMES = ["Clear", "Cloudy", "Foggy", "Dense Fog", "Rain", "Snow", "Dusk", "Night", "Pitch Black"];
 
@@ -477,10 +514,29 @@ function displayBackgroundModel(data) {
   return arena ? `${name}${format}, arena` : `${name}${format}`;
 }
 
-function displayMusicSlot(slot) {
+/*
+  The ambient sound slot.
+
+  MTM 2 is the one game whose slot resolves to something nameable: it indexes
+  DATA\SOUND<NNN>.TXT in the game's SOUND.POD, the per-course table of one-shot and looping
+  ambience. The mapping is exact across the fifteen stock courses - Sidewinder Canyon and
+  Tumbleweed Flats, the two deserts, are on slots 6 and 8 and SOUND006/SOUND008 are the two
+  coyote tables, The Heights is on 5 against SOUND005's eagles, and The Graveyard is on 13
+  against the one table whose checkpoint sound is scream4.wav. The four slots with no file
+  (0, 10, 11 and 12) are the arenas, which have no outdoor ambience.
+
+  That table lives in another archive, so the viewer names the file rather than its contents.
+  Every other game gets the bare number, and a track whose file has no such field gets
+  nothing, which is what a missing field should read as.
+*/
+function displayAmbientSound(data) {
+  const slot = data?.ambientSound;
   if (slot == null || slot === "") return "—";
-  if (slot >= 0 && slot < MUSIC_NAMES.length) return `${MUSIC_NAMES[slot]} (${slot})`;
-  return slot === 14 ? "None (14)" : `Slot ${slot}`;
+  if (data?.origin === "MTM2") {
+    const table = `SOUND${String(slot).padStart(3, "0")}.TXT`;
+    return `Slot ${slot} (${table})`;
+  }
+  return `Slot ${slot}`;
 }
 
 function displayWeather(mask) {

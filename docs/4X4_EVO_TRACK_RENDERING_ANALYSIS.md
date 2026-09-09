@@ -659,6 +659,74 @@ flat plane at native water height first. WAT-driven animated layers/specular can
 follow. A zero alpha LVL water color means no visible plane even if a nominal
 height exists.
 
+## The starting grid: `*** Vehicles ***`
+
+Both generations write this section identically, which is unusual for them - the boxes section
+is the part that changed between v6 and v7, and this did not. A count, then that many records
+of the same label/value pairs the v6 boxes use:
+
+```
+*** Vehicles ***
+8
+Vehicle 1 of 8 -------------------------
+staticName / CBLS24.TRK
+wPos       / 4342.46,149.441,4429.95
+bvel       / 0,0,0
+wOrient    / 0,0,0
+p,q,r      / 0,0,0
+faxle.angle,faxle.steering_angle ... raxle ... xm.gear ... ap.autopilot,ap.cnumber
+!ap.courseToFollow / 2
+@damageCode / 0
+$heliTimer,heliTheta,heliPhi,heliPsi ... heliPos
+```
+
+Every stock track in both games declares exactly eight, and they are a grid rather than a
+scatter: ASPEN and PEAK stagger two columns down the road, THEHILL lines eight abreast,
+TRIBAJA strings them along a beach, BAJBEACH clusters them for a rally start.
+
+Only the placement is read. Most of the record - axle angles, which tyres are on the ground,
+gear, damage, helicopter state - is a saved-game snapshot rather than level data.
+
+### What the placement is worth
+
+| | ASPEN | THEHILL | PEAK | BAJBEACH | TRIBAJA |
+|---|---|---|---|---|---|
+| slots | 8 | 8 | 8 | 8 | 8 |
+| height above terrain, median | +10.1 | +6.5 | +5.8 | +5.4 | +6.1 |
+| heading vs nearest course segment, mean cos | **+1.00** | **+1.00** | **+1.00** | +0.96 | +0.96 |
+
+The heading result is the useful one, and it settles a question the checkpoint work could only
+answer as an axis. Taking `wOrient`'s third component as the heading and comparing it against
+the course the grid sits on gives a mean cosine of +1.00 on three tracks and +0.96 on the other
+two - and the sign is positive, so the grid faces the way the course runs, which is what a
+starting grid does. Checkpoints could not establish that: their stored angle aligns with the
+course just as well but its sign is authored either way round, because a gate is symmetric.
+
+The heights are a consistent 4 to 17 units above the terrain, which is the vehicle body's
+origin sitting above its axles rather than an error.
+
+`staticName` is `CBLS24.TRK` on all eight slots of every stock track - the editor's default
+vehicle, not a statement about the track. The `.TRK` files live in `TRUCK.POD` (121 of them in
+Evo 1, 150 in Evo 2), not in the track archive, so a track opened on its own could not resolve
+one in any case.
+
+`!ap.courseToFollow` names a course index per slot, which lines up with the extended courses
+the same `.SIT` defines, but the stock values are nearly uniform within a track (ASPEN gives
+slot 1 course 2 and the rest 0; PEAK and TRIBAJA give all eight course 2) so nothing here
+establishes what the index selects. It is carried, not interpreted.
+
+### Drawing it
+
+Nothing new was needed. The viewer's existing truck layer draws a flat arrow from a box
+position and a psi, and its scene-space forward, `(sin psi, -cos psi)`, is already the Evo
+convention once the Z flip is folded in. Two adjustments went with it:
+
+- the arrow is sized in world units, so it now scales with `cellSize`; Evo's cells are 32
+  units against MTM's 64, and at fixed size eight slots 16 units apart merged into one blob;
+- the MTM family's slot 0, under `*** Your Truck (Not used anymore) ***`, is a saved player
+  slot rather than a vehicle on the grid and is skipped. That used to be a check on the array
+  index, which would have dropped a real Evo vehicle, so it is now a flag on the record.
+
 ## Evo 1 versus Evo 2
 
 | Area | Evo 1 | Evo 2 | Viewer consequence |

@@ -62,9 +62,26 @@ const NAV_COLORS = {
   4: 0x0088cc,   // tunnel exit
   5: 0xff00ff,   // boss
   6: 0xffffff,   // start point
+  // Hellbender's own types. Its 0..6 are the TV seven, so only these need colours.
+  7: 0x8899aa,   // sync point
+  8: 0xff9933,   // rescue beacon
+  9: 0x667788,   // end of navs
+  12: 0x66ddaa,  // escort
+  13: 0x66ddaa,  // retrieve
+  14: 0xff00ff,  // pursue
 };
 const NAV_DEFAULT_COLOR = 0xaaaaaa;
 const NAV_START_POINT = 6;
+
+/*
+  The two Hellbender navigation types that are bookkeeping rather than places.
+
+  A sync point is stored at (0, level height, 0) in every one of the 69 that ship, and an
+  "End of navs" terminator at the same spot in 20 of its 26 levels. Drawing them would put a
+  stack of markers in one corner of every Hellbender map standing for nothing on the ground.
+  They stay in the Navigation Points list, where the sequence is what matters.
+*/
+const NAV_TYPES_WITHOUT_A_PLACE = new Set([7, 9]);
 const TUNNEL_ENTRANCE_COLOR = 0x00ccff;
 const TUNNEL_EXIT_COLOR = 0x0066aa;
 const POWERUP_COLOR = 0x66ff99;
@@ -84,8 +101,9 @@ const HEADING_ARROW_LENGTH = 220;
 */
 function navLabelSuffix(point) {
   switch (point.type) {
+    // A Hellbender tunnel entrance names no level, so the tag falls back to the plain word.
+    case 1: return point.tunnelLevel ? `enter ${point.tunnelLevel.replace(/\.LVL$/, "")}` : "tunnel entrance";
     case 0: return `target x${point.targets?.length ?? 0}`;
-    case 1: return `enter ${(point.tunnelLevel ?? "").replace(/\.LVL$/, "")}`;
     case 2: return "checkpoint";
     case 3: return "jump zone";
     case 4: return "tunnel exit";
@@ -94,6 +112,14 @@ function navLabelSuffix(point) {
     default: return point.typeName ?? "";
   }
 }
+
+/*
+  Checkpoint markers, for the games that have no .NAV.
+
+  Same colour as a .NAV checkpoint, because it is the same thing: the yellow means checkpoint
+  whichever game the track came from.
+*/
+const CHECKPOINT_MARKER_COLOR = 0xffdd00;
 const GRID_COLOR = 0x444466;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const AMBIENT_COLOR = 0x888888;
@@ -211,9 +237,11 @@ export class TrackScene {
       courses: false, objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: true,
-      navpoints: true, tunnels: true, powerups: true, animate: true,
+      navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
+      racetrack: true, underground: true,
     };
     this._heightScale = 4;
+    this._undergroundSurfaces = [];
     this._labelTextures = [];
     this._lastTime = 0;
     this._terrainAtlasN = 1;
@@ -262,11 +290,14 @@ export class TrackScene {
       racetrackWire:new THREE.Group(),
       gboxes:     new THREE.Group(),
       gboxesWire: new THREE.Group(),
+      underground:     new THREE.Group(),
+      undergroundWire: new THREE.Group(),
       cboxes:     new THREE.Group(),
       cboxesWire: new THREE.Group(),
       ramps:      new THREE.Group(),
       rampsWire:  new THREE.Group(),
       navPoints:  new THREE.Group(),
+      checkpointMarkers: new THREE.Group(),
       tunnels:    new THREE.Group(),
       powerups:   new THREE.Group(),
       water:      new THREE.Group(),
@@ -346,10 +377,55 @@ export class TrackScene {
     this._applyVisibility();
   }
 
+  /*
+    Which layers the loaded track actually has, keyed by render flag.
+
+    Answered from what got built rather than from a table of what each game is supposed to
+    carry. A toggle for a layer with nothing in it is a control that does nothing, and there
+    are a lot of them: an MTM track has no navigation points, tunnels or powerups, a TV level
+    has no checkpoints or trucks, Evo has no ground boxes, and only CPR has a road surface.
+    Reading the groups keeps that list correct on its own - a layer added later shows up here
+    the moment it builds geometry, and a track that unexpectedly does carry one is not hidden
+    because a table said its game never does.
+
+    Three flags are not content and are always available: the grid and the wireframe overlay
+    are drawn from other layers, and the sun is a light.
+  */
+  layerPresence() {
+    const g = this._groups;
+    const has = (...groups) => groups.some((name) => g[name].children.length > 0);
+    const objects = has("objects", "billboards", "vegetation", "checkpoints", "ramps");
+    return {
+      terrain:    !!this._terrainMesh,
+      textures:   !!this._terrainMesh,
+      grid:       !!this._terrainMesh,
+      courses:    has("courses"),
+      objects,
+      billboards: has("billboards"),
+      checkpoints: has("checkpoints"),
+      racetrack:  has("racetrack"),
+      underground: has("underground"),
+      gboxes:     has("gboxes"),
+      cboxes:     has("cboxes"),
+      wireframe:  objects || has("racetrack", "gboxes", "cboxes"),
+      trucks:     has("trucks"),
+      navpoints:  has("navPoints"),
+      cpmarkers:  has("checkpointMarkers"),
+      tunnels:    has("tunnels"),
+      powerups:   has("powerups"),
+      water:      has("water"),
+      backdrop:   has("backdrop"),
+      animate:    (this._textureAnimations?.length ?? 0) > 0,
+      shadows:    true,
+    };
+  }
+
   _applyVisibility() {
     const f = this._renderFlags;
     this._groups.terrain.visible = f.terrain;
-    this._groups.racetrack.visible = f.objects;
+    // CPR's road surface is its own layer, not one of the placed objects, and only CPR has
+    // one. It gets its own toggle rather than riding on `objects`.
+    this._groups.racetrack.visible = f.racetrack !== false;
     this._groups.terrainGrid.visible = f.grid;
     this._groups.courses.visible = f.courses;
     this._groups.objects.visible = f.objects;
@@ -359,16 +435,25 @@ export class TrackScene {
     this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
     this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
     this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
-    this._groups.racetrackWire.visible = f.objects && (f.wireframe === true);
+    this._groups.racetrackWire.visible = f.racetrack !== false && (f.wireframe === true);
     this._groups.gboxes.visible = f.gboxes;
     this._groups.gboxesWire.visible = f.gboxes && (f.wireframe === true);
+    /*
+      The cavern is one toggle covering its floor, its ceiling, its ground boxes and the
+      objects standing in it. They are one place, and showing the room without what is in it
+      is not a view anyone wants.
+    */
+    this._groups.underground.visible = f.underground !== false;
+    this._groups.undergroundWire.visible = f.underground !== false && (f.wireframe === true);
     this._groups.cboxes.visible = f.cboxes;
     this._groups.cboxesWire.visible = f.cboxes && (f.wireframe === true);
-    // A ramp is track the player drives on, not an invisible collision helper, so it follows
-    // the objects toggle rather than the collision-box overlay.
-    this._groups.ramps.visible = f.objects && f.ramps !== false;
-    this._groups.rampsWire.visible = f.objects && f.ramps !== false && (f.wireframe === true);
+    // A ramp is track the player drives on, not an invisible collision helper, so it is one of
+    // the objects rather than a layer of its own: only MTM 1 and MTM 2 author any, CPR writes
+    // the section and always leaves it empty, and Evo has no such section at all.
+    this._groups.ramps.visible = f.objects;
+    this._groups.rampsWire.visible = f.objects && (f.wireframe === true);
     this._groups.navPoints.visible = f.navpoints !== false;
+    this._groups.checkpointMarkers.visible = f.cpmarkers !== false;
     this._groups.tunnels.visible = f.tunnels !== false;
     this._groups.powerups.visible = f.powerups !== false;
     this._groups.water.visible = f.water;
@@ -377,9 +462,12 @@ export class TrackScene {
     if (this._sun) this._sun.visible = f.shadows !== false;
 
     // texture toggle: swap between textured and flat terrain material
-    if (this._terrainMesh) {
-      this._terrainMesh.material = f.textures ? this._terrainMatTextured : this._terrainMatFlat;
-    }
+    const terrainMaterial = f.textures ? this._terrainMatTextured : this._terrainMatFlat;
+    if (this._terrainMesh) this._terrainMesh.material = terrainMaterial;
+    const undergroundMaterial = f.textures
+      ? (this._undergroundMatTextured ?? this._terrainMatFlat)
+      : this._terrainMatFlat;
+    for (const surface of this._undergroundSurfaces ?? []) surface.material = undergroundMaterial;
   }
 
   setHeightScale(hs) {
@@ -398,6 +486,13 @@ export class TrackScene {
       }
     }
     this._terrainMesh = null;
+    /*
+      The cavern surfaces share the terrain material rather than owning one, so the loop above
+      disposes that material once per mesh that references it. Dropping the references here is
+      what keeps the next track from swapping a disposed material back in.
+    */
+    this._undergroundSurfaces = [];
+    this._undergroundMatTextured = null;
     this._terrainMatTextured = null;
     this._terrainMatFlat = null;
     this._terrainAtlasTex?.dispose();
@@ -452,9 +547,11 @@ export class TrackScene {
     if (trackData.boxes?.length) this._buildObjects(trackData);
     this._reportMissingModelTextures(trackData);
     if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
+    this._buildUnderground(trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
     if (trackData.vegetation?.trees?.length) this._buildVegetation(trackData);
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
+    if (trackData.checkpoints?.length) this._buildCheckpointMarkers(trackData);
     if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
     if (trackData.powerups?.length) this._buildPowerups(trackData);
     this._installTextureAnimations(trackData);
@@ -463,6 +560,67 @@ export class TrackScene {
 
     this._applyVisibility();
     this._updateSunFromTrackData(trackData);
+  }
+
+  /*
+    Hellbender's cavern: a floor, a ceiling, and the ground boxes standing between them.
+
+    The two surfaces are ordinary terrain meshes - same builder, same grid, same texture atlas
+    as the ground above - offset into the altitude band the cavern grids are biased into and
+    masked to the cells the level says are hollow. See hb-underground.js for what that band is
+    and how it was measured.
+
+    They share the surface terrain's material, which is why they are built after it. That is
+    not only a memory saving: the atlas is a transferable buffer, so the worker builds one and
+    hands it over once, and the two cavern meshes arrive with no atlas of their own.
+  */
+  _buildUnderground(trackData) {
+    const group = this._groups.underground;
+
+    /*
+      The cavern is drawn unlit.
+
+      The scene has one directional light standing in for the sun, and underground there is no
+      sun: the ceiling faces away from it by definition and the floor is shadowed by the whole
+      map above it, so a Lambert cavern renders almost black however the sun slider is set.
+      Hellbender's own art is already shaded into the texture - these are the same 64x64 tiles
+      the surface uses - so drawing the two cavern surfaces at texture brightness shows what
+      the level actually contains, which is the entire point of the layer.
+    */
+    if (this._terrainAtlasTex && !this._undergroundMatTextured) {
+      /*
+        DoubleSide, unlike the surface terrain.
+
+        A heightfield quad is wound to be seen from above, which is the only side there is when
+        the surface you are drawing is the ground. A cavern has two: its floor folds into
+        cliffs and overhangs that are approached from either hand, and the seam that closes it
+        against solid rock is a near-vertical quad whose facing depends on which way the cavern
+        happens to end. With FrontSide, roughly half of those walls vanish - the ones leaning
+        away from the camera - which reads as a cave with two of its four sides missing.
+      */
+      this._undergroundMatTextured = new THREE.MeshBasicMaterial({
+        map: this._terrainAtlasTex, side: THREE.DoubleSide,
+      });
+    }
+    const addSurface = (mesh) => {
+      if (!mesh) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
+      geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
+      geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
+      geo.computeBoundingSphere();
+      const surface = new THREE.Mesh(geo, this._undergroundMatTextured ?? this._terrainMatFlat);
+      group.add(surface);
+      this._undergroundSurfaces.push(surface);
+    };
+    addSurface(trackData.undergroundFloor);
+    addSurface(trackData.undergroundCeiling);
+
+    if (trackData.undergroundBoxes?.length) {
+      this._buildGroundBoxes(trackData.undergroundBoxes, this._heightScale, trackData,
+        group, this._groups.undergroundWire);
+    }
   }
 
   _buildTerrain(terrainData) {
@@ -714,6 +872,13 @@ export class TrackScene {
 
     Markers land on cell centres, so averaging the cell's four corners is the bilinear height
     at the point the marker actually occupies rather than the height of one of its corners.
+
+    A 16-bit heightfield is read two ways, because two games write one. Evo states its own
+    divisor on the terrain record (11.5 fixed point, so 32), and anything else is the MTM
+    reading of `>>> 6`. Running Evo through the MTM branch returns half the real height, and
+    its `hi === 0` shortcut - a guard for MTM tracks that store an 8-bit range in 16-bit
+    cells - returns the raw sample unscaled for any Evo cell below 8 world units. That is
+    what buried every Evo checkpoint marker under the terrain.
   */
   _terrainHeightAt(editorX, editorY, trackData) {
     const terrain = trackData.terrain;
@@ -721,6 +886,7 @@ export class TrackScene {
     if (!raw || !terrain) return 0;
     const gridSize = terrain.gridSize ?? 256;
     const bytesPerCell = terrain.rawBytesPerCell ?? 1;
+    const heightDivisor = terrain.heightDivisor ?? 0;
     const cx = Math.min(gridSize - 1, Math.max(0, Math.floor(editorX / (terrain.cellSize ?? 64))));
     const cz = Math.min(gridSize - 1, Math.max(0, Math.floor(editorY / (terrain.cellSize ?? 64))));
 
@@ -734,7 +900,9 @@ export class TrackScene {
       } else {
         const lo = raw[off] ?? 0;
         const hi = raw[off + 1] ?? 0;
-        total += hi === 0 ? lo : (lo | (hi << 8)) >>> 6;
+        const sample = lo | (hi << 8);
+        if (heightDivisor) total += sample / heightDivisor;
+        else total += hi === 0 ? lo : sample >>> 6;
       }
     }
     return (total / 4) * this._heightScale;
@@ -746,9 +914,11 @@ export class TrackScene {
     Falls back to the height stored in the record when the track carries no heightfield, so a
     marker layer never collapses to y=0 on a track this viewer cannot sample.
   */
-  _markerGroundPosition(position, trackData) {
+  _markerGroundPosition(position, trackData, snapToGround = true) {
     const point = this._editorToScene(position, trackData);
-    if (this._terrainRaw) point.y = this._terrainHeightAt(position[0], position[1], trackData);
+    if (snapToGround && this._terrainRaw) {
+      point.y = this._terrainHeightAt(position[0], position[1], trackData);
+    }
     return point;
   }
 
@@ -842,10 +1012,46 @@ export class TrackScene {
   _buildNavPoints(trackData) {
     const group = this._groups.navPoints;
     trackData.navPoints.forEach((point, i) => {
-      const base = this._markerGroundPosition(point.position, trackData);
+      /*
+        Two Hellbender-only cases the TV form never produces.
+
+        A sync point or terminator has no place on the map, and an escort objective's stored
+        coordinates are an uninitialised editor field rather than a position (see
+        hb-nav-parser.js). Neither gets a marker; both stay in the list panel.
+      */
+      if (NAV_TYPES_WITHOUT_A_PLACE.has(point.type) || point.positionIsPlaceholder) return;
+
+      /*
+        Hellbender authors whole sections of a level below zero, and the viewer draws only the
+        surface heightfield. Snapping one of those onto the surface would move it somewhere it
+        is not, so an underground point keeps the altitude its own record states. Markers draw
+        with depth testing off, so it is still visible through the hill above it.
+      */
+      const base = this._markerGroundPosition(point.position, trackData, !point.underground);
       const color = NAV_COLORS[point.type] ?? NAV_DEFAULT_COLOR;
-      this._addMapMarker(group, base, color, `NAV${i + 1} ${navLabelSuffix(point)}`);
+      const suffix = navLabelSuffix(point) + (point.underground ? " (below)" : "");
+      this._addMapMarker(group, base, color, `NAV${i + 1} ${suffix}`);
       if (point.type === NAV_START_POINT) this._addHeadingArrow(group, base, point.heading, color);
+    });
+  }
+
+  /*
+    Checkpoint markers, for the games whose route is in the .SIT rather than in a .NAV.
+
+    Numbered CP1..CPn in pass order, which is what a viewer of an MTM, CPR or Evo track wants
+    from a map: not where the gates are - the gate models are already drawn - but which one
+    comes first. That is the same argument the .NAV layer makes, so it is the same marker: a
+    head on the ground and a legend that stays readable from across the world.
+
+    Gate models are drawn in MTM and CPR but not in Evo, whose checkpoint records carry no
+    model at all (its gate posts are separate props), so on an Evo track this layer is the
+    only thing that says where a checkpoint is.
+  */
+  _buildCheckpointMarkers(trackData) {
+    const group = this._groups.checkpointMarkers;
+    trackData.checkpoints.forEach((checkpoint, i) => {
+      const base = this._markerGroundPosition(checkpoint.position, trackData);
+      this._addMapMarker(group, base, CHECKPOINT_MARKER_COLOR, `CP${i + 1}`);
     });
   }
 
@@ -1246,7 +1452,7 @@ export class TrackScene {
     const rampWireMat   = new THREE.LineBasicMaterial({ color: RAMP_WIRE });
 
     for (const box of trackData.boxes ?? []) {
-      if (trackData.origin === "HB" && box.hellbenderUndergroundHidden) continue;
+      const underground = trackData.origin === "HB" && box.hellbenderUnderground === true;
       const [wx, wy, wz] = box.position ?? [0, 0, 0];
       const modelName = box.modelName;
       const model = modelName ? trackData.models?.[modelName] : null;
@@ -1257,7 +1463,8 @@ export class TrackScene {
       const isRamp = box.type === BOXTYPE_RAMP;
 
       if (renderModel) {
-        this._buildBinModel(model, box, hs, ws, trackData, { checkpoint: isCheckpoint, billboard: isBillboard });
+        this._buildBinModel(model, box, hs, ws, trackData,
+          { checkpoint: isCheckpoint, billboard: isBillboard, underground });
       }
 
       /*
@@ -1450,6 +1657,7 @@ export class TrackScene {
   _buildBinModel(model, box, hs, ws, trackData, options = {}) {
     const checkpoint = options.checkpoint === true;
     const billboard = options.billboard === true;
+    const underground = options.underground === true;
     const [wx, wy, wz] = box.position ?? [0, 0, 0];
     const evo = isEvoOrigin(trackData.origin);
 
@@ -1536,8 +1744,14 @@ export class TrackScene {
       wireGroup.matrixWorldNeedsUpdate = true;
     }
 
-    const targetGroup = billboard ? this._groups.billboards : (checkpoint ? this._groups.checkpoints : this._groups.objects);
-    const targetWireGroup = billboard ? this._groups.billboardsWire : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
+    // A Hellbender object in the cavern belongs to the cavern layer, so it appears and hides
+    // with the room it is in rather than with the objects on the surface above it.
+    const targetGroup = underground ? this._groups.underground
+      : billboard ? this._groups.billboards
+      : (checkpoint ? this._groups.checkpoints : this._groups.objects);
+    const targetWireGroup = underground ? this._groups.undergroundWire
+      : billboard ? this._groups.billboardsWire
+      : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
     targetGroup.add(group);
     targetWireGroup.add(wireGroup);
   }
@@ -1653,7 +1867,7 @@ export class TrackScene {
     }
   }
 
-  _buildGroundBoxes(groundBoxes, hs, trackData) {
+  _buildGroundBoxes(groundBoxes, hs, trackData, solidGroup = this._groups.gboxes, wireGroup = this._groups.gboxesWire) {
     const atlasTex = this._terrainAtlasTex;
     const cols = this._terrainAtlasCols || this._terrainAtlasN || 1;
     const rows = this._terrainAtlasRows || 1;
@@ -1738,11 +1952,11 @@ export class TrackScene {
 
       const solidMesh = new THREE.Mesh(boxGeo, solidMat);
       solidMesh.position.set(midX, cy, midZ);
-      this._groups.gboxes.add(solidMesh);
+      solidGroup.add(solidMesh);
 
       const lineBox = new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), wireMat);
       lineBox.position.set(midX, cy, midZ);
-      this._groups.gboxesWire.add(lineBox);
+      wireGroup.add(lineBox);
     }
   }
 
@@ -1783,13 +1997,23 @@ export class TrackScene {
   _buildTrucks(trackData) {
     const hs = this._heightScale;
     const ws = this._worldSize(trackData);
+    /*
+      The arrow is sized in world units, so it has to scale with the cell.
+
+      MTM and the TV family are 64 units to a cell and Evo is 32, which makes a fixed-size
+      marker twice as large on an Evo track. It shows: ASPEN's eight grid slots are about 16
+      units apart, so full-size arrows overlap into one blob instead of reading as a grid.
+    */
+    const markerScale = (trackData.terrain?.cellSize ?? 64) / 64;
     // Triangle arrow matching Java SoftwareOverlayRenderer perspective markers
     // Colors: truck 1 = orange-yellow, others = lighter shades
     const TRUCK_COLORS = [0xFFCC00, 0xFF9900, 0xFF6600, 0xFFDD44];
 
     for (let i = 0; i < trackData.trucks.length; i++) {
       const truck = trackData.trucks[i];
-      if (i === 0) continue;  // slot 0 is player starting position, not an NPC truck
+      // The MTM family's slot 0 is the saved player truck rather than a vehicle on the grid;
+      // see sit-parser.js. Evo has no such slot, so this keys on the record, not the index.
+      if (truck.playerSlot === true) continue;
 
       const [wx, wy, wz] = truck.position ?? [0, 0, 0];
       const baseX = wx;
@@ -1802,12 +2026,15 @@ export class TrackScene {
       const rightX = Math.cos(heading);
       const rightZ = Math.sin(heading);
 
-      const tipX2   = baseX + fwdX * 40;
-      const tipZ2   = baseZ + fwdZ * 40;
-      const leftX2  = baseX - fwdX * 14 - rightX * 18;
-      const leftZ2  = baseZ - fwdZ * 14 - rightZ * 18;
-      const rightX2 = baseX - fwdX * 14 + rightX * 18;
-      const rightZ2 = baseZ - fwdZ * 14 + rightZ * 18;
+      const nose = 40 * markerScale;
+      const tail = 14 * markerScale;
+      const halfWidth = 18 * markerScale;
+      const tipX2   = baseX + fwdX * nose;
+      const tipZ2   = baseZ + fwdZ * nose;
+      const leftX2  = baseX - fwdX * tail - rightX * halfWidth;
+      const leftZ2  = baseZ - fwdZ * tail - rightZ * halfWidth;
+      const rightX2 = baseX - fwdX * tail + rightX * halfWidth;
+      const rightZ2 = baseZ - fwdZ * tail + rightZ * halfWidth;
 
       const color = TRUCK_COLORS[Math.min(i, TRUCK_COLORS.length - 1)];
       const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, depthTest: false, depthWrite: false });

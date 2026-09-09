@@ -1,4 +1,4 @@
-import { tvPlacementToEditor, toDataLines } from "./tv-coords.js";
+import { placementToEditor, toDataLines } from "./tv-coords.js";
 
 /*
   .PUP powerup placements (Terminal Velocity / Fury3 / F!Zone).
@@ -8,8 +8,11 @@ import { tvPlacementToEditor, toDataLines } from "./tv-coords.js";
     <count>
       <x>,<y>,<z>,<type>
 
-  Coordinates share the .DEF space (see tv-coords.js). Measured across FURY3.POD, FURYSE.POD
-  and TV.pod: 206 files, 548 placements, four fields on every line, type values 0..11.
+  Coordinates share the .DEF space (see tv-coords.js), which means they are on that game's
+  placement scale: Hellbender reuses this record but not the TV units, so the caller's origin
+  picks the conversion. Measured across FURY3.POD, FURYSE.POD and TV.pod: 206 files, 548
+  placements, four fields on every line, type values 0..11. Hellbender ships one placement
+  in one level, MORBOS3.
 
   Type names are not recorded anywhere in the level data. The F!Zone manual describes the
   powerup list as an editor enumeration ("To cycle through the list of powerups, press the P
@@ -26,7 +29,7 @@ import { tvPlacementToEditor, toDataLines } from "./tv-coords.js";
  *
  * Returns [] rather than throwing on malformed input.
  */
-export function parsePowerups(bytes, gridSize) {
+export function parsePowerups(bytes, gridSize, origin) {
   if (!bytes || !bytes.length) return [];
   const lines = toDataLines(bytes);
   let i = 0;
@@ -43,7 +46,7 @@ export function parsePowerups(bytes, gridSize) {
     if (values.some((v) => !Number.isFinite(v))) break;
     powerups.push({
       index: n,
-      position: tvPlacementToEditor(values[0], values[1], values[2], gridSize),
+      position: placementToEditor(values[0], values[1], values[2], gridSize, origin),
       type: values[3],
     });
   }

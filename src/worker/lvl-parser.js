@@ -1,9 +1,12 @@
 import { resolveAsset } from "./pod-format.js";
 import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 import { loadGroundBoxes } from "./gbox-loader.js";
+import { loadUndergroundLayers, HB_UNDERGROUND_BIAS } from "./hb-underground.js";
 import { loadDefObjects } from "./def-loader.js";
 import { podRawSide } from "./texture-decoder.js";
 import { parseNavPoints } from "./nav-parser.js";
+import { parseHbNavPoints } from "./hb-nav-parser.js";
+import { parseHbBriefing } from "./hb-briefing.js";
 import { parseTunnelDefs } from "./tdf-parser.js";
 import { parsePowerups } from "./pup-parser.js";
 import { parseAnimations } from "./ani-parser.js";
@@ -104,70 +107,67 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   }
 
   /*
-    Lines 7, 8, 9 and 13: the map-content side files.
+    Lines 1, 7, 8, 9 and 13: the map-content side files.
 
     Read after the DEF because they share its coordinate space and, in the case of .NAV, index
     its placement list. Each parser is total: a malformed side file costs its own marker layer
     and nothing else.
 
-    Terminal Velocity and Fury3 only. Hellbender uses the same header line numbers but not the
-    same record shapes: its .NAV interleaves named sections the TV form has no place for, so
-    the description and the start point's pitch/bank/heading land several lines further down
-    than they do here.
+    Hellbender uses the same header slots and the same .PUP, .TDF and .ANI records as
+    Terminal Velocity and Fury3, so those three readers are shared. What it does NOT share is
+    the placement scale - its coordinates are the .DEF's 16.16 world units rather than the TV
+    2^20-per-cell ones - so `origin` is threaded into the two readers that carry positions.
 
-      22
-      6
-      13893632,3997696,32243712
-      !priority,time
-      0,0
-      @Completion sound & completion text (39 chars max)
-      null
-      null: line ignored
-      ; Proximity Sound file
-      null
-      Start for Snow City Level 1
-      0,0,0
-
-    Parsing that with the TV reader yields one bogus point and stops, which would put a wrong
-    marker on the map and open the camera facing the wrong way. Hellbender's variant has not
-    been validated, so it is left unread rather than half-read. It loses little: the whole
-    Hellbender game ships one powerup placement and HOTH.TDF declares no tunnels.
+    Its .NAV is a different record shape and gets its own reader; see hb-nav-parser.js. Line 1
+    is a Hellbender-only briefing file, `null.txt` in every TV and Fury3 level.
   */
-  const readsTvSideFiles = doc.origin === "TV/F3";
+  if (doc.origin === "HB" && lines.length > 1) {
+    const txtName = normalizeArchiveName(lines[1]);
+    if (txtName && !txtName.startsWith("NULL.")) {
+      const txtEntry = resolveLvlDataAsset(podIndex, txtName);
+      if (txtEntry) doc.briefing = parseHbBriefing(getBytes(txtEntry));
+    }
+  }
 
-  if (readsTvSideFiles && lines.length > 7) {
+  if (lines.length > 7) {
     const pupName = normalizeArchiveName(lines[7]);
     if (pupName && !pupName.startsWith("NULL.")) {
       const pupEntry = resolveLvlDataAsset(podIndex, pupName);
-      if (pupEntry) doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize);
+      if (pupEntry) doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize, doc.origin);
     }
   }
-  if (readsTvSideFiles && lines.length > 8) {
+  if (lines.length > 8) {
     const aniName = normalizeArchiveName(lines[8]);
     if (aniName && !aniName.startsWith("NULL.")) {
       const aniEntry = resolveLvlDataAsset(podIndex, aniName);
       if (aniEntry) doc.animations = parseAnimations(getBytes(aniEntry));
     }
   }
-  if (readsTvSideFiles && lines.length > 9) {
+  if (lines.length > 9) {
     const tdfName = normalizeArchiveName(lines[9]);
     if (tdfName && !tdfName.startsWith("NULL.")) {
       const tdfEntry = resolveLvlDataAsset(podIndex, tdfName);
-      if (tdfEntry) doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize);
+      if (tdfEntry) doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize, doc.origin);
     }
   }
-  if (readsTvSideFiles && lines.length > 13) {
+  if (lines.length > 13) {
     const navName = normalizeArchiveName(lines[13]);
     if (navName && !navName.startsWith("NULL.")) {
       const navEntry = resolveLvlDataAsset(podIndex, navName);
-      if (navEntry) doc.navPoints = parseNavPoints(getBytes(navEntry), doc.terrain.gridSize);
+      if (navEntry) {
+        const navBytes = getBytes(navEntry);
+        doc.navPoints = doc.origin === "HB"
+          ? parseHbNavPoints(navBytes, doc.terrain.gridSize)
+          : parseNavPoints(navBytes, doc.terrain.gridSize);
+      }
     }
   }
 
-  // Line 14: music, 15: fog, 16: LTE
+  // Line 14: music, 15: fog, 16: LTE. Named from the line rather than from whether the file
+  // resolves here; see sit-parser.js for the archive that made that distinction matter.
   if (lines.length > 14) {
-    const musicEntry = resolveAsset(podIndex, normalizeArchiveName(lines[14]));
-    if (musicEntry) doc.musicName = archiveTitle(lines[14]);
+    const musicName = normalizeArchiveName(lines[14]);
+    if (musicName && !musicName.startsWith("NULL.")) doc.musicName = archiveTitle(lines[14]);
   }
   if (lines.length > 16) {
     const lteEntry = resolveAsset(podIndex, normalizeArchiveName(lines[16]));
@@ -189,6 +189,18 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   // Ground boxes
   if (doc.terrain.rawData && rawOrTnl && !rawOrTnl.endsWith(".TNL")) {
     doc.groundBoxes = loadGroundBoxes(podIndex, getBytes, rawOrTnl, doc.terrain.gridSize);
+
+    /*
+      Hellbender's cavern: a second heightfield pair and a second ground-box layer on the same
+      grid, found by stem like the ground boxes above. See hb-underground.js.
+    */
+    if (doc.origin === "HB") {
+      doc.underground = loadUndergroundLayers(podIndex, getBytes, rawOrTnl, doc.terrain.gridSize);
+      if (doc.underground) {
+        doc.undergroundBoxes = loadGroundBoxes(podIndex, getBytes, rawOrTnl, doc.terrain.gridSize,
+          { lower: ".RA4", upper: ".RA5", faces: ".CL2", heightOffset: HB_UNDERGROUND_BIAS });
+      }
+    }
   }
 
   return doc;
@@ -312,11 +324,13 @@ function createDoc(podComment, origin) {
     origin,
     podComment: podComment ?? "",
     trackName: "", localeName: "", trackType: "UNKNOWN",
-    gameType: "", weatherMask: 0xFFFF, musicName: "", prefix: "",
-    ambientSound: 0, levelValue: 0,
+    // The TV-family .LVL header carries none of these four; see sit-parser.js for why they
+    // are null rather than defaulted.
+    gameType: "", weatherMask: null, musicName: "", prefix: "",
+    ambientSound: null, redbookTrack: null, levelValue: 0,
     sunVector: [0, -1, 0], sunPosition: [0, 1000, 0],
     sunIntensity: 255, shadowIntensity: 128,
-    waterLevel: 0,
+    waterLevel: null,
     terrain: { gridSize: 256, rawBytesPerCell: 1, clrBytesPerCell: 1, rawName: "", clrName: "", lteName: "", rawData: null, clrData: null, lteData: null },
     palette: null,
     textures: [],
@@ -324,12 +338,15 @@ function createDoc(podComment, origin) {
     models: {},
     boxes: [],
     groundBoxes: [],
+    underground: null,
+    undergroundBoxes: [],
     primaryCourse: { segments: [] },
     extendedCourses: [],
     trucks: [],
     backdropModelName: null,
     skyTexture: null,
     fogMap: null,
+    briefing: null,
     navPoints: [],
     tunnels: [],
     powerups: [],

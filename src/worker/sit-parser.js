@@ -89,10 +89,19 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
     }
   }
 
-  // Music (line 14), fog (15), LTE (16)
+  /*
+    Music (line 14), fog (15), LTE (16).
+
+    The music name is taken from the line, not from whether the file resolves in this archive.
+    MTM 2 keeps its soundtrack in MUSIC.POD rather than in the track POD - every one of its
+    levels names a .WAV at this line (aztec.wav, rockx.wav, surf.wav ...) and none of them
+    ship beside the track - so resolving first reported "no music" for the entire game. MTM 1
+    and CPR name a .MOD that does sit in the same archive, which is why this only ever showed
+    up on MTM 2.
+  */
   if (lines.length > 14) {
-    const musicEntry = resolveAsset(podIndex, normalizeArchiveName(lines[14]));
-    if (musicEntry) doc.musicName = archiveTitle(lines[14]);
+    const musicName = normalizeArchiveName(lines[14]);
+    if (musicName && !musicName.startsWith("NULL.")) doc.musicName = archiveTitle(lines[14]);
   }
   if (lines.length > 16) {
     const lteEntry = resolveAsset(podIndex, normalizeArchiveName(lines[16]));
@@ -135,6 +144,19 @@ function parseSitMetadata(sitLines, doc) {
   // Track Race Type
   const typeIdx = indexOfLine(sitLines, "Track Race Type");
   if (typeIdx >= 0 && typeIdx + 1 < sitLines.length) doc.trackType = trackTypeFromValue(parseLeadingInt(sitLines[typeIdx + 1]));
+
+  /*
+    @Redbook Audio Track: the CD audio track the game plays on this course.
+
+    MTM 1 and CPR have no ambient-sound field at all - the line below is one of the two
+    markers that identify an MTM 2 .SIT in the first place - and this is what they carry
+    instead. Reading it means those two games report the audio they actually name rather than
+    an empty row.
+  */
+  const redbookIdx = indexOfLine(sitLines, "@Redbook Audio Track");
+  if (redbookIdx >= 0 && redbookIdx + 1 < sitLines.length) {
+    doc.redbookTrack = parseLeadingInt(sitLines[redbookIdx + 1]);
+  }
 
   // ambient sound, length, weather mask
   const ambientIdx = indexOfLine(sitLines, "!ambient sound,track length,weather mask");
@@ -336,10 +358,16 @@ function parseBackdrop(sitLines, doc) {
 function parseTrucks(sitLines, doc) {
   const rbpc = doc.terrain.rawBytesPerCell;
 
-  // Slot 0: player truck. Data follows "*** Your Truck (Not used anymore) ***" with no block delimiter.
+  /*
+    Slot 0: the player's own truck, under "*** Your Truck (Not used anymore) ***" with no block
+    delimiter. The section header says what it is worth: it is a saved player slot rather than
+    a vehicle standing on the grid, so it is flagged and the scene does not draw a marker for
+    it. The flag, rather than the index, is what says so - Evo has no such slot, and all eight
+    of its vehicles are real grid positions.
+  */
   const playerSection = indexOfLine(sitLines, "*** Your Truck (Not used anymore) ***");
   if (playerSection >= 0) {
-    doc.trucks.push(parseTruckBlock(sitLines, playerSection + 1, rbpc));
+    doc.trucks.push({ ...parseTruckBlock(sitLines, playerSection + 1, rbpc), playerSlot: true });
   }
 
   // Slots 1+: NPC vehicles under "*** Vehicles ***"
@@ -575,11 +603,20 @@ function createDoc(podComment) {
     origin: "MTM2",
     podComment: podComment ?? "",
     trackName: "", localeName: "", trackType: "UNKNOWN",
-    gameType: "", weatherMask: 0xFFFF, musicName: "", prefix: "",
-    ambientSound: 0, levelValue: 0,
+    /*
+      Null rather than a value: a field the file does not carry should read as absent, not as
+      a default this parser invented.
+
+      MTM 1 and CPR .SITs have no ambient-sound line, and so no weather mask, which shares it.
+      !waterHeight is MTM 2 only and lives in the .LVL, not the .SIT: an MTM 1 or CPR .LVL is
+      23 lines and stops before it, while every MTM 2 one carries it (AZTEC 167, Voodoo Island
+      370, and 0 on the arenas, which is a real zero and still reported).
+    */
+    gameType: "", weatherMask: null, musicName: "", prefix: "",
+    ambientSound: null, redbookTrack: null, levelValue: 0,
     sunVector: [0, -1, 0], sunPosition: [0, 1000, 0],
     sunIntensity: 255, shadowIntensity: 128,
-    waterLevel: 0,
+    waterLevel: null,
     terrain: { gridSize: 256, rawBytesPerCell: 1, clrBytesPerCell: 2, rawName: "", clrName: "", lteName: "", rawData: null, clrData: null, lteData: null },
     palette: null,
     textures: [],

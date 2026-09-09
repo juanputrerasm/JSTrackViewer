@@ -289,25 +289,3 @@ input[type="checkbox"] {
 ::-webkit-scrollbar-track { background: var(--surface); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-/*
-  Navigation point list.
-
-  A TV-family level's .NAV is its route description, so it reads as an ordered list: the type
-  first, then whatever detail that type carries (target count, tunnel name, start heading).
-*/
-.nav-list {
-  margin: 0;
-  padding-left: 1.4em;
-  font-size: 0.82rem;
-  line-height: 1.5;
-  max-height: 15rem;
-  overflow-y: auto;
-}
-
-.nav-list li {
-  margin-bottom: 0.15rem;
-}
-
-.nav-detail {
-  opacity: 0.65;
-}

@@ -1,4 +1,4 @@
-import { tvPlacementToEditor, parseIntTriple, toDataLines } from "./tv-coords.js";
+import { placementToEditor, parseIntTriple, toDataLines } from "./tv-coords.js";
 
 /*
   .TDF tunnel definitions (Terminal Velocity / Fury3 / F!Zone).
@@ -25,6 +25,10 @@ import { tvPlacementToEditor, parseIntTriple, toDataLines } from "./tv-coords.js
   zeros; their tunnel records still parse, so the trailing content is ignored rather than
   treated as an error.
 
+  Hellbender writes the same record, at the same header line, on its own placement scale
+  (see tv-coords.js), so the caller's origin picks the conversion. It declares one tunnel in
+  each of JURASIC and JURASIC3 and none anywhere else, and three of its .TDF files are empty.
+
   This is a better source than .NAV for tunnel markers. The manual notes that a tunnel left
   out of the NAV list is a hidden bonus tunnel, and the counts bear that out: 183 tunnels here
   against only 78 tunnel-entrance NAV points.
@@ -42,7 +46,7 @@ export const TUNNEL_LOGIC_NAMES = [
  *
  * Returns [] rather than throwing on malformed input.
  */
-export function parseTunnelDefs(bytes, gridSize) {
+export function parseTunnelDefs(bytes, gridSize, origin) {
   if (!bytes || !bytes.length) return [];
   const lines = toDataLines(bytes);
   let i = 0;
@@ -71,8 +75,8 @@ export function parseTunnelDefs(bytes, gridSize) {
     tunnels.push({
       index: n,
       levelName,
-      entrancePosition: tvPlacementToEditor(entrance[0], entrance[1], entrance[2], gridSize),
-      exitPosition: tvPlacementToEditor(exit[0], exit[1], exit[2], gridSize),
+      entrancePosition: placementToEditor(entrance[0], entrance[1], entrance[2], gridSize, origin),
+      exitPosition: placementToEditor(exit[0], exit[1], exit[2], gridSize, origin),
       entranceLogic,
       exitLogic,
       entranceLogicName: TUNNEL_LOGIC_NAMES[entranceLogic] ?? `Logic ${entranceLogic}`,

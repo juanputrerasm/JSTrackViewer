@@ -485,9 +485,10 @@ All of section 9's recommendations are in the tree. New files:
 the existing `DATA/`-preferring resolver, after the `.DEF` so the grid size is known. Every
 parser is total: a malformed side file costs its own marker layer and nothing else.
 
-**Terminal Velocity and Fury3 only.** Hellbender uses the same header line numbers but not the
-same record shapes. Its `.NAV` interleaves named sections the TV form has no place for, so the
-description and the start point's pitch/bank/heading sit several lines lower:
+**The `.NAV` reader is Terminal Velocity and Fury3 only.** Hellbender uses the same header
+line numbers but not the same record shape. Its `.NAV` interleaves named sections the TV form
+has no place for, so the description and the start point's pitch/bank/heading sit several
+lines lower:
 
 ```
 6
@@ -504,9 +505,14 @@ Start for Snow City Level 1
 ```
 
 Read with the TV parser that yields one bogus point and stops, which would put a wrong marker
-on the map and open the camera facing the wrong way. The Hellbender variant has not been
-validated against its archive, so it is left unread rather than half-read. It costs little:
-Hellbender ships one powerup placement in the entire game and `HOTH.TDF` declares no tunnels.
+on the map and open the camera facing the wrong way.
+
+> **Superseded.** This section originally left Hellbender's `.NAV`, `.PUP`, `.TDF` and `.ANI`
+> unread on the grounds that the variant was unvalidated and cost little. The `.NAV` grammar
+> has since been decoded and validated against all 26 shipped levels, and the other three turn
+> out to be identical grammars on a different coordinate scale - one of which, `.ANI`, was
+> costing 130 animations. Hellbender now has its own reader for the `.NAV` and shares the rest.
+> See [HELLBENDER_LEVEL_FORMAT_ANALYSIS.md](HELLBENDER_LEVEL_FORMAT_ANALYSIS.md).
 
 [scene.js](../src/scene.js) gains three groups, `navPoints`, `tunnels` and `powerups`, each
 with its own View Options toggle. A marker is a small solid sitting on the terrain with a text
@@ -563,7 +569,7 @@ Parsed from line 7 and drawn as their own toggleable marker group.
 Worth knowing before looking for them: **almost no surface level has any.** Across the three
 TV-family archives only three of the 66 surface levels carry powerup records, all in Terminal
 Velocity: `GEIGER` (32), `MCORE` (5) and `CANYON3` (3). No Fury3 or F!Zone surface level has a
-single one, and Hellbender ships exactly one in the whole game. The 548 total counted in
+single one, and Hellbender ships exactly one in the whole game (`MORBOS3`, now drawn). The 548 total counted in
 section 4 is dominated by tunnel levels, which a map view does not open. This is the manual's
 account showing up in the data: authors hid powerups inside destructible bunkers, which are
 ordinary `.DEF` objects with a spawn probability, rather than placing them loose.

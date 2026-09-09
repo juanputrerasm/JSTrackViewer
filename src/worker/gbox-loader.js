@@ -2,15 +2,21 @@ import { resolveAsset } from "./pod-format.js";
 import { archiveTitle, normalizeArchiveName, replaceExtension } from "../shared/path-utils.js";
 
 /**
- * Loads ground-box layers from companion RA0, RA1, CL0 entries.
- * RA0 = lower height byte per cell
- * RA1 = upper height byte per cell (0 = no box)
- * CL0 = 12 bytes per cell: 6 faces × 2 bytes (uint16LE texture index)
+ * Loads ground-box layers from companion lower/upper/face entries.
+ * lower = lower height byte per cell
+ * upper = upper height byte per cell (0 = no box)
+ * faces = 12 bytes per cell: 6 faces × 2 bytes (uint16LE texture index)
+ *
+ * A Hellbender level has two such layers on one grid: .RA0/.RA1/.CL0 above ground and
+ * .RA4/.RA5/.CL2 in the cavern below it, the second on the biased altitude the cavern grids
+ * use (see hb-underground.js). They are the same record in the same encoding, so the caller
+ * names the extensions and the altitude bias rather than this growing a second reader.
  */
-export function loadGroundBoxes(podIndex, getBytes, rawName, gridSize) {
-  const ra0Name = replaceExtension(rawName, ".RA0");
-  const ra1Name = replaceExtension(rawName, ".RA1");
-  const cl0Name = replaceExtension(rawName, ".CL0");
+export function loadGroundBoxes(podIndex, getBytes, rawName, gridSize, layer = {}) {
+  const { lower = ".RA0", upper = ".RA1", faces = ".CL0", heightOffset = 0 } = layer;
+  const ra0Name = replaceExtension(rawName, lower);
+  const ra1Name = replaceExtension(rawName, upper);
+  const cl0Name = replaceExtension(rawName, faces);
 
   const ra0Entry = resolveDataAsset(podIndex, ra0Name);
   const ra1Entry = resolveDataAsset(podIndex, ra1Name);
@@ -49,10 +55,11 @@ export function loadGroundBoxes(podIndex, getBytes, rawName, gridSize) {
       boxes.push({
         x, y,
         width: 1, height: 1,
-        lower, upper,
+        lower: lower + heightOffset,
+        upper: upper + heightOffset,
         midX: (x << 6) + 32,
         midY: (y << 6) + 32,
-        midZ: (lower + upper) >> 1,
+        midZ: ((lower + upper) >> 1) + heightOffset,
         faceTexture, faceRotation, faceMirror
       });
     }

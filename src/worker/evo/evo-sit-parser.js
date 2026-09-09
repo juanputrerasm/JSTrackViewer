@@ -44,6 +44,7 @@ export function parseEvoSit(bytes, sourceName) {
     lvlName: (lines[HEADER_LVL_LINE] ?? "").trim(),
     ...parseHeader(lines),
     boxes: [],
+    vehicles: [],
     courses: [],
     warnings: [],
   };
@@ -59,10 +60,82 @@ export function parseEvoSit(bytes, sourceName) {
     sit.warnings.push(`${sourceName}: no *** Boxes *** section`);
   }
 
+  const vehiclesAt = lines.findIndex((line) => line.trim() === "*** Vehicles ***");
+  if (vehiclesAt >= 0) sit.vehicles = parseVehicles(lines, vehiclesAt);
+
   const courseAt = lines.findIndex((line) => line.trim() === "*** Course ***");
   if (courseAt >= 0) sit.courses = parseCourses(lines, courseAt);
 
   return sit;
+}
+
+/*
+  `*** Vehicles ***`: the starting grid.
+
+  Both generations write this the same way, which is unusual for them - the boxes section is
+  the one that changed between v6 and v7, and this did not. A count, then that many records of
+  the same label/value pairs the v6 boxes use:
+
+    Vehicle 1 of 8 -------------------------
+    staticName / CBLS24.TRK
+    wPos       / 4342.46,149.441,4429.95
+    bvel       / 0,0,0
+    wOrient    / 0,0,0
+    ... axle angles, tyre contact flags, gear, autopilot, damage, helicopter state
+
+  Every stock track in both games declares exactly eight, and they are a grid: ASPEN and PEAK
+  stagger two columns down the road, THEHILL lines eight abreast, TRIBAJA strings them along a
+  beach. All eight name CBLS24.TRK, which is the editor's default vehicle rather than anything
+  about the track - the .TRK files live in TRUCK.POD, not in the track archive, so a track
+  opened on its own cannot resolve one anyway.
+
+  Only the placement is read. The physics state that makes up most of the record - axle angles,
+  which tyres are on the ground, gear, damage - is a saved-game snapshot, not level data.
+
+  The heading is the third component of wOrient, the same convention the boxes use, and this
+  section is what proves that convention rather than merely being consistent with it: pushing
+  each vehicle's heading through it and comparing against the nearest course segment gives a
+  mean cosine of +1.00 on ASPEN, THEHILL and PEAK and +0.96 on BAJBEACH and TRIBAJA. Positive,
+  so the grid faces the way the course runs, which is what a starting grid does.
+*/
+function parseVehicles(lines, start) {
+  const vehicles = [];
+  const declared = Number.parseInt((lines[start + 1] ?? "").trim(), 10) || 0;
+
+  let current = null;
+  for (let i = start + 2; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("***")) break;
+    if (/^Vehicle\s+\d+\s+of\s+\d+/i.test(trimmed)) {
+      current = { fields: {} };
+      vehicles.push(current);
+      continue;
+    }
+    if (!current || !trimmed) continue;
+
+    const label = evoLabel(lines[i]);
+    const value = (lines[i + 1] ?? "").trim();
+    if (label === "staticName") { current.fields.staticName = value; i++; }
+    else if (label === "wPos") { current.fields.wPos = value; i++; }
+    else if (label === "wOrient") { current.fields.wOrient = value; i++; }
+    else if (label === "ap.courseToFollow") { current.fields.courseToFollow = value; i++; }
+  }
+
+  if (declared && vehicles.length !== declared) {
+    // Not fatal: a short grid still places the vehicles it did read.
+    vehicles.length = Math.min(vehicles.length, declared);
+  }
+
+  return vehicles.map((vehicle) => {
+    const position = evoNumbers(vehicle.fields.wPos ?? "");
+    const orient = evoNumbers(vehicle.fields.wOrient ?? "");
+    return {
+      name: evoUnquote(vehicle.fields.staticName ?? ""),
+      position: position.length === 3 ? position : [0, 0, 0],
+      orient: orient.length === 3 ? orient : [0, 0, 0],
+      courseToFollow: Number.parseInt(vehicle.fields.courseToFollow ?? "", 10) || 0,
+    };
+  });
 }
 
 /*
@@ -73,7 +146,9 @@ export function parseEvoSit(bytes, sourceName) {
   reads correctly. Vehicles, race state, autopilot and damage are deliberately not read.
 */
 function parseHeader(lines) {
-  const header = { trackName: "", author: "", raceType: 0, ambientSound: 0, trackLength: 0, weatherMask: 0, logoName: "" };
+  // ambientSound and weatherMask stay null when the line is absent, so a track without one is
+  // not reported as being on slot 0 in clear weather; see sit-parser.js.
+  const header = { trackName: "", author: "", raceType: 0, ambientSound: null, trackLength: 0, weatherMask: null, logoName: "" };
   const limit = Math.min(lines.length, 40);
   for (let i = 0; i < limit; i++) {
     const label = evoLabel(lines[i]);
@@ -84,9 +159,9 @@ function parseHeader(lines) {
     else if (label === "Track Race Type") header.raceType = Number.parseInt(value, 10) || 0;
     else if (label === "ambient sound,track length,weather mask") {
       const [ambient, length, weather] = evoNumbers(value);
-      header.ambientSound = ambient ?? 0;
+      header.ambientSound = ambient ?? null;
       header.trackLength = length ?? 0;
-      header.weatherMask = weather ?? 0;
+      header.weatherMask = weather ?? null;
     }
   }
   return header;
