@@ -111,6 +111,53 @@ body {
   margin-bottom: 8px;
 }
 
+/*
+  Collapsible panels.
+
+  The sidebar runs to five or six panels on a track that carries everything, which is more
+  than fits without scrolling, so each heading folds its own panel away. The heading becomes a
+  button rather than gaining one: it already spans the panel and it is what you would reach
+  for. The minimap is deliberately not collapsible - it is the one panel you navigate with.
+*/
+.panel h2.collapsible {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.panel h2.collapsible:hover {
+  color: var(--text);
+}
+
+/* A caret that turns to point down when the panel is open. */
+.panel h2.collapsible::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.12s ease;
+  transform-origin: 25% 50%;
+  transform: rotate(90deg);
+}
+
+.panel.collapsed h2.collapsible::before {
+  transform: rotate(0deg);
+}
+
+.panel.collapsed h2.collapsible {
+  margin-bottom: 0;
+}
+
+/* Everything under the heading is the panel body. */
+.panel.collapsed > *:not(h2) {
+  display: none;
+}
+
 /* ── Viewport ────────────────────────────────── */
 .viewport-section {
   flex: 1;

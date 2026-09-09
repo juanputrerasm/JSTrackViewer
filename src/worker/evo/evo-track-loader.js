@@ -254,7 +254,6 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
       shadowTextureCount: tex.shadow.length,
       objectCount: boxes.length,
       checkpointCount: checkpoints.length,
-      truckCount: trucks.length,
       // The stats panel reads this for every track; Evo has no ground-box layer.
       groundBoxCount: 0,
       modelCount: Object.keys(models).length,

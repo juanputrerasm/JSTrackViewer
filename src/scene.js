@@ -120,6 +120,10 @@ function navLabelSuffix(point) {
   whichever game the track came from.
 */
 const CHECKPOINT_MARKER_COLOR = 0xffdd00;
+/** Wireframe colour for the cavern surfaces, cool against the ground boxes' warmer edges. */
+const UNDERGROUND_WIRE_COLOR = 0x66aacc;
+/** How far out the directional light is placed; only its direction matters. */
+const SUN_DISTANCE = 5000;
 const GRID_COLOR = 0x444466;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const AMBIENT_COLOR = 0x888888;
@@ -492,7 +496,9 @@ export class TrackScene {
       what keeps the next track from swapping a disposed material back in.
     */
     this._undergroundSurfaces = [];
+    this._trackSunDirection = null;
     this._undergroundMatTextured = null;
+    this._undergroundWireMat = null;
     this._terrainMatTextured = null;
     this._terrainMatFlat = null;
     this._terrainAtlasTex?.dispose();
@@ -602,6 +608,11 @@ export class TrackScene {
         map: this._terrainAtlasTex, side: THREE.DoubleSide,
       });
     }
+    if (!this._undergroundWireMat) {
+      this._undergroundWireMat = new THREE.MeshBasicMaterial({
+        color: UNDERGROUND_WIRE_COLOR, wireframe: true,
+      });
+    }
     const addSurface = (mesh) => {
       if (!mesh) return;
       const geo = new THREE.BufferGeometry();
@@ -613,6 +624,15 @@ export class TrackScene {
       const surface = new THREE.Mesh(geo, this._undergroundMatTextured ?? this._terrainMatFlat);
       group.add(surface);
       this._undergroundSurfaces.push(surface);
+
+      /*
+        The wireframe shares the geometry rather than building an edge list of its own. A
+        cavern surface is one quad per grid cell, so an EdgesGeometry over it would be tens of
+        thousands of segments for a view that is only ever glanced at; a second mesh on the
+        same buffers costs nothing but a draw call.
+      */
+      const wire = new THREE.Mesh(geo, this._undergroundWireMat);
+      this._groups.undergroundWire.add(wire);
     };
     addSurface(trackData.undergroundFloor);
     addSurface(trackData.undergroundCeiling);
@@ -2053,12 +2073,87 @@ export class TrackScene {
     }
   }
 
+  /*
+    Where the sun is, from the level's own light vector.
+
+    Every game here stores one, in the same shape: the direction the light TRAVELS, as
+    (east, up, north). Traxx writes it as a 16.16 fixed point triple on .LVL line 17 and its
+    editor round-trips it through a five-way compass - Noon, N, E, S, W - which is what
+    identifies the axes:
+
+      Noon (0, -64000, 0)        N (0, -46333, -46333)      E (-46333, -46333, 0)
+      S    (0, -46333, +46333)   W (+46333, -46333, 0)
+
+    (TrackPOD/TrackPOD.cpp:918-957 sets them, Traxx/TraxxViewEdit.cpp:3293-3306 reads them
+    back, and the `// z` comment on index 1 is what says the second component is the vertical.)
+    Evo writes the same vector as a unit float triple, `lightSourceVector` in its .LVL.
+
+    The north component needs the scene's Z flip and used to not get it. The terrain builder
+    lays cell row `cz` at `z = (gridSize - cz) * cellSize`, so the world's north is scene -Z,
+    and a light travelling north travels scene -Z. Reading it straight put the sun on the wrong
+    side of the map along that axis. It goes unnoticed on most of the shipped content because
+    the third component is zero - the E, W and Noon presets - but 13 of the 17 CART Precision
+    Racing tracks are on the S preset, and five Terminal Velocity levels, and those were all
+    lit from the north.
+  */
   _updateSunFromTrackData(trackData) {
-    if (!trackData.sunVector) return;
-    const [sx, sy, sz] = trackData.sunVector;
-    const len = Math.hypot(sx, sy, sz) || 1;
-    this._sun.position.set(-sx / len * 5000, -sy / len * 5000, -sz / len * 5000);
-    // Do not override sun intensity from track data — user controls it via slider
+    const vector = trackData.sunVector;
+    if (!vector) return;
+    const [east, up, north] = vector;
+    if (!east && !up && !north) return;   // two Hellbender levels store all zeros
+    this._trackSunDirection = new THREE.Vector3(east, up, -north).normalize();
+    this._sunDirection = this._trackSunDirection.clone();
+    this._applySunDirection();
+  }
+
+  /** Places the directional light opposite the direction its light travels. */
+  _applySunDirection() {
+    const d = this._sunDirection;
+    if (!d || !this._sun) return;
+    this._sun.position.set(-d.x * SUN_DISTANCE, -d.y * SUN_DISTANCE, -d.z * SUN_DISTANCE);
+    this._onSunChange?.(this.sunAngles());
+  }
+
+  setSunChangeCallback(fn) { this._onSunChange = fn; }
+
+  /*
+    The sun as a compass bearing and a height above the horizon.
+
+    Bearing is where the sun IS, not where its light goes, because that is what "the sun is in
+    the east" means: it is the direction the light arrives from, measured clockwise from north
+    the same way every other heading in this viewer is.
+  */
+  sunAngles() {
+    const d = this._sunDirection;
+    if (!d) return null;
+    const horizontal = Math.hypot(d.x, d.z);
+    const elevation = Math.atan2(-d.y, horizontal) * 180 / Math.PI;
+    // -d is the direction toward the sun; scene north is -Z, so bearing = atan2(-dx, dz).
+    const azimuth = ((Math.atan2(-d.x, d.z) * 180 / Math.PI) % 360 + 360) % 360;
+    return { azimuth, elevation, fromTrack: !!this._trackSunDirection && d.equals(this._trackSunDirection) };
+  }
+
+  /** Points the sun from a compass bearing and a height above the horizon, both in degrees. */
+  setSunAngles(azimuthDeg, elevationDeg) {
+    const a = azimuthDeg * Math.PI / 180;
+    const e = Math.max(0.5, Math.min(90, elevationDeg)) * Math.PI / 180;
+    const horizontal = Math.cos(e);
+    /*
+      The exact inverse of sunAngles. The sun sits at bearing `a`, which is the scene direction
+      (sin a, ., -cos a) since north is -Z, and its light travels the opposite way - so both
+      horizontal terms are negated. Getting that backwards puts the sun 180 degrees out, which
+      looks plausible on a symmetric hill and wrong everywhere else.
+    */
+    this._sunDirection = new THREE.Vector3(
+      -Math.sin(a) * horizontal, -Math.sin(e), Math.cos(a) * horizontal).normalize();
+    this._applySunDirection();
+  }
+
+  /** Returns the sun to the direction the loaded level states. */
+  restoreTrackSun() {
+    if (!this._trackSunDirection) return;
+    this._sunDirection = this._trackSunDirection.clone();
+    this._applySunDirection();
   }
 }
 

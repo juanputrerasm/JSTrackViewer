@@ -26,8 +26,9 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 - **Route markers**: numbered checkpoint markers for MTM, MTM2, CART Precision Racing and 4x4 Evolution 1/2, plus the navigation point, tunnel and powerup markers for Terminal Velocity, Fury3 and Hellbender.
 - **Hellbender level data**: the underground cavern layer with its own terrain, ground boxes and objects, plus navigation points with their objective text, animated textures, tunnels, powerups, and the per-world planet and mission names.
 - **CPR racetrack layers** — render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
+- **Sun position**: every game states where its sun is, and the viewer reads it, names the compass point, and lets you move it. MTM, MTM2, CART Precision Racing, Terminal Velocity, Fury3 and Hellbender store it as a fixed-point vector on `.LVL` line 17; 4x4 Evolution stores the same thing as `lightSourceVector`.
 - **Interactive navigation** — fly through the level, adjust the camera, and jump to a location by clicking the minimap.
-- **Inspection controls** — toggle scene layers and adjust view distance, sunlight, and gamma. Layer toggles and track data fields are shown only where the loaded track has that content, so an MTM track offers no tunnel or navigation controls and only CPR offers a racetrack layer.
+- **Inspection controls** — toggle scene layers and adjust view distance, sunlight, and gamma. Sidebar panels collapse from their headings. Layer toggles and track data fields are shown only where the loaded track has that content, so an MTM track offers no tunnel or navigation controls and only CPR offers a racetrack layer.
 - **Track diagnostics** — review metadata and statistics for textures, objects, courses, ground boxes, and CPR surface and wall types.
 - **Client-side operation** — archives and extracted assets remain in temporary browser storage.
 

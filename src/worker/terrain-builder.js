@@ -112,19 +112,28 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       positions[pOff + 6] = x1; positions[pOff + 7] = h11 * hs; positions[pOff + 8] = z1;
       positions[pOff + 9] = x0; positions[pOff + 10]= h01 * hs; positions[pOff + 11]= z1;
 
-      // Quad face normal (from diagonal cross product)
-      const d1x = x1 - x0, d1y = (h11 - h00) * hs, d1z = z1 - z0;
-      const d2x = x0 - x1, d2y = (h01 - h10) * hs, d2z = z1 - z0;
-      const nx = d1y * d2z - d1z * d2y;
-      const ny = d1z * d2x - d1x * d2z;
-      const nz = d1x * d2y - d1y * d2x;
-      const nl = Math.hypot(nx, ny, nz) || 1;
-      const nnx = nx / nl, nny = ny / nl, nnz = nz / nl;
+      /*
+        A normal per corner, from the heightfield's slope there, rather than one flat normal
+        per cell.
+
+        A flat normal makes every cell a facet, so the terrain lights in hard squares and the
+        shading reads as a checkerboard rather than as a hillside - which is what the software
+        renderers of these games actually did, but it is not what a viewer of one wants. Taking
+        the slope at each corner by central difference and sharing it between the four cells
+        that meet there gives continuous shading across the whole grid.
+
+        This does not merge the vertices. The mesh keeps four of its own per cell so that each
+        cell can carry its own texture's UVs; only the normals are made to agree.
+      */
       const facing = faceDown ? -1 : 1;
       for (let v = 0; v < 4; v++) {
-        normals[(vBase + v) * 3 + 0] = nnx * facing;
-        normals[(vBase + v) * 3 + 1] = nny * facing;
-        normals[(vBase + v) * 3 + 2] = nnz * facing;
+        const ox = (v === 1 || v === 2) ? 1 : 0;
+        const oz = (v === 2 || v === 3) ? 1 : 0;
+        const n = cornerNormal(rawData, rawBytesPerCell, gridSize, cx + ox, cz + oz,
+                               heightDivisor, heightOffset, hs, cellSize);
+        normals[(vBase + v) * 3 + 0] = n[0] * facing;
+        normals[(vBase + v) * 3 + 1] = n[1] * facing;
+        normals[(vBase + v) * 3 + 2] = n[2] * facing;
       }
 
       // UV from CLR texture index (with mirror + rotation support)
@@ -422,6 +431,26 @@ function decodeTerrainTexture(tex, trackPalette) {
   } catch {
     return null;
   }
+}
+
+/*
+  The surface normal at one grid corner, in scene axes.
+
+  Central differences over the neighbouring samples give the slope in each direction, and the
+  cross product of the two tangents gives the normal. The scene lays row `cz` at decreasing Z,
+  so the Z tangent is negated, which is why the north term comes out positive rather than
+  negative. Edges clamp, which flattens the outermost row by half a cell and is invisible.
+*/
+function cornerNormal(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor, heightOffset, hs, cellSize) {
+  const at = (x, z) => sampleHeight(rawData, rawBytesPerCell, gridSize,
+                                    Math.max(0, x), Math.max(0, z), heightDivisor) + heightOffset;
+  const dx = (at(cx + 1, cz) - at(cx - 1, cz)) * 0.5 * hs;
+  const dz = (at(cx, cz + 1) - at(cx, cz - 1)) * 0.5 * hs;
+  const nx = -dx;
+  const ny = cellSize;
+  const nz = dz;
+  const len = Math.hypot(nx, ny, nz) || 1;
+  return [nx / len, ny / len, nz / len];
 }
 
 function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor) {

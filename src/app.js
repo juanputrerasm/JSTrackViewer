@@ -3,6 +3,7 @@ import { WorkerClient } from "./worker-client.js";
 import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes } from "./zip-utils.js";
 
+const APP_TITLE = "JSTrackViewer";
 const OPFS_PATH = "track-viewer/current.pod";
 const WORKER_URL = new URL("./worker/track-worker.js", import.meta.url);
 
@@ -117,6 +118,28 @@ export class TrackViewerApp {
       });
     }
 
+    /*
+      Every sidebar panel folds from its own heading, except the minimap: that one is a control
+      rather than a readout, and collapsing what you navigate with helps nobody.
+    */
+    for (const panel of doc.querySelectorAll(".sidebar .panel")) {
+      if (panel.id === "minimap-panel") continue;
+      const heading = panel.querySelector("h2");
+      if (!heading) continue;
+      heading.classList.add("collapsible");
+      heading.setAttribute("role", "button");
+      heading.setAttribute("tabindex", "0");
+      const toggle = () => {
+        const collapsed = panel.classList.toggle("collapsed");
+        heading.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      };
+      heading.setAttribute("aria-expanded", "true");
+      heading.addEventListener("click", toggle);
+      heading.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    }
+
     // Sliders
     const gridSlider = doc.getElementById("grid-span-slider");
     const gridLabel  = doc.getElementById("grid-span-value");
@@ -136,6 +159,24 @@ export class TrackViewerApp {
       this._scene.setSunIntensity(v);
     });
     this._scene.setSunIntensity(parseInt(sunSlider.value, 10) / 10);
+
+    /*
+      Sun position. The two sliders are a compass bearing and a height above the horizon,
+      because that is how you think about where the sun is; the scene converts them into the
+      light vector these levels actually store. See TrackScene.setSunAngles.
+    */
+    const azimuthSlider = doc.getElementById("sun-azimuth-slider");
+    const elevationSlider = doc.getElementById("sun-elevation-slider");
+    const applySunAngles = () => {
+      this._scene.setSunAngles(
+        parseInt(azimuthSlider.value, 10), parseInt(elevationSlider.value, 10));
+    };
+    azimuthSlider.addEventListener("input", applySunAngles);
+    elevationSlider.addEventListener("input", applySunAngles);
+    doc.getElementById("reset-sun-btn").addEventListener("click", () => this._scene.restoreTrackSun());
+    // The scene is the one that knows where the sun ended up, whether a slider or a track put
+    // it there, so the panel follows it rather than the other way round.
+    this._scene.setSunChangeCallback((angles) => this._updateSunPanel(angles));
 
     const gammaSlider = doc.getElementById("gamma-slider");
     const gammaLabel  = doc.getElementById("gamma-value");
@@ -243,6 +284,7 @@ export class TrackViewerApp {
       this._updateTrackInfo(result);
       this._applyLayerAvailability(this._scene.layerPresence());
       this._setStatus(result.trackName || choice.name);
+      this._setDocumentTitle(result.trackName || choice.name, result.origin);
       // Focus viewport after load
       this._doc.getElementById("viewport")?.focus();
     } catch (err) {
@@ -369,7 +411,6 @@ export class TrackViewerApp {
       if (s.shadowTextureCount) statsPairs.push(["Shadow textures", s.shadowTextureCount]);
       if (s.treeCount) statsPairs.push(["Trees", s.treeCount]);
       if (s.checkpointCount) statsPairs.push(["Checkpoints", s.checkpointCount]);
-      if (s.truckCount) statsPairs.push(["Grid slots", s.truckCount]);
       if (s.navPointCount) statsPairs.push(["Nav points", s.navPointCount]);
       if (s.tunnelCount) statsPairs.push(["Tunnels", s.tunnelCount]);
       if (s.powerupCount) statsPairs.push(["Powerups", s.powerupCount]);
@@ -393,6 +434,45 @@ export class TrackViewerApp {
       statsDl.innerHTML = "<dt>Status</dt><dd>No stats.</dd>";
       if (statsPanel) statsPanel.hidden = false;
     }
+  }
+
+  /** The browser tab names the track being viewed, since several are usually open at once. */
+  _setDocumentTitle(trackName, origin) {
+    const label = [trackName, origin ? `(${origin})` : ""].filter(Boolean).join(" ");
+    this._doc.title = label ? `${APP_TITLE} - ${label}` : APP_TITLE;
+  }
+
+  /*
+    The Sun panel: where the light is, and where it came from.
+
+    Every game in this viewer states a sun direction in its level file, so the panel names the
+    compass point when the direction matches one - Traxx offers exactly five and its stock
+    content uses only those - and says when a slider has moved the sun off it.
+  */
+  _updateSunPanel(angles) {
+    const info = this._doc.getElementById("sun-info");
+    if (!info) return;
+    if (!angles) {
+      info.innerHTML = "<dt>Source</dt><dd>Track states none</dd>";
+      return;
+    }
+    const azimuthSlider = this._doc.getElementById("sun-azimuth-slider");
+    const elevationSlider = this._doc.getElementById("sun-elevation-slider");
+    const azimuth = Math.round(angles.azimuth);
+    const elevation = Math.round(angles.elevation);
+    if (azimuthSlider) {
+      azimuthSlider.value = String(((azimuth % 360) + 360) % 360);
+      this._doc.getElementById("sun-azimuth-value").textContent = `${azimuth}\u00b0`;
+    }
+    if (elevationSlider) {
+      elevationSlider.value = String(Math.max(1, Math.min(90, elevation)));
+      this._doc.getElementById("sun-elevation-value").textContent = `${elevation}\u00b0`;
+    }
+    info.innerHTML = [
+      ["Source", angles.fromTrack ? "From the track" : "Adjusted"],
+      ["Bearing", `${azimuth}\u00b0 ${compassPoint(azimuth, elevation)}`],
+      ["Height", `${elevation}\u00b0 above horizon`],
+    ].map(([k, v]) => `<dt>${escHtml(k)}</dt><dd>${escHtml(v)}</dd>`).join("");
   }
 
   /*
@@ -421,6 +501,7 @@ export class TrackViewerApp {
     if (statsPanel) statsPanel.hidden = true;
     this._doc.getElementById("track-stats").innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
     this._applyLayerAvailability(null);
+    this._doc.title = APP_TITLE;
     this._minimap?.clear();
   }
 
@@ -494,6 +575,21 @@ function nameFromUrl(url) {
 */
 const MUSIC_NAMES = ["AZTEC", "BREAK", "FARM", "GRAVEX", "ROCKX", "SCRAP", "SPLASH", "SURF", "VOODOO"];
 const WEATHER_NAMES = ["Clear", "Cloudy", "Foggy", "Dense Fog", "Rain", "Snow", "Dusk", "Night", "Pitch Black"];
+
+/*
+  The compass point a bearing falls on.
+
+  Traxx offers five sun positions and writes only those, so a stock track always lands exactly
+  on one: N, E, S, W, or straight overhead. Anything else is either a hand-edited level or a
+  slider, and gets the nearest of the eight points rather than a claim of precision.
+*/
+const COMPASS_POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+function compassPoint(azimuthDeg, elevationDeg) {
+  if (elevationDeg >= 88) return "overhead";
+  const index = Math.round((((azimuthDeg % 360) + 360) % 360) / 45) % 8;
+  return COMPASS_POINTS[index];
+}
 
 function displayMusic(data) {
   const name = data.musicName || "";
