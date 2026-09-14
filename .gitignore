@@ -83,3 +83,6 @@ $RECYCLE.BIN/
 ### Project ###
 # Third-party game manual kept locally, not redistributed
 docs/fzone for fury3 manual.txt
+
+# generated analysis
+/graphify-out/

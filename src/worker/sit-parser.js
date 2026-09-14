@@ -289,6 +289,10 @@ function parseCourseBlocks(lines, startCursor, count, course, doc) {
     course.segments.push(segment);
     cursor++;
   }
+  // Extended-course callers need the next [Course N] header, not a position inside the
+  // final segment body. Returning immediately after its delimiter made every course after
+  // the first read `1,0` (ctype) as its segment count and appear to contain one segment.
+  while (cursor < lines.length && !lines[cursor].startsWith("[Course ")) cursor++;
   return { cursor };
 }
 

@@ -190,14 +190,45 @@ export class TrackViewerApp {
     // Focus viewport to capture keyboard events
     viewport.setAttribute("tabindex", "0");
     viewport.focus();
+
+    // A converter or test harness can hand the viewer a same-origin POD URL directly. Blob
+    // URLs work too, provided their creating page remains open.
+    const initialPodUrl = new URLSearchParams(window.location.search).get("pod");
+    if (initialPodUrl) {
+      doc.getElementById("url-input").value = initialPodUrl;
+      queueMicrotask(() => this._loadFromUrl(initialPodUrl));
+    }
+
+    /*
+      The converter hands its result over by message rather than by URL.
+
+      A blob: URL only resolves while the page that minted it lives and only in a context the
+      browser agrees shares its storage, which is exactly the case that failed for people
+      running the converter somewhere other than beside this viewer. A Blob posted between
+      windows has neither condition. It also lets the converter push each new conversion into
+      the SAME viewer tab, so convert, look, adjust and convert again needs no download.
+
+      Only the window that opened this one is listened to. Its origin is not checked: a POD it
+      posts can do nothing that `?pod=<any url>` cannot already do, and the converter may well
+      be served from somewhere other than this viewer.
+    */
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.opener || event.data?.type !== "jstrackviewer:pod") return;
+      const { blob, name } = event.data;
+      if (blob instanceof Blob) this._loadFromFile(new File([blob], name || "converted.pod"), "Converter");
+    });
+    if (window.opener && new URLSearchParams(window.location.search).has("handoff")) {
+      // Carries no data, so it can go to any origin; the converter matches it by window.
+      window.opener.postMessage({ type: "jstrackviewer:ready" }, "*");
+    }
   }
 
-  async _loadFromFile(file) {
+  async _loadFromFile(file, source = "Local file") {
     this._setStatus(`Reading ${file.name}…`);
     this._showLoading(`Reading ${file.name}…`);
     try {
       const buffer = await file.arrayBuffer();
-      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name);
+      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name, source);
       await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
