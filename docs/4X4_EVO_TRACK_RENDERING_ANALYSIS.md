@@ -474,6 +474,24 @@ grids have zero in the upper four bits), and should be retained, but add a fixtu
 containing nonzero Evo mirror/rotation flags before declaring it verified for
 Evo-authored maps.
 
+### Terrain tiles are cut from one painted map, with no border ring
+
+**Verified** against PEAK and TRIBAJA (Evo 2) and ASPEN and THEHILL (Evo 1): every
+ordinary TEX slot is a 64-by-64 8-bit tile.
+
+* MTM2-style hidden overlap. MTM2 and CPR bake a 2-pixel border ring into each
+  tile that the engine hides by sampling texels 2..62; Evo has such ring also.
+
+The viewer now puts each Evo texture slot in exactly one atlas tile. A two-pixel copy of
+that tile's own edge sits outside the 64-pixel UV rectangle to prevent the atlas from
+sampling a different slot. The visible rectangle is the 60 pixels by default.
+The View Options checkbox **2px overlap** is available on every track and checked by
+default. It draws the 2..62 UV rectangle (60 pixels); unchecking it restores the full
+64-pixel rectangle without rebuilding the atlas. This comparison is for visual inspection.
+
+Both UV sets and the atlas mapping are in `src/worker/terrain-builder.js`, checked by
+`tests/terrain-atlas.test.mjs`.
+
 ### TEX v1: terrain and shadow texture table
 
 The header is:

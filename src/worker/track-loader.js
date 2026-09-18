@@ -191,7 +191,7 @@ export async function loadTrack(podIndex, getBytes, choice, heightScale) {
 
 function hydrateModels(podIndex, getBytes, doc) {
   const needed = new Set(doc.boxes.map((b) => b.modelName).filter(Boolean));
-  if (doc.backdropModelName) needed.add(doc.backdropModelName);
+  for (const name of doc.backdropModelNames ?? (doc.backdropModelName ? [doc.backdropModelName] : [])) needed.add(name);
   for (const name of needed) {
     if (doc.models[name]) continue;
     const entry = resolveAsset(podIndex, name);

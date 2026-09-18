@@ -192,7 +192,8 @@ body {
   padding: 4px 10px;
   border-radius: 4px;
   pointer-events: none;
-  white-space: nowrap;
+  max-width: calc(100% - 20px);
+  text-align: center;
 }
 
 .loading-overlay {
@@ -335,4 +336,3 @@ input[type="checkbox"] {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--surface); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-

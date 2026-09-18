@@ -86,3 +86,6 @@ docs/fzone for fury3 manual.txt
 
 # generated analysis
 /graphify-out/
+
+# local tooling
+/tools/

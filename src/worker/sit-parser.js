@@ -241,6 +241,11 @@ function parseBoxBlock(lines, blockStart, isRamp, doc) {
   const massIdx = indexOfLinePrefix(lines, "mass", blockStart, endIndex);
   if (massIdx >= 0 && massIdx + 1 < lines.length) box.mass = parseFloat(lines[massIdx + 1]) || 0;
 
+  // Velocity in feet per second, as written. Type 10 objects ("moving - use bvel" in Traxx's
+  // notes) travel along it, which is TPARK's train; every other box carries zeros.
+  const bvelIdx = indexOfLinePrefix(lines, "bvel", blockStart, endIndex);
+  if (bvelIdx >= 0 && bvelIdx + 1 < lines.length) box.bvel = parseFloatTriplet(lines[bvelIdx + 1]);
+
   return box;
 }
 
@@ -353,10 +358,14 @@ function parseBackdrop(sitLines, doc) {
   const countLine = sitLines[section + 2];
   const comma = countLine.indexOf(",");
   const backdropCount = comma >= 0 ? parseLeadingInt(countLine.slice(comma + 1)) : 0;
-  if (backdropCount >= 1) {
-    const modelName = normalizeArchiveName(sitLines[section + 4]);
-    if (modelName) doc.backdropModelName = modelName;
+  doc.backdropModelNames = [];
+  for (let i = 0; i < Math.min(backdropCount, 64); i++) {
+    const line = sitLines[section + 4 + i];
+    if (!line || line.startsWith("***")) break;
+    const modelName = normalizeArchiveName(line);
+    if (modelName) doc.backdropModelNames.push(modelName);
   }
+  doc.backdropModelName = doc.backdropModelNames[0] ?? null;
 }
 
 function parseTrucks(sitLines, doc) {
@@ -635,6 +644,7 @@ function createDoc(podComment) {
     extendedCourses: [],
     trucks: [],
     backdropModelName: null,
+    backdropModelNames: [],
     arena: null,
     fogMap: null,
   };

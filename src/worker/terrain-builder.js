@@ -12,8 +12,8 @@ const MAX_ATLAS_HEIGHT = 8192;
  * Returns transferable buffers: positions, normals, uvs, indices, atlas rgba.
  */
 /** Builds the shared texture atlas a set of buildTerrainMesh calls can pass to each other. */
-export function buildSharedAtlas(textures, palette, origin) {
-  return buildAtlas(textures, palette, usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0);
+export function buildSharedAtlas(textures, palette) {
+  return buildAtlas(textures, palette);
 }
 
 export function buildTerrainMesh(terrain, palette, textures, heightScale, origin, animations, sharedAtlas) {
@@ -60,11 +60,10 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     detaches it. So exactly one of the three returns it - the surface, which is what builds the
     material - and the other two set `reusesAtlas` and return none, to be drawn with it.
   */
-  const overlapPixels = usesHiddenTerrainOverlap(origin) ? TERRAIN_OVERLAP_PIXELS : 0;
   const {
-    atlas, atlasWidth, atlasHeight, textureCount, atlasCols, atlasRows,
+    atlas, atlasWidth, atlasHeight, textureCount, tileCount, atlasCols, atlasRows,
     atlasTileSize, atlasPadding, sourceTileSize, uvRects, decodedSlots,
-  } = sharedAtlas ?? buildAtlas(textures, palette, overlapPixels);
+  } = sharedAtlas ?? buildAtlas(textures, palette);
 
   const atlasAnimations = buildAtlasAnimations(
     animations, textures, decodedSlots,
@@ -76,6 +75,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const positions = new Float32Array(vertexCount * 3);
   const normals = new Float32Array(vertexCount * 3);
   const uvs = new Float32Array(vertexCount * 2);
+  const uvsOverlap = new Float32Array(vertexCount * 2);
   const indices = new Uint32Array(cellCount * 6);
 
   for (let cz = 0; cz < gridSize; cz++) {
@@ -136,41 +136,21 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         normals[(vBase + v) * 3 + 2] = n[2] * facing;
       }
 
-      // UV from CLR texture index (with mirror + rotation support)
-      let texIdx = 0;
-      let rot = 0;
-      let mirror = 0;
-      if (clrData && clrData.length > 0) {
-        const ci = cell * clrBytesPerCell;
-        if (clrBytesPerCell === 1) {
-          const b = clrData[ci] & 0xff;
-          // Packed 6+2 format: bits 0-5 = texture index, bits 6-7 = 90° rotation steps
-          // Matches Java TerrainTextureIndexCodec.clrPacked6Texture2Rotation:
-          //   textureCount > 0 && textureCount <= 64 && (b & 0x3F) < textureCount
-          const b6 = b & 0x3F;
-          if (textureCount > 0 && textureCount <= 64 && b6 < textureCount) {
-            texIdx = b6;
-            rot = (b >> 6) & 3;
-          } else {
-            texIdx = textureCount > 0 ? Math.min(b, textureCount - 1) : 0;
-          }
-        } else {
-          // 2-byte CLR: bits 0-11 = texture index, bits 12-13 = mirror, bits 14-15 = rotation
-          const b0 = clrData[ci] & 0xff;
-          const b1 = clrData[ci + 1] & 0xff;
-          const value = b0 | (b1 << 8);
-          texIdx = value & 0x0FFF;
-          mirror = (value >> 12) & 3;
-          rot = (value >> 14) & 3;
-          if (textureCount > 0) texIdx = Math.min(texIdx, textureCount - 1);
-        }
-      }
-      if (textureCount <= 1) texIdx = 0;
+      // UV from CLR texture index (with mirror + rotation support).
+      const { texIdx, rot, mirror } = readCell(clrData, cell, clrBytesPerCell, textureCount);
       const rect = uvRects[texIdx] ?? uvRects[0];
       const u0 = rect.x / atlasWidth;
       const u1 = (rect.x + rect.w) / atlasWidth;
       const v0 = rect.y / atlasHeight;
       const v1 = (rect.y + rect.h) / atlasHeight;
+      // The checkbox crops two pixels from each side of a legacy tile. HD replacements use
+      // that tile's legacy size so MTM2/CPR retain the same 2/64 or 2/256 fraction.
+      const legacySide = decodedSlots[texIdx]?.legacySide ?? sourceTileSize;
+      const inset = TERRAIN_OVERLAP_PIXELS * sourceTileSize / legacySide;
+      const overlapU0 = (rect.x + inset) / atlasWidth;
+      const overlapU1 = (rect.x + rect.w - inset) / atlasWidth;
+      const overlapV0 = (rect.y + inset) / atlasHeight;
+      const overlapV1 = (rect.y + rect.h - inset) / atlasHeight;
 
       // Base UV corners (indexed 0-3): BL=(u0,1), BR=(u1,1), TR=(u1,0), TL=(u0,0)
       // Matches JTraxx SoftwareTextureSampler.transformTextureCornerIndex:
@@ -179,6 +159,8 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       //   final: (rot + result) & 3
       const cU = [u0, u1, u1, u0];
       const cV = [v1, v1, v0, v0];
+      const overlapU = [overlapU0, overlapU1, overlapU1, overlapU0];
+      const overlapV = [overlapV1, overlapV1, overlapV0, overlapV0];
       // TV/F3: JTraxxMainWindow.flightTerrainTextureRotationQuarterTurns() = 3 extra turns.
       // JTraxx: (rot + result) & 3, applied after mirror. Corner indices match Three.js vi directly.
       const effectiveRot = isTvFamilyOrigin(origin) ? (rot + 3) & 3 : rot;
@@ -190,6 +172,8 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         const ci2 = (effectiveRot + result) & 3;
         uvs[uOff + vi * 2]     = cU[ci2];
         uvs[uOff + vi * 2 + 1] = cV[ci2];
+        uvsOverlap[uOff + vi * 2] = overlapU[ci2];
+        uvsOverlap[uOff + vi * 2 + 1] = overlapV[ci2];
       }
 
       // Indices (2 triangles), wound the other way for a surface seen from below.
@@ -208,11 +192,12 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     positions: positions.buffer,
     normals: normals.buffer,
     uvs: uvs.buffer,
+    uvsOverlap: uvsOverlap.buffer,
     indices: indices.buffer,
     // A reusing call must not hand back an atlas it does not own; see the note above.
     atlas: terrain.reusesAtlas === true ? null : {
       rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
-      textureCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
+      textureCount, tileCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
       animations: atlasAnimations,
     },
   };
@@ -300,8 +285,8 @@ function renderTile(decoded, atlasTileSize, sourceTileSize, atlasPadding) {
   return tile;
 }
 
-function buildAtlas(textures, trackPalette, overlapPixels = 0) {
-  const atlasPadding = Math.max(0, overlapPixels | 0);
+function buildAtlas(textures, trackPalette) {
+  const atlasPadding = TERRAIN_OVERLAP_PIXELS;
   const decodedSlots = textures.map((tex) => decodeTerrainTexture(tex, trackPalette));
   let sourceTileSize = decodedSlots.reduce((max, slot) => Math.max(max, slot?.width ?? ATLAS_TILE_SIZE), ATLAS_TILE_SIZE);
 
@@ -333,31 +318,29 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
       atlas, atlasWidth: atlasTileSize, atlasHeight: atlasTileSize,
       textureCount: 1, atlasCols: 1, atlasRows: 1, atlasTileSize, atlasPadding, sourceTileSize,
       uvRects: [{ x: atlasPadding, y: atlasPadding, w: sourceTileSize, h: sourceTileSize }],
-      decodedSlots,
+      tileCount: 1, decodedSlots,
     };
   }
 
-  const atlasCols = Math.max(1, Math.min(slotCount, MAX_ATLAS_COLS, Math.floor(MAX_ATLAS_WIDTH / atlasTileSize)));
-  const atlasRows = Math.ceil(slotCount / atlasCols);
+  // Every CLR slot has one atlas tile, independent of where the map places it.
+  const tileCount = slotCount;
+
+  const atlasCols = Math.max(1, Math.min(tileCount, MAX_ATLAS_COLS, Math.floor(MAX_ATLAS_WIDTH / atlasTileSize)));
+  const atlasRows = Math.ceil(tileCount / atlasCols);
   const atlasWidth = atlasCols * atlasTileSize;
   const atlasHeight = atlasRows * atlasTileSize;
   const atlas = new Uint8ClampedArray(atlasWidth * atlasHeight * 4);
   const uvRects = [];
 
-  for (let ti = 0; ti < slotCount; ti++) {
+  for (let ti = 0; ti < tileCount; ti++) {
     const decoded = decodedSlots[ti];
     const xOff = (ti % atlasCols) * atlasTileSize;
     const yOff = Math.floor(ti / atlasCols) * atlasTileSize;
-    // Inset by a fraction of the tile, derived from the legacy tile size, rather than by a
-    // fixed count of the source image's own pixels. See hdLegacySide above.
-    const borderSide = decoded?.legacySide ?? decoded?.width ?? sourceTileSize;
-    const insetX = atlasPadding > 0 ? atlasPadding * sourceTileSize / borderSide : 0;
-    const insetY = insetX;
     uvRects.push({
-      x: xOff + atlasPadding + insetX,
-      y: yOff + atlasPadding + insetY,
-      w: Math.max(1, sourceTileSize - insetX * 2),
-      h: Math.max(1, sourceTileSize - insetY * 2),
+      x: xOff + atlasPadding,
+      y: yOff + atlasPadding,
+      w: sourceTileSize,
+      h: sourceTileSize,
     });
     for (let y = 0; y < atlasTileSize; y++) {
       for (let x = 0; x < atlasTileSize; x++) {
@@ -380,15 +363,51 @@ function buildAtlas(textures, trackPalette, overlapPixels = 0) {
     }
   }
 
-  return { atlas, atlasWidth, atlasHeight, textureCount: slotCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize, uvRects, decodedSlots };
-}
-
-function usesHiddenTerrainOverlap(origin) {
-  return origin === "MTM2" || origin === "CPR";
+  return {
+    atlas, atlasWidth, atlasHeight, textureCount: slotCount, tileCount, atlasCols, atlasRows,
+    atlasTileSize, atlasPadding, sourceTileSize, uvRects,
+    decodedSlots,
+  };
 }
 
 function isTvFamilyOrigin(origin) {
   return origin === "TV" || origin === "F3" || origin === "TV/F3";
+}
+
+/*
+  One cell's texture slot, and how its tile is turned and flipped.
+
+  The mesh loop reads CLR through this for its texture slot and orientation.
+*/
+function readCell(clrData, cell, clrBytesPerCell, textureCount) {
+  let texIdx = 0;
+  let rot = 0;
+  let mirror = 0;
+  if (clrData && clrData.length > 0) {
+    const ci = cell * clrBytesPerCell;
+    if (clrBytesPerCell === 1) {
+      const b = clrData[ci] & 0xff;
+      // Packed 6+2 format: bits 0-5 = texture index, bits 6-7 = 90° rotation steps
+      // Matches Java TerrainTextureIndexCodec.clrPacked6Texture2Rotation:
+      //   textureCount > 0 && textureCount <= 64 && (b & 0x3F) < textureCount
+      const b6 = b & 0x3F;
+      if (textureCount > 0 && textureCount <= 64 && b6 < textureCount) {
+        texIdx = b6;
+        rot = (b >> 6) & 3;
+      } else {
+        texIdx = textureCount > 0 ? Math.min(b, textureCount - 1) : 0;
+      }
+    } else {
+      // 2-byte CLR: bits 0-11 = texture index, bits 12-13 = mirror, bits 14-15 = rotation
+      const value = (clrData[ci] & 0xff) | ((clrData[ci + 1] & 0xff) << 8);
+      texIdx = value & 0x0FFF;
+      mirror = (value >> 12) & 3;
+      rot = (value >> 14) & 3;
+      if (textureCount > 0) texIdx = Math.min(texIdx, textureCount - 1);
+    }
+  }
+  if (textureCount <= 1) texIdx = 0;
+  return { texIdx, rot, mirror };
 }
 
 /*

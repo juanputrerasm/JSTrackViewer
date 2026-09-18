@@ -22,13 +22,16 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 - **Multi-track archives**: discover and switch between multiple `.SIT` or `.LVL` tracks without reopening the archive.
 - **Broad game support**: inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, CART Precision Racing, and 4x4 Evolution 1/2 track formats.
 - **Modern MTM2 (Community Patch 3) support**: read POD1-64 archives, `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
-- **Detailed track rendering**: display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops.
+- **Detailed track rendering**: display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops. Tracks that name more than one background model show all of them.
 - **Route markers**: numbered checkpoint markers for MTM, MTM2, CART Precision Racing and 4x4 Evolution 1/2, plus the navigation point, tunnel and powerup markers for Terminal Velocity, Fury3 and Hellbender.
 - **Hellbender level data**: the underground cavern layer with its own terrain, ground boxes and objects, plus navigation points with their objective text, animated textures, tunnels, powerups, and the per-world planet and mission names.
 - **CPR racetrack layers**: render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
 - **Sun position**: every game states where its sun is, and the viewer reads it, names the compass point, and lets you move it. MTM, MTM2, CART Precision Racing, Terminal Velocity, Fury3 and Hellbender store it as a fixed-point vector on `.LVL` line 17; 4x4 Evolution stores the same thing as `lightSourceVector`.
+- **Sun shadows**: objects, vegetation and the driven truck cast shadows onto the terrain and the road surface. Sun light and its shadows are separate toggles, so the lighting can stay while the shadows go.
+- **Texture presentation**: switch between smooth and sharp (pixelated) filtering, and toggle the two-pixel tile crop that the older games relied on, to compare it against the full tile.
 - **Interactive navigation**: fly through the level, adjust the camera, and jump to a location by clicking the minimap.
-- **Inspection controls**: toggle scene layers and adjust view distance, sunlight, and gamma. Sidebar panels collapse from their headings. Layer toggles and track data fields are shown only where the loaded track has that content, so an MTM track offers no tunnel or navigation controls and only CPR offers a racetrack layer.
+- **Inspection controls**: use separate Markers and View Options panels to toggle scene helpers, layers, and object shadows, and adjust view distance, sunlight, and gamma. Sidebar panels collapse from their headings. Controls and track data fields appear only where the loaded track has that content.
+- **Test Drive**: put a Monster Truck Madness truck on the track and drive it, with two chase cameras, a cockpit view and a free orbit, a live speed, gear and engine readout, lap timing on tracks that have checkpoints, and an optional hitbox overlay. See [Test Drive](#test-drive).
 - **Track diagnostics**: review metadata and statistics for textures, objects, courses, ground boxes, and CPR surface and wall types.
 - **Client-side operation**: archives and extracted assets remain in temporary browser storage.
 
@@ -72,6 +75,7 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 2. Choose **Open POD/ZIP from disk**, or paste an archive URL and choose **Open from URL**.
 3. Select a track when the archive contains more than one supported track.
 4. Use the keyboard, mouse, and view controls to explore the level.
+5. Use the **Markers** and **View Options** panels to choose what is drawn. Every panel collapses from its heading, and controls appear only where the loaded track has that content.
 
 > [!NOTE]
 > Remote archives must be served over HTTP or HTTPS. Cross-origin servers must also allow the browser request through CORS.
@@ -100,6 +104,35 @@ Then open <http://localhost:8080/>. There is no build step and no package instal
 | Mouse wheel | Move along the view direction |
 | Home | Reset near course segment 0 |
 | Minimap click | Move to the selected map position while preserving camera orientation |
+
+## Test Drive
+
+Test Drive puts a truck on the track you are viewing and lets you drive it. The truck comes from its own archive, so a track POD and a truck POD are open at the same time.
+
+1. Load a track as usual.
+2. In the **Test Drive** panel, choose **Load truck POD** and open a Monster Truck Madness or Monster Truck Madness 2 truck archive.
+3. Pick a truck from the list.
+4. Choose **Drive**. The truck is placed at the first starting grid slot.
+
+While driving, the panel reports speed, the selected gear, engine rpm and the active camera. On a track that carries checkpoints it also reports the lap number, the next checkpoint, the current lap time and your best lap; a track without checkpoints, such as a drag strip or a stadium, simply omits those rows.
+
+**Show hitboxes** draws a wireframe around everything the simulation can collide with, which is the quickest way to tell an invisible wall from a rendering gap. Objects that have a model are collided against the model itself rather than an oversized authored box, so you can pull up against a tree instead of stopping several metres short of it, and tree foliage no longer stops the truck while its trunk does.
+
+Loading a different track or a different truck parks you automatically. The truck stays loaded, so you can drop straight into the next track.
+
+| Control | Action |
+|---|---|
+| Up Arrow / W | Throttle |
+| Down Arrow / S | Brake and reverse |
+| Left / Right Arrow, or A / D | Steer |
+| Space | Handbrake |
+| V | Cycle the cameras: chase near, chase far, cockpit, free orbit |
+| R | Return to the starting grid |
+| Mouse drag and wheel | Swing and zoom the free orbit camera |
+| Gamepad | Sticks and triggers, where the browser reports one |
+
+> [!NOTE]
+> Drive mode borrows the arrow keys while it is active, so the free-flight camera stands down until you stop driving.
 
 ## Loading from URLs
 
@@ -130,13 +163,17 @@ src/
 ├── nav.js                  Free-flight camera navigation
 ├── worker-client.js        Promise wrapper for the module worker
 ├── zip-utils.js            POD-in-ZIP extraction
+├── drive/                  Test Drive: truck simulation, colliders, cameras, and input
 ├── shared/                 OPFS, path, palette, and CPR schema helpers
 └── worker/                 POD, SIT, LVL, TRK, BIN, texture, and terrain decoders
 ```
 
 ## Known limitations
 
-- Rendering is intended for inspection and does not emulate physics, AI, audio, weapons, enemies, or game scripting.
+- Rendering is intended for inspection. Apart from Test Drive, the viewer does not emulate the games: no AI, audio, weapons, enemies, or game scripting.
+- Test Drive reads Monster Truck Madness and Monster Truck Madness 2 truck archives. 4x4 Evolution trucks use a different manifest and are refused rather than misread.
+- Test Drive handling is a feel-alike, not the original. Monster Truck Madness 2 keeps its mass, spring rates, gearing and tire grip in the executable rather than in track or truck files, so those values are approximated; see the [physics notes](docs/MTM2_PHYSICS_NOTES.md).
+- Test Drive collides with terrain and track objects. It does not simulate other trucks, damage, or race rules beyond checkpoint order and lap timing.
 - CART Precision Racing wall heights are calibrated from the wall art rather than read from the engine, so absolute wall height is approximate.
 - CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
 - CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
@@ -156,6 +193,8 @@ src/
 - [4x4 Evolution 1/2 track rendering analysis](docs/4X4_EVO_TRACK_RENDERING_ANALYSIS.md)
 - [CART Precision Racing track layer analysis](docs/CPR_TRACK_LAYER_ANALYSIS.md)
 - [CPREdit guide](docs/CPREDIT_GUIDE.md)
+- [CART Precision Racing racetrack layer implementation guide](docs/cpr-racetrack-layer-implementation-guide.md)
+- [Monster Truck Madness 2 physics notes](docs/MTM2_PHYSICS_NOTES.md)
 
 ## Related projects
 

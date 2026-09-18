@@ -26,6 +26,14 @@ export class TrackCamera {
     this.pitch = -25;  // degrees, negative=look down
 
     this._keys = new Set();
+    /*
+      Drive mode takes the arrow keys, so the fly camera has to be able to stand down.
+
+      It keeps listening while disabled rather than unbinding: a key released during a drive
+      would otherwise never be seen, and the camera would resume mid-flight when drive mode
+      ended.
+    */
+    this.enabled = true;
     this._dragging = false;
     this._lastMouse = { x: 0, y: 0 };
     this._gridSpan = 64;
@@ -59,10 +67,18 @@ export class TrackCamera {
     el.addEventListener("keydown", (e) => this._onKeyDown(e));
     el.addEventListener("keyup", (e) => this._onKeyUp(e));
     el.addEventListener("mousedown", (e) => this._onMouseDown(e));
-    el.addEventListener("mousemove", (e) => this._onMouseMove(e));
+    /*
+      Drag and wheel are gated on `enabled` at the listener, not inside update().
+
+      These two write to the camera directly through _applyToCamera rather than waiting for
+      the frame, so the early return in update() does not hold them back: while drive mode was
+      running, a stray scroll or drag still moved the fly camera and fought it for control of
+      the view.
+    */
+    el.addEventListener("mousemove", (e) => { if (this.enabled) this._onMouseMove(e); });
     el.addEventListener("mouseup", () => this._dragging = false);
     el.addEventListener("mouseleave", () => this._dragging = false);
-    el.addEventListener("wheel", (e) => this._onWheel(e), { passive: false });
+    el.addEventListener("wheel", (e) => { if (this.enabled) this._onWheel(e); }, { passive: false });
     el.setAttribute("tabindex", "0");
   }
 
@@ -143,6 +159,7 @@ export class TrackCamera {
   }
 
   update(dt) {
+    if (!this.enabled) return;
     const keys = this._keys;
     const worldSize = this._trackGridSize * this._trackCellSize;
     const moveSpeed = MOVE_SPEED_BASE * (worldSize / 16384);

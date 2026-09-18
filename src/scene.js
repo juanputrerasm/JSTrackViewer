@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { TrackCamera } from "./nav.js";
+import { buildTruckObject } from "./drive/truck-object.js";
+import { createWorldFrame } from "./drive/world-frame.js";
+import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./drive/world-frame.js";
+import { trackSpawnPoint } from "./drive/spawn-point.js";
 import {
   CPR_WALL_LAYERS,
   CPR_WALL_PART_HEIGHT_FT,
@@ -124,6 +128,8 @@ const CHECKPOINT_MARKER_COLOR = 0xffdd00;
 const UNDERGROUND_WIRE_COLOR = 0x66aacc;
 /** How far out the directional light is placed; only its direction matters. */
 const SUN_DISTANCE = 5000;
+const SHADOW_SPAN = 2048;
+const SHADOW_ANCHOR_STEP = 64;
 const GRID_COLOR = 0x444466;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const AMBIENT_COLOR = 0x888888;
@@ -239,15 +245,18 @@ export class TrackScene {
     this._renderFlags = {
       terrain: true, textures: true, grid: false,
       courses: false, objects: true, gboxes: true,
-      cboxes: false, water: true, backdrop: true, shadows: true,
-      wireframe: false, trucks: true, billboards: true, checkpoints: true,
+      cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true, terrainOverlap: true,
+      wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
       racetrack: true, underground: true,
     };
     this._heightScale = 4;
+    this._textureSmoothingEnabled = true;
     this._undergroundSurfaces = [];
+    this._terrainUvTargets = [];
     this._labelTextures = [];
     this._lastTime = 0;
+    this._driveGeneration = 0;
     this._terrainAtlasN = 1;
     this._terrainAtlasCols = 1;
     this._terrainAtlasRows = 1;
@@ -271,7 +280,9 @@ export class TrackScene {
     this._renderer.setClearColor(EMPTY_BACKGROUND_COLOR);
     this._renderer.toneMapping = THREE.LinearToneMapping;
     this._renderer.toneMappingExposure = 1.0;
-    this._renderer.shadowMap.enabled = false;
+    this._renderer.shadowMap.enabled = true;
+    this._renderer.shadowMap.type = THREE.PCFShadowMap;
+    this._renderer.shadowMap.autoUpdate = false;
     this._container.appendChild(this._renderer.domElement);
     const { width, height } = this._container.getBoundingClientRect();
     this._renderer.setSize(width || 800, height || 600);
@@ -306,7 +317,14 @@ export class TrackScene {
       powerups:   new THREE.Group(),
       water:      new THREE.Group(),
       trucks:     new THREE.Group(),
+      // The drivable truck. Separate from `trucks`, which holds the start-grid arrows: one is
+      // a marker layer the viewer toggles, the other is the vehicle drive mode moves.
+      driveTruck: new THREE.Group(),
+      // Wireframes around what the SIMULATION collides with, which is not always what the
+      // viewer draws. See drive/collider-markers.js.
+      hitboxes:   new THREE.Group(),
       vegetation: new THREE.Group(),
+      vegetationWire: new THREE.Group(),
       backdrop:   new THREE.Group(),
     };
     for (const g of Object.values(this._groups)) this._scene.add(g);
@@ -328,7 +346,19 @@ export class TrackScene {
     this._scene.add(this._ambient);
     this._sun = new THREE.DirectionalLight(SUN_COLOR, 1.0);
     this._sun.position.set(1, 2, 0.5);
+    this._sun.castShadow = false;
+    this._sun.shadow.mapSize.set(1024, 1024);
+    const shadowCamera = this._sun.shadow.camera;
+    shadowCamera.left = shadowCamera.bottom = -SHADOW_SPAN / 2;
+    shadowCamera.right = shadowCamera.top = SHADOW_SPAN / 2;
+    shadowCamera.near = 1;
+    shadowCamera.far = SUN_DISTANCE * 3;
+    shadowCamera.updateProjectionMatrix();
+    this._sun.shadow.bias = -0.0001;
+    this._sun.shadow.normalBias = 0.5;
+    this._scene.add(this._sun.target);
     this._scene.add(this._sun);
+    this._sunDirection = new THREE.Vector3(-1, -2, -0.5).normalize();
   }
 
   setSunIntensity(v) {
@@ -364,11 +394,21 @@ export class TrackScene {
       requestAnimationFrame(loop);
       const dt = Math.min((time - this._lastTime) / 1000, 0.1);
       this._lastTime = time;
-      this._nav.update(dt);
+      /*
+        Driving and flying are the same loop, and only one of them may move the camera.
+
+        Drive mode owns the camera while it is active, so the fly camera is not merely ignored
+        here, it is disabled (see startDrive): its key handlers stay live so that releases are
+        still seen, but it must not steer.
+      */
+      if (this._drive?.isActive) this._drive.update(dt);
+      else this._nav.update(dt);
       // Keep backdrop centered on camera so it never appears to move
       if (this._backdropMesh) this._backdropMesh.position.copy(this._camera.position);
       this._updateBillboards();
       this._updateTextureAnimations(dt);
+      this._updateShadowArea();
+      if (this._drive?.isActive && this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
       this._renderer.render(this._scene, this._camera);
     };
     requestAnimationFrame((t) => { this._lastTime = t; requestAnimationFrame(loop); });
@@ -378,7 +418,50 @@ export class TrackScene {
 
   setRenderFlags(flags) {
     Object.assign(this._renderFlags, flags);
+    this._updateTerrainOverlap();
     this._applyVisibility();
+  }
+
+  _updateTerrainOverlap() {
+    const enabled = this._renderFlags.terrainOverlap === true;
+    if (enabled === this._terrainOverlapApplied) return;
+    for (const target of this._terrainUvTargets) {
+      target.geometry.attributes.uv.array.set(enabled ? target.overlap : target.full);
+      target.geometry.attributes.uv.needsUpdate = true;
+    }
+    this._terrainOverlapApplied = enabled;
+  }
+
+  _registerTerrainUvs(geometry, data) {
+    const full = new Float32Array(data.uvs);
+    const overlap = new Float32Array(data.uvsOverlap ?? data.uvs);
+    geometry.setAttribute("uv", new THREE.BufferAttribute(
+      new Float32Array(this._renderFlags.terrainOverlap === true ? overlap : full), 2));
+    this._terrainUvTargets.push({ geometry, full, overlap });
+  }
+
+  _updateShadowArea() {
+    if (!this._trackData || !this._sun.castShadow) return;
+    const x = Math.round(this._camera.position.x / SHADOW_ANCHOR_STEP) * SHADOW_ANCHOR_STEP;
+    const z = Math.round(this._camera.position.z / SHADOW_ANCHOR_STEP) * SHADOW_ANCHOR_STEP;
+    if (this._sun.target.position.x === x && this._sun.target.position.z === z) return;
+    this._sun.target.position.set(x, 0, z);
+    this._applySunDirection(false);
+  }
+
+  setTextureSmoothingEnabled(enabled) {
+    this._textureSmoothingEnabled = enabled;
+    const textures = [this._terrainAtlasTex, ...Object.values(this._modelTexCache ?? {})];
+    for (const mesh of this._groups.racetrack.children) {
+      if (mesh.material?.map) textures.push(mesh.material.map);
+    }
+    for (const texture of textures) {
+      if (!texture) continue;
+      texture.magFilter = enabled ? THREE.LinearFilter : THREE.NearestFilter;
+      texture.minFilter = enabled ? THREE.LinearFilter : THREE.NearestFilter;
+      texture.generateMipmaps = false;
+      texture.needsUpdate = true;
+    }
   }
 
   /*
@@ -392,8 +475,8 @@ export class TrackScene {
     the moment it builds geometry, and a track that unexpectedly does carry one is not hidden
     because a table said its game never does.
 
-    Three flags are not content and are always available: the grid and the wireframe overlay
-    are drawn from other layers, and the sun is a light.
+    Grid and wireframe are drawn from other layers; sunlight and its shadows use the scene's
+    directional light. Those controls are always available.
   */
   layerPresence() {
     const g = this._groups;
@@ -402,6 +485,7 @@ export class TrackScene {
     return {
       terrain:    !!this._terrainMesh,
       textures:   !!this._terrainMesh,
+      terrainOverlap: !!this._terrainMesh,
       grid:       !!this._terrainMesh,
       courses:    has("courses"),
       objects,
@@ -420,6 +504,7 @@ export class TrackScene {
       water:      has("water"),
       backdrop:   has("backdrop"),
       animate:    (this._textureAnimations?.length ?? 0) > 0,
+      sunlight:   true,
       shadows:    true,
     };
   }
@@ -436,6 +521,7 @@ export class TrackScene {
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboards.visible = f.objects;
     this._groups.vegetation.visible = f.objects;
+    this._groups.vegetationWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
     this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
     this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
@@ -462,8 +548,16 @@ export class TrackScene {
     this._groups.powerups.visible = f.powerups !== false;
     this._groups.water.visible = f.water;
     this._groups.trucks.visible = f.trucks !== false;
+    // Not tied to the `trucks` toggle: that one hides the start-grid markers, and hiding the
+    // vehicle you are driving with it would be a surprise. It is empty outside drive mode.
+    this._groups.driveTruck.visible = true;
+    this._groups.hitboxes.visible = f.hitboxes === true;
     this._groups.backdrop.visible = f.backdrop;
-    if (this._sun) this._sun.visible = f.shadows !== false;
+    if (this._sun) {
+      this._sun.visible = f.sunlight !== false;
+      this._sun.castShadow = this._sun.visible && f.shadows !== false && !!this._trackData;
+      if (this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+    }
 
     // texture toggle: swap between textured and flat terrain material
     const terrainMaterial = f.textures ? this._terrainMatTextured : this._terrainMatFlat;
@@ -479,6 +573,16 @@ export class TrackScene {
   }
 
   clearTrack() {
+    this.stopDrive();
+    /*
+      The truck disposes itself, because the loop below cannot.
+
+      That loop frees each child's own geometry and material, which is right for a layer built
+      from meshes. The truck's child is a Group with the whole vehicle nested under it, so the
+      loop would free nothing at all and leak every mesh and material on each track change.
+    */
+    this._driveTruck?.dispose();
+    this._driveTruck = null;
     for (const g of Object.values(this._groups)) {
       while (g.children.length) {
         const child = g.children[0];
@@ -514,12 +618,15 @@ export class TrackScene {
     this._backdropMesh = null;
     this._arenaMesh = null;
     this._terrainRaw = null;
+    this._terrainUvTargets = [];
+    this._terrainOverlapApplied = null;
     for (const texture of this._labelTextures ?? []) texture.dispose();
     this._labelTextures = [];
     this._textureAnimations = [];
     this._animationClock = 0;
     this._modelTexCache = {};
     this._trackData = null;
+    this._sun.castShadow = false;
     this._scene.background = null;
     this._renderer.setClearColor(EMPTY_BACKGROUND_COLOR);
   }
@@ -542,8 +649,11 @@ export class TrackScene {
     // Otherwise: prefer BIN model (MTM2), fall back to RAW sky texture (TV/F3/HB).
     if (trackData.arena && trackData.models?.[trackData.arena.modelName]) {
       this._buildArena(trackData);
-    } else if (trackData.backdropModelName && trackData.models?.[trackData.backdropModelName]) {
-      this._buildBackdropModel(trackData.backdropModelName, trackData);
+    } else if ((trackData.backdropModelNames?.length || trackData.backdropModelName) &&
+               (trackData.backdropModelNames ?? [trackData.backdropModelName]).some((name) => trackData.models?.[name])) {
+      for (const name of trackData.backdropModelNames ?? [trackData.backdropModelName]) {
+        this._buildBackdropModel(name, trackData);
+      }
     } else if (trackData.skyTexture) {
       this._buildBackdropFromTexture(trackData.skyTexture);
     }
@@ -566,6 +676,7 @@ export class TrackScene {
 
     this._applyVisibility();
     this._updateSunFromTrackData(trackData);
+    this._updateShadowArea();
   }
 
   /*
@@ -618,7 +729,7 @@ export class TrackScene {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
       geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
-      geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+      this._registerTerrainUvs(geo, mesh);
       geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
       geo.computeBoundingSphere();
       const surface = new THREE.Mesh(geo, this._undergroundMatTextured ?? this._terrainMatFlat);
@@ -644,7 +755,7 @@ export class TrackScene {
   }
 
   _buildTerrain(terrainData) {
-    const { gridSize, cellSize, positions, normals, uvs, indices, atlas } = terrainData;
+    const { gridSize, cellSize, positions, normals, indices, atlas } = terrainData;
 
     // Kept for marker placement: the raw heightfield is what puts a marker on the ground.
     this._terrainRaw = terrainData.rawData ? new Uint8Array(terrainData.rawData) : null;
@@ -652,15 +763,15 @@ export class TrackScene {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
     geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(normals), 3));
-    geo.setAttribute("uv",       new THREE.BufferAttribute(new Float32Array(uvs), 2));
+    this._registerTerrainUvs(geo, terrainData);
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
 
     // Atlas texture
     const atlasImg = new ImageData(new Uint8ClampedArray(atlas.rgba), atlas.width, atlas.height);
     const atlasTex = new THREE.DataTexture(atlasImg.data, atlas.width, atlas.height, THREE.RGBAFormat);
     atlasTex.wrapS = atlasTex.wrapT = THREE.ClampToEdgeWrapping;
-    atlasTex.magFilter = THREE.NearestFilter;
-    atlasTex.minFilter = THREE.NearestFilter;
+    atlasTex.magFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+    atlasTex.minFilter = atlasTex.magFilter;
     atlasTex.generateMipmaps = false;
     atlasTex.colorSpace = THREE.SRGBColorSpace;
     atlasTex.needsUpdate = true;
@@ -678,10 +789,10 @@ export class TrackScene {
     this._terrainAtlasSourceTileSize = atlas.sourceTileSize ?? 64;
 
     this._terrainMesh = new THREE.Mesh(geo, this._terrainMatTextured);
-    this._terrainMesh.receiveShadow = false;
+    this._terrainMesh.receiveShadow = true;
     this._groups.terrain.add(this._terrainMesh);
 
-    // Grid overlay — quad edges only (no triangle diagonals)
+    // Grid overlay: quad edges only (no triangle diagonals)
     const posArr = geo.attributes.position.array;
     const lineVerts = [];
     const pushV = (vi) => { const i = vi * 3; lineVerts.push(posArr[i], posArr[i + 1], posArr[i + 2]); };
@@ -774,7 +885,7 @@ export class TrackScene {
     if (!model?.meshes?.length) return;
     const anchor = model.anchor ?? { x: 0, y: 0, z: 0 };
 
-    const group = new THREE.Group();
+    const group = this._backdropMesh ?? new THREE.Group();
 
     for (const mesh of model.meshes) {
       const srcPos = new Float32Array(mesh.positions);
@@ -811,7 +922,7 @@ export class TrackScene {
 
     group.renderOrder = -1;
     this._backdropMesh = group;
-    this._groups.backdrop.add(group);
+    if (!group.parent) this._groups.backdrop.add(group);
   }
 
   _buildWater(trackData) {
@@ -1193,6 +1304,8 @@ export class TrackScene {
       const source = animation.frames[frame];
       if (animation.kind === "model") {
         animation.target.set(source);
+        // An animated cutout can change its shadow silhouette with the frame.
+        if (this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
       } else {
         // Blit one square tile into the atlas, row by row.
         const { atlasWidth, x, y, size } = animation;
@@ -1415,7 +1528,9 @@ export class TrackScene {
         geo.setAttribute("uv", new THREE.Float32BufferAttribute(bucket.uvs, 2));
         geo.setIndex(bucket.indices);
         geo.computeVertexNormals();
-        this._groups.racetrack.add(new THREE.Mesh(geo, materials[materialIndex]));
+        const surface = new THREE.Mesh(geo, materials[materialIndex]);
+        surface.receiveShadow = true;
+        this._groups.racetrack.add(surface);
         this._groups.racetrackWire.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
       }
     };
@@ -1428,6 +1543,8 @@ export class TrackScene {
     if (texture?.rgba && texture.width > 0 && texture.height > 0) {
       const tex = new THREE.DataTexture(new Uint8ClampedArray(texture.rgba), texture.width, texture.height, THREE.RGBAFormat);
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.magFilter = tex.minFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+      tex.generateMipmaps = false;
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.needsUpdate = true;
       return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide, ...CPR_DEPTH_NUDGE });
@@ -1448,6 +1565,8 @@ export class TrackScene {
     if (fence?.rgba && fence.width > 0 && fence.height > 0) {
       const tex = new THREE.DataTexture(new Uint8ClampedArray(fence.rgba), fence.width, fence.height, THREE.RGBAFormat);
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.magFilter = tex.minFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+      tex.generateMipmaps = false;
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.needsUpdate = true;
       return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide, alphaTest: 0.5, ...CPR_DEPTH_NUDGE });
@@ -1711,7 +1830,15 @@ export class TrackScene {
       if (mesh.indices) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
       geo.computeBoundingSphere();
 
-      meshRoot.add(new THREE.Mesh(geo, this._createModelMaterial(mesh)));
+      const material = this._createModelMaterial(mesh);
+      const solid = new THREE.Mesh(geo, material);
+      // BIN faces are reverse-wound: their visible outside is BackSide. Match that in the
+      // shadow pass, including alpha-tested cutouts, instead of casting from their inside.
+      if (!material.transparent && material.depthWrite && material.blending === THREE.NormalBlending) {
+        solid.castShadow = true;
+        material.shadowSide = material.side;
+      }
+      meshRoot.add(solid);
       wireRoot.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), wireMat));
     }
 
@@ -1772,6 +1899,23 @@ export class TrackScene {
     const targetWireGroup = underground ? this._groups.undergroundWire
       : billboard ? this._groups.billboardsWire
       : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
+    /*
+      Remember which drawn object came from which box.
+
+      Drive mode can shove a movable object around the simulation, and without this link the
+      collider moves while its model stands exactly where the track put it. Keyed by the box's
+      index in trackData.boxes, which is what the colliders record as `sourceIndex`.
+
+      Both the solid group and its wireframe are kept, because they are placed independently
+      and would otherwise drift apart the moment anything moved.
+    */
+    const boxIndex = (trackData.boxes ?? []).indexOf(box);
+    if (boxIndex >= 0) {
+      this._objectsByBox = this._objectsByBox ?? new Map();
+      this._objectsByBox.set(boxIndex, { group, wireGroup, billboard });
+    }
+
+    if (billboard || underground) group.traverse((child) => { if (child.isMesh) child.castShadow = false; });
     targetGroup.add(group);
     targetWireGroup.add(wireGroup);
   }
@@ -1817,6 +1961,11 @@ export class TrackScene {
         geo.computeBoundingSphere();
 
         const instanced = new THREE.InstancedMesh(geo, this._createModelMaterial(mesh), trees.length);
+        const wire = new THREE.InstancedMesh(
+          geo.clone(),
+          new THREE.MeshBasicMaterial({ color: 0xf5e287, wireframe: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+          trees.length,
+        );
         for (let i = 0; i < trees.length; i++) {
           const tree = trees[i];
           const [wx, wy, wz] = tree.position;
@@ -1826,13 +1975,18 @@ export class TrackScene {
           // same ratio on both axes for any stock slot.
           const [sx, sy, sz] = tree.scale ?? [1, 1, 1];
           scale.set(sx, sy, sz);
-          instanced.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+          matrix.compose(position, quaternion, scale);
+          instanced.setMatrixAt(i, matrix);
+          wire.setMatrixAt(i, matrix);
         }
         instanced.instanceMatrix.needsUpdate = true;
+        wire.instanceMatrix.needsUpdate = true;
         // Trees are scattered across the whole world, so a per-instance frustum test is what
         // culling has to work from; the merged bounds would span the map and never cull.
         instanced.computeBoundingSphere();
+        wire.computeBoundingSphere();
         this._groups.vegetation.add(instanced);
+        this._groups.vegetationWire.add(wire);
       }
     }
   }
@@ -1877,11 +2031,299 @@ export class TrackScene {
       + `\n  cache has: ${Object.keys(this._modelTexCache).join(", ") || "(empty)"}`);
   }
 
+  /*
+    Put a drivable truck in the scene, or take it out again with null.
+
+    The truck's art goes into the same cache the track's models use, so its meshes resolve
+    their textures by the rules already in _createModelMaterial: the MRGL flags, the BackSide
+    winding legacy BIN geometry needs, and the alpha handling. That is the reason
+    buildTruckObject asks for a material factory rather than making its own materials.
+
+    The cache is keyed by texture name, and a truck arrives from a different archive than the
+    track, so a name collision would have one overwrite the other. In practice truck art is
+    named for the truck, and the cost of a collision is a wrong texture rather than a failure.
+  */
+  setDriveTruck(assembly) {
+    this.stopDrive();
+    this._driveTruck?.dispose();
+    this._driveTruck = null;
+    const group = this._groups.driveTruck;
+    while (group.children.length) group.remove(group.children[0]);
+    if (!assembly) {
+      this._renderer.shadowMap.needsUpdate = true;
+      return null;
+    }
+
+    this._modelTexCache = this._modelTexCache ?? {};
+    this._loadModelTextures(assembly.textures ?? []);
+
+    this._driveTruck = buildTruckObject(
+      assembly,
+      (mesh) => this._createModelMaterial(mesh),
+      // Links name their art the way a manifest writes it ("Silver.raw"), so match on the
+      // stem rather than on the exact key the archive happened to use.
+      (name) => this._modelTextureByStem(name)
+    );
+    this._driveTruck.root.traverse((child) => {
+      if (!child.isMesh) return;
+      const material = child.material;
+      if (!material?.transparent && material?.depthWrite && material.blending === THREE.NormalBlending) {
+        child.castShadow = true;
+        material.shadowSide = material.side;
+      }
+    });
+    group.add(this._driveTruck.root);
+    this._renderer.shadowMap.needsUpdate = true;
+    return this._driveTruck;
+  }
+
+  get driveTruck() { return this._driveTruck ?? null; }
+
+  /*
+    Show what the simulation collides with.
+
+    Built from the colliders rather than from the track data on purpose: the complaint this
+    answers is driving into invisible walls, and an invisible wall is precisely a case where
+    the collision geometry and the drawn scenery disagree. A marker layer derived from the
+    track data would agree with the scenery and show nothing.
+  */
+  async setColliderMarkers(colliders) {
+    const group = this._groups.hitboxes;
+    group.userData.dispose?.();
+    group.userData.dispose = null;
+    while (group.children.length) group.remove(group.children[0]);
+    if (!colliders) return;
+
+    const generation = this._driveGeneration;
+    const { buildColliderMarkers } = await import("./drive/collider-markers.js");
+    if (generation !== this._driveGeneration) return;
+    const markers = buildColliderMarkers(colliders);
+    group.userData.dispose = markers.userData.dispose;
+    while (markers.children.length) group.add(markers.children[0]);
+    this._applyVisibility();
+  }
+
+  /*
+    Start driving the truck that is already in the scene.
+
+    The spawn callback is handed to drive mode rather than a fixed point, so that R re-spawns
+    against the track's own start grid every time instead of against wherever the truck
+    happened to be when driving began.
+  */
+  async startDrive(trackData, assembly, onStatus) {
+    if (!this._driveTruck || !trackData || trackData !== this._trackData) return null;
+    const generation = ++this._driveGeneration;
+    const { createDriveMode } = await import("./drive/drive-mode.js");
+    if (generation !== this._driveGeneration || trackData !== this._trackData) return null;
+    const frame = createWorldFrame(trackData);
+
+    this._drive?.stop();
+    this._drive?.dispose();
+    this._drive = createDriveMode({
+      camera: this._camera,
+      element: this._container,
+      frame,
+      assembly,
+      truckObject: this._driveTruck,
+      // Drive mode builds the track's solid objects from this; without it the truck would
+      // drive through every box and ramp on the map.
+      trackData,
+      // Shoved objects have to move on screen as well as in the simulation.
+      onObjectsMoved: (colliders) => {
+        this.applyColliderOffsets(colliders);
+        this._moveColliderMarkers(colliders);
+      },
+      spawn: () => trackSpawnPoint(trackData, frame, assembly),
+      onStatus,
+    });
+
+    // Keep collider markers ready for the Test Drive checkbox, but hidden until requested.
+    this._renderFlags.hitboxes = false;
+    await this.setColliderMarkers(this._drive.colliders);
+    if (generation !== this._driveGeneration || trackData !== this._trackData) return null;
+
+    this._nav.enabled = false;
+    this._drive.start();
+    return this._drive;
+  }
+
+  /*
+    Move the drawn objects that the simulation has shoved.
+
+    These groups are placed with a baked matrix and matrixAutoUpdate off, which is what keeps
+    hundreds of static props cheap. So an offset cannot be written to `position`: nothing would
+    read it. It is composed onto the stored matrix instead, which is also why the original is
+    kept the first time an object moves rather than recomputed from the box each frame.
+
+    Only objects that have actually been displaced are touched, so a track full of static
+    scenery costs one comparison per movable object per frame and nothing else.
+  */
+  applyColliderOffsets(colliders) {
+    if (!colliders || !this._objectsByBox) return;
+    let moved = false;
+    for (const solid of colliders.movables) {
+      const drawn = this._objectsByBox.get(solid.sourceIndex);
+      if (!drawn) continue;
+      const { x, y, z } = solid.offset;
+      const tilted = solid.tilt && (solid.tilt.x !== 0 || solid.tilt.y !== 0 || solid.tilt.z !== 0);
+      if (x === 0 && y === 0 && z === 0 && !tilted) continue;
+      moved = true;
+
+      const move = this._colliderMatrix(solid);
+      for (const node of [drawn.group, drawn.wireGroup]) {
+        if (!node) continue;
+        if (!node.userData.placedMatrix) node.userData.placedMatrix = node.matrix.clone();
+        node.matrix.copy(node.userData.placedMatrix);
+        node.matrix.premultiply(move);
+        node.matrixWorldNeedsUpdate = true;
+      }
+    }
+    if (moved && this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+  }
+
+  /*
+    Where a shoved or fallen object has got to, as a scene matrix.
+
+    Two conversions live here, and both matter. The simulation works in feet and the scene is
+    anisotropic (2 units per foot across, 1.5 up), so a displacement scales per axis. A
+    ROTATION cannot simply be copied across: a rotation R in feet becomes S R S^-1 in scene
+    units, because the scene is a stretched view of the world. Copying R unchanged would leave
+    a toppled lamp post the wrong length as it swung, which is the same mistake that squashed
+    the truck early on.
+
+    The tilt is about the object's base, so the matrix moves the pivot to the origin, turns,
+    and puts it back.
+  */
+  _colliderMatrix(solid) {
+    const H = UNITS_PER_FOOT_H;
+    const V = UNITS_PER_FOOT_V;
+    const move = new THREE.Matrix4().makeTranslation(
+      solid.offset.x * H, solid.offset.y * V, solid.offset.z * H
+    );
+    const tilt = solid.tilt;
+    if (!tilt || (tilt.x === 0 && tilt.y === 0 && tilt.z === 0)) return move;
+
+    const pivot = new THREE.Vector3(
+      (solid.centre.x + solid.pivot.x) * H,
+      (solid.centre.y + solid.pivot.y) * V,
+      (solid.centre.z + solid.pivot.z) * H
+    );
+    const stretch = new THREE.Matrix4().makeScale(H, V, H);
+    const shrink = new THREE.Matrix4().makeScale(1 / H, 1 / V, 1 / H);
+    const rotation = new THREE.Matrix4().makeRotationFromQuaternion(
+      new THREE.Quaternion(tilt.x, tilt.y, tilt.z, tilt.w)
+    );
+    const turn = stretch.multiply(rotation).multiply(shrink);
+
+    return move
+      .multiply(new THREE.Matrix4().makeTranslation(pivot.x, pivot.y, pivot.z))
+      .multiply(turn)
+      .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z));
+  }
+
+  /*
+    Keep the hitbox wireframes on their objects.
+
+    A marker that stayed behind when its object was knocked aside would be worse than no
+    marker: the layer exists to say where the truck will actually hit something.
+  */
+  _moveColliderMarkers(colliders) {
+    if (!colliders || !this._groups.hitboxes.visible) return;
+    for (const marker of this._groups.hitboxes.children) {
+      const solid = marker.userData.collider;
+      if (!solid?.movable && !solid?.moving) continue;
+      marker.position.set(
+        (solid.centre.x + solid.offset.x) * UNITS_PER_FOOT_H,
+        (solid.centre.y + solid.offset.y) * UNITS_PER_FOOT_V,
+        (solid.centre.z + solid.offset.z) * UNITS_PER_FOOT_H
+      );
+      /*
+        A marker follows its object over as well as along. This composes the tilt as a plain
+        rotation rather than through the scene's stretch, unlike the drawn object: the wireframe
+        is a diagnostic, and a degree or so of lean on a toppled box is not worth a matrix.
+      */
+      const tilt = solid.tilt;
+      if (tilt && (tilt.x !== 0 || tilt.y !== 0 || tilt.z !== 0)) {
+        if (!marker.userData.basis) marker.userData.basis = marker.quaternion.clone();
+        marker.quaternion.copy(new THREE.Quaternion(tilt.x, tilt.y, tilt.z, tilt.w))
+          .multiply(marker.userData.basis);
+      }
+    }
+  }
+
+  /** Stop driving and hand the camera back to the fly camera. */
+  stopDrive() {
+    this._driveGeneration++;
+    this._drive?.stop();
+    this._drive?.dispose();
+    this._drive = null;
+    this._nav.enabled = true;
+    // The markers are drive mode's, so they go when it does.
+    this._renderFlags.hitboxes = false;
+    this.setColliderMarkers(null);
+    this._applyVisibility();
+  }
+
+  get drive() { return this._drive ?? null; }
+
+  /** A cached model texture by file stem, ignoring directory and extension. */
+  _modelTextureByStem(name) {
+    if (!name) return null;
+    const stem = (s) => {
+      const upper = String(s).replace(/\\/g, "/").toUpperCase();
+      const title = upper.includes("/") ? upper.slice(upper.lastIndexOf("/") + 1) : upper;
+      return title.replace(/\.[^.]+$/, "");
+    };
+    const want = stem(name);
+    const direct = this._modelTexCache?.[name];
+    if (direct) return direct;
+    for (const key of Object.keys(this._modelTexCache ?? {})) {
+      if (stem(key) === want) return this._modelTexCache[key];
+    }
+    return null;
+  }
+
+  /*
+    Put the truck on the track's start grid.
+
+    The altitude stored with a grid slot is not used. Phase 0 measured what those altitudes
+    actually are: SUMMIT1 parks its trucks 6.00 ft up, ALASKA 9 ft and CRAZY98 10 ft, against
+    a 6.80 ft wheels-just-touching height for BIGFOOT. They are authored drop heights rather
+    than settled poses, so the truck is put on the terrain instead, at the height its own
+    geometry says it rests at.
+
+    Heading: the grid's convention is forward = (sin psi, 0, -cos psi), and a truck model faces
+    -Z at rest, so the chassis turns by -psi. That is the same sign evoModelMatrix uses, and
+    for the same reason: the scene's Z is flipped relative to the editor's.
+
+    @returns the spawn position in feet, or null when there is nothing to spawn on.
+  */
+  spawnDriveTruck(trackData, assembly) {
+    const truck = this._driveTruck;
+    if (!truck || !trackData) return null;
+
+    const frame = createWorldFrame(trackData);
+    const { psi, ...position } = trackSpawnPoint(trackData, frame, assembly);
+    const ground = frame.heightAtFeet(position.x, position.z);
+
+    truck.reset();
+    // Scene units, not feet: the truck is drawn true while the terrain is not, so its height
+    // is measured from the ground under it. See world-frame's toSceneTruckPosition.
+    truck.setPose(
+      frame.toSceneTruckPosition(position, ground),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -psi)
+    );
+    this._renderer.shadowMap.needsUpdate = true;
+    return position;
+  }
+
   _loadModelTextures(modelTextures) {
     for (const { name, rgba, width, height } of modelTextures) {
       const tex = new THREE.DataTexture(new Uint8ClampedArray(rgba), width, height, THREE.RGBAFormat);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.magFilter = tex.minFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+      tex.generateMipmaps = false;
       tex.needsUpdate = true;
       this._modelTexCache[name] = tex;
     }
@@ -1971,6 +2413,8 @@ export class TrackScene {
       }
 
       const solidMesh = new THREE.Mesh(boxGeo, solidMat);
+      solidMesh.castShadow = true;
+      solidMesh.receiveShadow = true;
       solidMesh.position.set(midX, cy, midZ);
       solidGroup.add(solidMesh);
 
@@ -2107,11 +2551,12 @@ export class TrackScene {
   }
 
   /** Places the directional light opposite the direction its light travels. */
-  _applySunDirection() {
+  _applySunDirection(notify = true) {
     const d = this._sunDirection;
     if (!d || !this._sun) return;
-    this._sun.position.set(-d.x * SUN_DISTANCE, -d.y * SUN_DISTANCE, -d.z * SUN_DISTANCE);
-    this._onSunChange?.(this.sunAngles());
+    this._sun.position.copy(this._sun.target.position).addScaledVector(d, -SUN_DISTANCE);
+    this._renderer.shadowMap.needsUpdate = true;
+    if (notify) this._onSunChange?.(this.sunAngles());
   }
 
   setSunChangeCallback(fn) { this._onSunChange = fn; }

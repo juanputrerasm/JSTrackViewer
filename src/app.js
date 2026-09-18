@@ -4,7 +4,10 @@ import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes } from "./zip-utils.js";
 
 const APP_TITLE = "JSTrackViewer";
+const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · V Camera · R Reset";
 const OPFS_PATH = "track-viewer/current.pod";
+// Track and truck archives have separate OPFS paths and separate indexes in the worker.
+const TRUCK_OPFS_PATH = "track-viewer/truck.pod";
 const WORKER_URL = new URL("./worker/track-worker.js", import.meta.url);
 
 export class TrackViewerApp {
@@ -15,21 +18,26 @@ export class TrackViewerApp {
     this._currentPodPath = null;
     this._podFilename = "";
     this._podSource = "—";
+    this._truckChoices = [];
+    this._truckAssembly = null;
+    this._truckAssemblyName = null;
+    this._driveRequestId = 0;
     // Traxx ALTITUDESCALE = 3 (Traxx/TraxxView.h:43). Terrain and object heights both
     // derive from it, so anything else renders the whole track vertically exaggerated.
     this._heightScale = 3;
     this._renderFlags = {
       terrain: true, textures: true, grid: false,
       courses: false, objects: true, gboxes: true,
-      cboxes: false, water: true, backdrop: true, shadows: true,
-      wireframe: false, trucks: true, billboards: true, checkpoints: true,
+      cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true,
+      wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
-      racetrack: true, underground: true,
+      racetrack: true, underground: true, terrainOverlap: true,
     };
   }
 
   mount(doc) {
     this._doc = doc;
+    this._viewerControls = doc.getElementById("nav-hint").textContent.trim();
 
     // Init worker
     this._worker = new WorkerClient(WORKER_URL.href);
@@ -37,6 +45,11 @@ export class TrackViewerApp {
     // Init scene
     const viewport = doc.getElementById("viewport");
     this._scene = new TrackScene(viewport);
+    const smoothTexturesToggle = doc.getElementById("tog-smooth-textures");
+    smoothTexturesToggle.addEventListener("change", () => {
+      this._scene.setTextureSmoothingEnabled(smoothTexturesToggle.checked);
+    });
+    this._scene.setTextureSmoothingEnabled(smoothTexturesToggle.checked);
     this._minimap = new Minimap(doc.getElementById("minimap"), doc.getElementById("minimap-panel"), (x, z) => {
       this._scene.nav?.moveToWorldPosition(x, z);
     });
@@ -62,6 +75,7 @@ export class TrackViewerApp {
 
     // Clear temp
     doc.getElementById("clear-temp-btn").addEventListener("click", async () => {
+      this._stopDrivingForChange();
       await resetSessionFolder("track-viewer");
       this._scene.clearTrack();
       this._setStatus("Temp cleared.");
@@ -76,6 +90,17 @@ export class TrackViewerApp {
       if (!isNaN(idx)) this._loadTrackChoice(idx);
     });
 
+    // Test Drive: a truck comes from its own POD, so it has its own file input.
+    const truckInput = doc.getElementById("truck-file-input");
+    doc.getElementById("open-truck-btn").addEventListener("click", () => truckInput.click());
+    truckInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (file) this._loadTruckFromFile(file);
+      truckInput.value = "";
+    });
+    doc.getElementById("truck-select").addEventListener("change", () => this._selectTruck());
+    doc.getElementById("drive-btn").addEventListener("click", () => this._toggleDrive());
+
     // Camera reset
     doc.getElementById("reset-cam-btn").addEventListener("click", () => {
       const td = this._scene?._trackData;
@@ -88,6 +113,7 @@ export class TrackViewerApp {
     const toggleMap = {
       "tog-terrain":   "terrain",
       "tog-textures":  "textures",
+      "tog-terrain-overlap": "terrainOverlap",
       "tog-grid":      "grid",
       "tog-courses":   "courses",
       "tog-objects":   "objects",
@@ -99,6 +125,7 @@ export class TrackViewerApp {
       "tog-underground": "underground",
       "tog-water":     "water",
       "tog-backdrop":  "backdrop",
+      "tog-sunlight":  "sunlight",
       "tog-shadows":   "shadows",
       "tog-wireframe": "wireframe",
       "tog-trucks":    "trucks",
@@ -107,6 +134,9 @@ export class TrackViewerApp {
       "tog-tunnels":   "tunnels",
       "tog-powerups":  "powerups",
       "tog-animate":   "animate",
+      // Lives in the Test Drive panel rather than View Options: it shows what the simulation
+      // collides with, which only means anything while driving.
+      "tog-hitboxes":  "hitboxes",
     };
     this._toggleMap = toggleMap;
     for (const [id, flag] of Object.entries(toggleMap)) {
@@ -133,7 +163,7 @@ export class TrackViewerApp {
         const collapsed = panel.classList.toggle("collapsed");
         heading.setAttribute("aria-expanded", collapsed ? "false" : "true");
       };
-      heading.setAttribute("aria-expanded", "true");
+      heading.setAttribute("aria-expanded", panel.classList.contains("collapsed") ? "false" : "true");
       heading.addEventListener("click", toggle);
       heading.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
@@ -224,6 +254,7 @@ export class TrackViewerApp {
   }
 
   async _loadFromFile(file, source = "Local file") {
+    this._stopDrivingForChange();
     this._setStatus(`Reading ${file.name}…`);
     this._showLoading(`Reading ${file.name}…`);
     try {
@@ -232,12 +263,14 @@ export class TrackViewerApp {
       await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
+      this._updateTruckButtons();
     } finally {
       this._hideLoading();
     }
   }
 
   async _loadFromUrl(url) {
+    this._stopDrivingForChange();
     this._setStatus(`Fetching…`);
     this._showLoading("Fetching from URL…");
     try {
@@ -249,6 +282,7 @@ export class TrackViewerApp {
       await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
+      this._updateTruckButtons();
     } finally {
       this._hideLoading();
     }
@@ -279,6 +313,9 @@ export class TrackViewerApp {
     this._setStatus("Indexing POD…");
     const { comment, entryCount } = await this._worker.call("indexPod", { opfsPodPath: OPFS_PATH });
     this._setStatus(`POD indexed: ${entryCount} entries.`);
+    this._scene.clearTrack();
+    this._clearTrackInfo();
+    this._hideTrackPicker();
 
     const { choices } = await this._worker.call("listTrackChoices", {});
     this._choices = choices;
@@ -302,6 +339,7 @@ export class TrackViewerApp {
     const choice = this._choices[choiceIndex];
     if (!choice) return;
 
+    this._stopDrivingForChange();
     this._setStatus(`Loading "${choice.name}"…`);
     this._showLoading(`Loading ${choice.name}…`);
     try {
@@ -309,7 +347,12 @@ export class TrackViewerApp {
         choiceIndex,
         heightScale: this._heightScale,
       });
+      this._renderFlags.checkpoints = !["MTM1", "MTM2", "EVO1", "EVO2", "CPR"].includes(result.origin);
+      this._doc.getElementById("tog-checkpoints").checked = this._renderFlags.checkpoints;
       this._scene.setTrack(result, this._renderFlags, this._heightScale);
+      if (this._truckAssembly) {
+        this._scene.setDriveTruck(this._truckAssembly);
+      }
       this._minimap.setTrack(result);
       this._minimap.updateCamera(this._scene.nav);
       this._updateTrackInfo(result);
@@ -322,8 +365,183 @@ export class TrackViewerApp {
       this._showError(`Error loading track: ${err.message}`);
       console.error(err);
     } finally {
+      this._updateTruckButtons();
       this._hideLoading();
     }
+  }
+
+  _stopDrivingForChange() {
+    const wasDriving = this._scene.drive?.isActive;
+    this._driveRequestId++;
+    this._scene.stopDrive();
+    this._renderFlags.hitboxes = false;
+    this._setDrivingUi(false);
+    this._doc.getElementById("drive-btn").disabled = true;
+    if (wasDriving) this._setTruckInfo("Status", "Drive stopped. Truck remains loaded.");
+  }
+
+  _setDrivingUi(driving) {
+    this._doc.getElementById("drive-btn").textContent = driving ? "Stop test drive" : "Drive";
+    this._doc.getElementById("nav-hint").textContent = driving ? DRIVE_CONTROLS : this._viewerControls;
+    const hitboxes = this._doc.getElementById("tog-hitboxes");
+    hitboxes.disabled = !driving;
+    if (!driving) hitboxes.checked = false;
+  }
+
+  _updateTruckButtons() {
+    const ready = !!(this._scene._trackData && (this._truckChoices.length || this._truckAssembly));
+    this._doc.getElementById("drive-btn").disabled = !ready;
+  }
+
+  async _loadTruckFromFile(file) {
+    this._stopDrivingForChange();
+    this._showLoading(`Reading ${file.name}…`);
+    try {
+      const buffer = await file.arrayBuffer();
+      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name, "Local file");
+      // Deliberately no resetSessionFolder here; see TRUCK_OPFS_PATH.
+      await writeBytesToFile(TRUCK_OPFS_PATH, staged.bytes);
+
+      const { trucks } = await this._worker.call("indexTruckPod", { opfsPodPath: TRUCK_OPFS_PATH });
+      this._truckChoices = trucks ?? [];
+      this._truckAssembly = null;
+      this._truckAssemblyName = null;
+      this._scene.setDriveTruck(null);
+      this._populateTruckPicker();
+      if (!this._truckChoices.length) {
+        this._setTruckInfo("Status", `${staged.filename} contains no TRUCK/*.TRK.`);
+        return;
+      }
+      this._setTruckInfo("Status", `${this._truckChoices.length} truck${this._truckChoices.length === 1 ? "" : "s"} found. Click Drive to load one.`);
+    } catch (err) {
+      this._showError(`Error loading truck: ${err.message}`);
+      console.error(err);
+    } finally {
+      this._updateTruckButtons();
+      this._hideLoading();
+    }
+  }
+
+  _populateTruckPicker() {
+    const row = this._doc.getElementById("truck-picker-row");
+    const select = this._doc.getElementById("truck-select");
+    select.innerHTML = "";
+    this._truckChoices.forEach((truck, i) => {
+      const opt = document.createElement("option");
+      opt.value = i;
+      opt.textContent = truck.name || truck.title;
+      select.appendChild(opt);
+    });
+    row.hidden = this._truckChoices.length === 0;
+  }
+
+  _selectTruck() {
+    const index = parseInt(this._doc.getElementById("truck-select").value, 10) || 0;
+    const choice = this._truckChoices[index];
+    if (!choice) return;
+
+    this._stopDrivingForChange();
+    if (choice.normalizedName !== this._truckAssemblyName) {
+      this._truckAssembly = null;
+      this._truckAssemblyName = null;
+      this._scene.setDriveTruck(null);
+    }
+    this._setTruckInfo("Status", `${choice.name}. Click Drive to start.`);
+    this._updateTruckButtons();
+  }
+
+  async _ensureSelectedTruck(requestId, trackData) {
+    const index = parseInt(this._doc.getElementById("truck-select").value, 10) || 0;
+    const choice = this._truckChoices[index];
+    if (!choice) return null;
+    if (this._truckAssembly && this._truckAssemblyName === choice.normalizedName) {
+      if (!this._scene.driveTruck) this._scene.setDriveTruck(this._truckAssembly);
+      return this._truckAssembly;
+    }
+
+    this._showLoading(`Assembling ${choice.name}…`);
+    const assembly = await this._worker.call("loadTruck", { normalizedName: choice.normalizedName });
+    if (requestId !== this._driveRequestId || trackData !== this._scene._trackData) return null;
+    this._truckAssembly = assembly;
+    this._truckAssemblyName = choice.normalizedName;
+    this._scene.setDriveTruck(assembly);
+    if (assembly.warnings?.length) console.warn("[JSTrackViewer] truck:", assembly.warnings);
+    return assembly;
+  }
+
+  async _toggleDrive() {
+    const button = this._doc.getElementById("drive-btn");
+    const trackData = this._scene?._trackData;
+    if (!trackData || (!this._truckChoices.length && !this._truckAssembly)) return;
+
+    if (this._scene.drive?.isActive) {
+      this._scene.stopDrive();
+      this._renderFlags.hitboxes = false;
+      this._setDrivingUi(false);
+      this._setTruckInfo("Status", "Parked. The fly camera has the controls again.");
+      return;
+    }
+
+    const requestId = ++this._driveRequestId;
+    button.disabled = true;
+    try {
+      const assembly = await this._ensureSelectedTruck(requestId, trackData);
+      if (!assembly || requestId !== this._driveRequestId || trackData !== this._scene._trackData) return;
+      const drive = await this._scene.startDrive(trackData, assembly, (status) => this._showDriveStatus(status));
+      if (!drive || requestId !== this._driveRequestId) return;
+      this._setDrivingUi(true);
+      this._doc.getElementById("viewport")?.focus();
+    } catch (err) {
+      if (requestId === this._driveRequestId) {
+        this._showError(`Error starting test drive: ${err.message}`);
+        console.error(err);
+      }
+    } finally {
+      if (requestId === this._driveRequestId) {
+        this._hideLoading();
+        this._updateTruckButtons();
+      }
+    }
+  }
+
+  /*
+    The driving readout. Arrow keys drive, so this also says where the keys went: a viewer
+    whose arrow keys suddenly stop panning the camera needs to be told why.
+  */
+  _showDriveStatus(status) {
+    const dl = this._doc.getElementById("truck-info");
+    if (!dl) return;
+    const rows = [];
+    if (status.speed !== undefined) rows.push(["Speed", `${status.speed.toFixed(0)} mph`]);
+    if (status.gear !== undefined) rows.push(["Gear", status.airborne ? `${status.gear} (airborne)` : String(status.gear)]);
+    if (status.rpm !== undefined) rows.push(["Engine", `${status.rpm.toFixed(0)} rpm`]);
+    if (status.view) rows.push(["View", status.view]);
+
+    /*
+      Race rows only appear on a track that has checkpoints. A drag strip or a stadium has
+      none, and showing "Lap 0" with a gate count of zero would be stating something the
+      track does not have.
+    */
+    const race = status.race;
+    if (race?.gateCount) {
+      const clock = (seconds) => {
+        const m = Math.floor(seconds / 60);
+        const s = seconds - m * 60;
+        return m > 0 ? `${m}:${s.toFixed(2).padStart(5, "0")}` : `${s.toFixed(2)}s`;
+      };
+      rows.push(["Lap", String(race.lap)]);
+      rows.push(["Checkpoint", `${race.next + 1} of ${race.gateCount}`]);
+      rows.push(["Lap time", clock(race.lapTime)]);
+      if (race.bestLap !== null) rows.push(["Best lap", clock(race.bestLap)]);
+    }
+    if (!rows.length) return;
+    dl.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  }
+
+  _setTruckInfo(label, value) {
+    const dl = this._doc.getElementById("truck-info");
+    if (!dl) return;
+    dl.innerHTML = `<dt>${label}</dt><dd>${value}</dd>`;
   }
 
   _populateTrackPicker(choices, filename) {
@@ -509,10 +727,8 @@ export class TrackViewerApp {
   /*
     Shows only the toggles the loaded track has something for.
 
-    A View Options panel that offers Tunnels, Powerups and Nav points on an MTM track, or
-    Ground boxes on an Evo one, is nineteen controls of which a third do nothing. Which ones
-    those are is answered by the scene, from the layers it actually built, rather than by a
-    table here of what each game is supposed to carry - see TrackScene.layerPresence.
+    Markers and View Options only show controls backed by the loaded track. The scene answers
+    that from the layers it actually built; see TrackScene.layerPresence.
 
     Passing null restores the full set, which is the right state with no track loaded: nothing
     is known to be absent yet.
@@ -634,11 +850,12 @@ function displayBackgroundModel(data) {
   // field should name. Without this an arena track reports no background model at all,
   // which is now visibly untrue.
   const arena = data.arena?.modelName ? data.arena : null;
-  const name = arena?.modelName || data.backdropModelName || "";
+  const names = data.backdropModelNames?.length ? data.backdropModelNames : (data.backdropModelName ? [data.backdropModelName] : []);
+  const name = arena?.modelName || names[0] || "";
   if (!name) return "—";
   const model = data.models?.[name];
   const format = model?.format ? ` (${model.format})` : "";
-  return arena ? `${name}${format}, arena` : `${name}${format}`;
+  return arena ? `${name}${format}, arena` : names.length > 1 ? `${name}${format} + ${names.length - 1} more` : `${name}${format}`;
 }
 
 /*

@@ -45,19 +45,12 @@
           <canvas id="minimap" class="minimap" width="220" height="220"></canvas>
         </section>
 
-        <section class="panel">
-          <h2>View Options</h2>
+        <section class="panel" id="markers-panel">
+          <h2>Markers</h2>
           <div class="toggle-grid">
-            <label><input type="checkbox" id="tog-terrain" checked> Terrain</label>
-            <label><input type="checkbox" id="tog-textures" checked> Textures</label>
             <label><input type="checkbox" id="tog-grid"> Grid</label>
-            <label><input type="checkbox" id="tog-courses"> Courses</label>
-            <label><input type="checkbox" id="tog-objects" checked> Objects</label>
-            <label><input type="checkbox" id="tog-billboards" checked> Billboard</label>
-            <label><input type="checkbox" id="tog-checkpoints" checked> Checkpoints</label>
-            <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
-            <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
-            <label><input type="checkbox" id="tog-racetrack" checked> Racetrack</label>
+            <label><input type="checkbox" id="tog-courses"> Course markers</label>
+            <label><input type="checkbox" id="tog-checkpoints"> Checkpoints</label>
             <label><input type="checkbox" id="tog-underground" checked> Underground</label>
             <label><input type="checkbox" id="tog-wireframe"> Wireframe</label>
             <label><input type="checkbox" id="tog-trucks" checked> Trucks</label>
@@ -65,10 +58,26 @@
             <label><input type="checkbox" id="tog-cpmarkers" checked> CP markers</label>
             <label><input type="checkbox" id="tog-tunnels" checked> Tunnels</label>
             <label><input type="checkbox" id="tog-powerups" checked> Powerups</label>
-            <label><input type="checkbox" id="tog-animate" checked> Animate</label>
+          </div>
+        </section>
+
+        <section class="panel collapsed" id="view-options-panel">
+          <h2>View Options</h2>
+          <div class="toggle-grid">
+            <label><input type="checkbox" id="tog-terrain" checked> Terrain</label>
+            <label><input type="checkbox" id="tog-textures" checked> Textures</label>
+            <label><input type="checkbox" id="tog-smooth-textures" checked> Smooth textures</label>
+            <label><input type="checkbox" id="tog-terrain-overlap" checked> 2px overlap</label>
+            <label><input type="checkbox" id="tog-objects" checked> Objects</label>
+            <label><input type="checkbox" id="tog-billboards" checked> Facing models</label>
+            <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
+            <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
+            <label><input type="checkbox" id="tog-racetrack" checked> Racetrack</label>
+            <label><input type="checkbox" id="tog-animate" checked> Animated Tex</label>
             <label><input type="checkbox" id="tog-water" checked> Water</label>
             <label><input type="checkbox" id="tog-backdrop" checked> Background</label>
-            <label><input type="checkbox" id="tog-shadows" checked> Sun light</label>
+            <label><input type="checkbox" id="tog-sunlight" checked> Sun light</label>
+            <label><input type="checkbox" id="tog-shadows" checked> Shadows</label>
           </div>
           <div class="slider-row">
             <label for="grid-span-slider">Distance</label>
@@ -78,7 +87,29 @@
           <button id="reset-cam-btn" type="button" class="full-btn">Reset Camera (Home)</button>
         </section>
 
-        <section class="panel" id="sun-panel">
+        <section class="panel" id="track-data-panel">
+          <h2>Track Data</h2>
+          <dl id="track-info" class="kv-list">
+            <dt>Status</dt><dd>No track loaded.</dd>
+          </dl>
+        </section>
+
+        <section class="panel" id="drive-panel">
+          <h2>Test Drive</h2>
+          <input id="truck-file-input" type="file" accept=".pod,.zip" hidden>
+          <button id="open-truck-btn" type="button" class="full-btn">Load truck POD</button>
+          <div class="slider-row" id="truck-picker-row" hidden>
+            <label for="truck-select">Truck</label>
+            <select id="truck-select"></select>
+          </div>
+          <button id="drive-btn" type="button" class="full-btn" disabled>Drive</button>
+          <label><input type="checkbox" id="tog-hitboxes" disabled> Show hitboxes</label>
+          <dl id="truck-info" class="kv-list">
+            <dt>Status</dt><dd>No truck loaded.</dd>
+          </dl>
+        </section>
+
+        <section class="panel collapsed" id="sun-panel">
           <h2>Sun</h2>
           <dl id="sun-info" class="kv-list"></dl>
           <div class="slider-row">
@@ -104,14 +135,7 @@
           <button id="reset-sun-btn" type="button" class="full-btn">Restore Track Sun</button>
         </section>
 
-        <section class="panel">
-          <h2>Track Data</h2>
-          <dl id="track-info" class="kv-list">
-            <dt>Status</dt><dd>No track loaded.</dd>
-          </dl>
-        </section>
-
-        <section class="panel" id="stats-panel" hidden>
+        <section class="panel collapsed" id="stats-panel" hidden>
           <h2>Stats</h2>
           <dl id="track-stats" class="kv-list">
             <dt>Status</dt><dd>No track loaded.</dd>

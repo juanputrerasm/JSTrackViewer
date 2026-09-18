@@ -1,4 +1,5 @@
 import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
+import { findAllTruckManifests } from "./truck/pod-lookup.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
 import { collectMtmCheckpoints } from "./checkpoint-list.js";
 import { HB_UNDERGROUND_BIAS } from "./hb-underground.js";
@@ -11,6 +12,18 @@ let podOpfsPath = null;
 
 // Cache for POD entry bytes (keyed by "offset_length")
 const _byteCache = new Map();
+
+/*
+  Drive mode's truck comes out of a SECOND archive.
+
+  Trucks ship in their own pods (TRUCK\<name>.TRK plus MODELS\ and ART\), and the track has to
+  stay loaded while one is chosen, so the two cannot share a slot. This is a parallel set of
+  the same three pieces of state rather than a rework of the track's into named slots, which
+  keeps every existing track call site untouched.
+*/
+let truckPodIndex = null;
+let truckPodOpfsPath = null;
+const _truckByteCache = new Map();
 
 /*
   Announce that the module graph evaluated.
@@ -47,6 +60,20 @@ self.onmessage = async (event) => {
       if (choiceIndex < 0 || choiceIndex >= choices.length) throw new Error(`Invalid choice: ${choiceIndex}`);
       result = await loadTrackAsync(podIndex, podOpfsPath, choices[choiceIndex], heightScale ?? 3);
 
+    } else if (type === "indexTruckPod") {
+      truckPodOpfsPath = payload.opfsPodPath;
+      _truckByteCache.clear();
+      truckPodIndex = await indexPodFile(truckPodOpfsPath);
+      result = { entryCount: truckPodIndex.entries.length, trucks: listTruckChoices() };
+
+    } else if (type === "listTrucks") {
+      if (!truckPodIndex) throw new Error("No truck POD indexed.");
+      result = { trucks: listTruckChoices() };
+
+    } else if (type === "loadTruck") {
+      if (!truckPodIndex) throw new Error("No truck POD indexed.");
+      result = await loadTruckAsync(payload?.normalizedName ?? "");
+
     } else {
       throw new Error(`Unknown message type: ${type}`);
     }
@@ -65,6 +92,56 @@ async function getBytes(entry) {
   const bytes = await readPodEntryBytes(podOpfsPath, entry);
   _byteCache.set(k, bytes);
   return bytes;
+}
+
+/** The trucks an indexed truck pod offers, for the picker. */
+function listTruckChoices() {
+  return findAllTruckManifests(truckPodIndex).map((entry) => ({
+    normalizedName: entry.normalizedName,
+    title: entry.title,
+    name: entry.title.replace(/\.TRK$/i, ""),
+  }));
+}
+
+async function truckBytes(entry) {
+  const k = entry.offset + "_" + entry.length;
+  const cached = _truckByteCache.get(k);
+  if (cached) return cached;
+  const bytes = await readPodEntryBytes(truckPodOpfsPath, entry);
+  _truckByteCache.set(k, bytes);
+  return bytes;
+}
+
+/*
+  Assemble one truck, ready for the scene and the simulation.
+
+  The assembly reads bytes synchronously, the same shape the track parsers use, so every entry
+  is fetched and cached first. A truck pod is a few megabytes, far smaller than a track's.
+*/
+async function loadTruckAsync(normalizedName) {
+  const { parseTruckManifestText } = await import("./truck/trk-parser.js");
+  const { assembleTruck } = await import("./truck/truck-assembly.js");
+
+  const manifests = findAllTruckManifests(truckPodIndex);
+  const manifestEntry = normalizedName
+    ? truckPodIndex.entries.find((entry) => entry.normalizedName === normalizedName)
+    : manifests[0];
+  if (!manifestEntry) {
+    throw new Error(normalizedName
+      ? `Truck not found in POD: ${normalizedName}`
+      : "This POD contains no TRUCK/*.TRK manifest.");
+  }
+
+  await Promise.all(truckPodIndex.entries.map((entry) => truckBytes(entry).catch(() => {})));
+  const syncGetBytes = (entry) => {
+    const bytes = _truckByteCache.get(entry.offset + "_" + entry.length);
+    if (!bytes) throw new Error(`Cache miss for ${entry.name} (offset ${entry.offset})`);
+    return bytes;
+  };
+
+  // Manifests are ISO-8859-1 text, like every other string in these archives.
+  const text = new TextDecoder("iso-8859-1").decode(syncGetBytes(manifestEntry));
+  return assembleTruck(truckPodIndex, syncGetBytes, parseTruckManifestText(text));
 }
 
 async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
@@ -130,9 +207,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     const model = loadModel(name);
     if (model) doc.models[name] = model;
   }
-  if (doc.backdropModelName && !doc.models[doc.backdropModelName]) {
-    const model = loadModel(doc.backdropModelName);
-    if (model) doc.models[doc.backdropModelName] = model;
+  for (const name of doc.backdropModelNames ?? (doc.backdropModelName ? [doc.backdropModelName] : [])) {
+    if (doc.models[name]) continue;
+    const model = loadModel(name);
+    if (model) doc.models[name] = model;
   }
   if (doc.arena?.modelName && !doc.models[doc.arena.modelName]) {
     const model = loadModel(doc.arena.modelName);
@@ -454,6 +532,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     } : null,
     skyTexture: skyTextureDecoded,
     backdropModelName: doc.backdropModelName ?? null,
+    backdropModelNames: doc.backdropModelNames ?? [],
     arena,
     primaryCourse: serializeCourse(doc.primaryCourse),
     extendedCourses: doc.extendedCourses.map(serializeCourse),
