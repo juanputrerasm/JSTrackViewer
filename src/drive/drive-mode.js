@@ -17,6 +17,7 @@ import { createColliders } from "./colliders.js";
 import { createCheckpoints } from "./checkpoints.js";
 import { createDriveInput } from "./drive-input.js";
 import { createDriveCameras } from "./drive-cameras.js";
+import { groundForSpawn } from "./spawn-point.js";
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./world-frame.js";
 
 const STEP = 1 / 120;
@@ -143,7 +144,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
     if (!best) return null;
     return {
       x: best.point.x,
-      y: frame.heightAtFeet(best.point.x, best.point.z) + (assembly?.restHeight ?? 6.8),
+      y: groundForSpawn(frame, colliders, best.point.x, best.point.z) + (assembly?.restHeight ?? 6.8),
       z: best.point.z,
       psi: best.psi,
     };

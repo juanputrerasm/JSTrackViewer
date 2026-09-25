@@ -34,6 +34,8 @@ export class TrackCamera {
       ended.
     */
     this.enabled = true;
+    // Multiplier on forward/back and A/Z height speed, set from the Navigation panel slider.
+    this.speedFactor = 1;
     this._dragging = false;
     this._lastMouse = { x: 0, y: 0 };
     this._gridSpan = 64;
@@ -158,12 +160,17 @@ export class TrackCamera {
     this._applyToCamera();
   }
 
+  /** Scales arrow-key travel and A/Z climb; turning and pitch keep their own rates. */
+  setSpeedFactor(factor) {
+    this.speedFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  }
+
   update(dt) {
     if (!this.enabled) return;
     const keys = this._keys;
     const worldSize = this._trackGridSize * this._trackCellSize;
-    const moveSpeed = MOVE_SPEED_BASE * (worldSize / 16384);
-    const heightSpeed = HEIGHT_SPEED_BASE * (worldSize / 16384);
+    const moveSpeed = MOVE_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
+    const heightSpeed = HEIGHT_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
 
     if (keys.has("ArrowLeft"))  this.yaw -= TURN_SPEED * dt;
     if (keys.has("ArrowRight")) this.yaw += TURN_SPEED * dt;

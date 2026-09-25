@@ -6,6 +6,7 @@ import { HB_UNDERGROUND_BIAS } from "./hb-underground.js";
 import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
 import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
+import { decodeHeightSample } from "../shared/terrain-height.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -529,6 +530,9 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       ...terrainMesh,
       rawData: doc.terrain.rawData ? doc.terrain.rawData.slice().buffer : null,
       rawBytesPerCell: doc.terrain.rawBytesPerCell ?? 1,
+      heightDivisor: doc.terrain.heightDivisor ?? null,
+      heightUnitScale: doc.terrain.heightUnitScale ?? 1,
+      cellSplit: doc.terrain.cellSplit ?? "fixed",
     } : null,
     skyTexture: skyTextureDecoded,
     backdropModelName: doc.backdropModelName ?? null,
@@ -768,7 +772,10 @@ function placeArena(arena, model, terrain, heightScale, cellSize) {
 }
 
 
-/* CTrackPODTerrain::GetRawAtPoint (TrackPODTerrain.cpp:385-391): wraps, never clamps. */
+/*
+  CTrackPODTerrain::GetRawAtPoint (TrackPODTerrain.cpp:385-391): wraps, never clamps. The
+  sample itself goes through the shared decode, so a 16-bit grid keeps its fraction.
+*/
 function rawHeightAtCell(terrain, gx, gy) {
   const raw = terrain?.rawData;
   const gridSize = terrain?.gridSize ?? 256;
@@ -777,12 +784,8 @@ function rawHeightAtCell(terrain, gx, gy) {
   const bytesPerCell = terrain.rawBytesPerCell ?? 1;
   const x = ((gx % gridSize) + gridSize) % gridSize;
   const y = ((gy % gridSize) + gridSize) % gridSize;
-  const off = (x + y * gridSize) * bytesPerCell;
-
-  if (bytesPerCell === 1) return raw[off] ?? 0;
-  const lo = raw[off] ?? 0;
-  const hi = raw[off + 1] ?? 0;
-  return hi === 0 ? lo : (lo | (hi << 8)) >>> 6;
+  return decodeHeightSample(raw, (x + y * gridSize) * bytesPerCell, bytesPerCell,
+                            terrain.heightDivisor ?? null, terrain.heightUnitScale ?? 1);
 }
 
 

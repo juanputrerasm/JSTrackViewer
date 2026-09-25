@@ -22,7 +22,9 @@
     box placement   traxxPrismMatrix(psi, theta, phi, wx, wz * heightScale, worldSize - wy)
     box extents     width / length / height are HALF extents as authored (scene.js doubles
                     them only because THREE.BoxGeometry takes full sizes)
-    model placement traxxModelMatrix(psi, theta, phi, wx, wz * hs + baseZ * 0.75, worldSize - wy)
+    model placement traxxModelMatrix(psi, theta, phi, wx, wz * hs, worldSize - wy) turning the mesh
+                    moved back onto its own origin (anchor), for the SIT family; other games
+                    keep wz * hs + baseZ * 0.75 on the recentred mesh
     ramp            the same eight corners with the top of the low edge unused, climbing from
                     the -y edge to the +y edge in Traxx space
     ground boxes    64 unit columns centred on midX / midY, from lower * hs to upper * hs
@@ -33,6 +35,7 @@
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./world-frame.js";
 import { buildMeshShape, meshRay, meshSegmentContact, meshSupport, traxxRotationRows } from "./mesh-collider.js";
 import { isVegetationModel, trunkCollisionModel } from "./vegetation-collision.js";
+import { buildRaceTrackShapes } from "./racetrack-collider.js";
 
 /*
   Which box types are solid.
@@ -128,7 +131,10 @@ export function createColliders(trackData, frame) {
   };
 
   function addModelSolid(common, model, placement) {
-    const shape = buildMeshShape(model, placement, trackData);
+    addShapeSolid(common, buildMeshShape(model, placement, trackData));
+  }
+
+  function addShapeSolid(common, shape) {
     if (!shape) return;
     const { bounds } = shape;
     solids.push(finishSolid({
@@ -268,6 +274,20 @@ export function createColliders(trackData, frame) {
       tilt: IDENTITY, spin: { x: 0, y: 0, z: 0 }, fallen: false,
       modelName: tree.modelName,
     }, trunkOf(tree.modelName, model), { ...tree, evoVegetation: true });
+  }
+
+  /*
+    The CPR road layer: its surface carries the wheels and its walls stop the truck. Static
+    scenery with no box behind it, so it has no sourceIndex and nothing in the scene to move.
+    See racetrack-collider.js.
+  */
+  for (const shape of buildRaceTrackShapes(trackData)) {
+    addShapeSolid({
+      type: 0, sourceIndex: -1, mass: 0, movable: false, moving: false,
+      offset: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
+      tilt: IDENTITY, spin: { x: 0, y: 0, z: 0 }, fallen: false,
+      modelName: "", raceTrack: true,
+    }, shape);
   }
 
   /*

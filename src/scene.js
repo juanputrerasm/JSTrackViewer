@@ -1,10 +1,12 @@
 import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
+import { heightAtCell, LEGACY_ALTITUDE_DIVISOR } from "./shared/terrain-height.js";
 import { TrackCamera } from "./nav.js";
 import { buildTruckObject } from "./drive/truck-object.js";
 import { createWorldFrame } from "./drive/world-frame.js";
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./drive/world-frame.js";
-import { trackSpawnPoint } from "./drive/spawn-point.js";
+import { groundForSpawn, trackSpawnPoint } from "./drive/spawn-point.js";
+import { createRaceTrackSupport } from "./drive/racetrack-collider.js";
 import {
   CPR_WALL_LAYERS,
   CPR_WALL_PART_HEIGHT_FT,
@@ -14,6 +16,10 @@ import {
   cprTextureSlice,
   cprTextureU,
   cprFeetToWorldY,
+  cprPointToScene,
+  cprSegmentPairs,
+  cprVisibleSlots,
+  isDegenerateSlot,
 } from "./shared/cpr-track-schema.js";
 
 // The u1..u4 a CPR section falls back to when the .TRK has none: 16.16 fixed point for 4.0
@@ -206,6 +212,26 @@ function traxxPrismMatrix(psi, theta, phi, posX, posY, posZ) {
        -r1[0],    -r1[2],     r1[1], posZ,
             0,         0,         0,    1
   );
+}
+
+/*
+  True for the SIT family (MTM1, MTM2, CPR), whose models the scene turns about their own origin.
+
+  ⛔ A SIT ALTITUDE IS WHERE THE MODEL'S ORIGIN GOES, AND THE MODEL TURNS ABOUT THAT ORIGIN.
+  Traxx rotates the raw vertices and adds ipos (OpenGLTerrainRenderer.cpp
+  NativeObjectStackLocalStackPoint; CalculateBoxLocations for the altitude), and basez is only
+  the editor's "assign model" step, which raises ipos by the model's depth below its origin so
+  the base lands on the ground. The decoder instead recentres every mesh on its bounding box
+  with the base at zero (buildMeshes), and this scene used to turn that recentred mesh and then
+  add baseZ straight down in world space. Upright, the two agree to within the -31 in basez.
+  Turned over, they do not: an upside-down model hung from its base and was then pushed down
+  again, a whole model height too low. Terramar's upper bridge rails, rolled 180 degrees, sank
+  into the deck beside the rails beneath it, where MTM2 draws them standing on it. Recentring
+  also moved any model whose bounds are not centred on its origin sideways by the difference.
+  TV and Fury3 keep the old placement until their own renderer says otherwise.
+*/
+function traxxTrueOrigin(origin) {
+  return !isEvoOrigin(origin) && origin !== "HB" && origin !== "TV" && origin !== "F3" && origin !== "TV/F3";
 }
 
 /** True for the two 4x4 Evolution generations, which share one placement convention. */
@@ -1004,37 +1030,24 @@ export class TrackScene {
     Markers land on cell centres, so averaging the cell's four corners is the bilinear height
     at the point the marker actually occupies rather than the height of one of its corners.
 
-    A 16-bit heightfield is read two ways, because two games write one. Evo states its own
-    divisor on the terrain record (11.5 fixed point, so 32), and anything else is the MTM
-    reading of `>>> 6`. Running Evo through the MTM branch returns half the real height, and
-    its `hi === 0` shortcut - a guard for MTM tracks that store an 8-bit range in 16-bit
-    cells - returns the raw sample unscaled for any Evo cell below 8 world units. That is
-    what buried every Evo checkpoint marker under the terrain.
+    A 16-bit heightfield is read two ways, because two games write one: CPR is 10.6 fixed
+    point (divisor 64) and Evo is 11.5 (divisor 32), and each loader states its divisor on the
+    terrain record. The decode is shared with the mesh builder (shared/terrain-height.js), so
+    a marker cannot land on a different surface than the one drawn. Reading Evo with the old
+    undeclared-grid rule returned half the real height and, below 8 world units, the raw
+    sample unscaled, which is what once buried every Evo checkpoint marker.
   */
   _terrainHeightAt(editorX, editorY, trackData) {
     const terrain = trackData.terrain;
     const raw = this._terrainRaw;
     if (!raw || !terrain) return 0;
     const gridSize = terrain.gridSize ?? 256;
-    const bytesPerCell = terrain.rawBytesPerCell ?? 1;
-    const heightDivisor = terrain.heightDivisor ?? 0;
     const cx = Math.min(gridSize - 1, Math.max(0, Math.floor(editorX / (terrain.cellSize ?? 64))));
     const cz = Math.min(gridSize - 1, Math.max(0, Math.floor(editorY / (terrain.cellSize ?? 64))));
 
     let total = 0;
     for (const [ox, oz] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
-      const x = Math.min(gridSize - 1, cx + ox);
-      const z = Math.min(gridSize - 1, cz + oz);
-      const off = (x + z * gridSize) * bytesPerCell;
-      if (bytesPerCell === 1) {
-        total += raw[off] ?? 0;
-      } else {
-        const lo = raw[off] ?? 0;
-        const hi = raw[off + 1] ?? 0;
-        const sample = lo | (hi << 8);
-        if (heightDivisor) total += sample / heightDivisor;
-        else total += hi === 0 ? lo : sample >>> 6;
-      }
+      total += heightAtCell(terrain, raw, cx + ox, cz + oz);
     }
     return (total / 4) * this._heightScale;
   }
@@ -1346,8 +1359,9 @@ export class TrackScene {
 
     const hs = this._heightScale;
     const ws = this._worldSize(trackData);
-    const rawBytesPerCell = trackData.terrain?.rawBytesPerCell ?? 1;
-    const zDivisor = rawBytesPerCell === 2 ? 4 : 2;
+    // TRK altitude is feet; / 2 gives the 2 ft legacy steps the terrain and models use. CPR's
+    // own `/ 4` is its 4 ft step, and using it here drew the road at half height.
+    const zDivisor = LEGACY_ALTITUDE_DIVISOR;
     // Wall heights go through the same transform as track altitude so they stay consistent
     // with the surface when the height scale slider moves.
     const partHeight = cprFeetToWorldY(CPR_WALL_PART_HEIGHT_FT, hs, zDivisor);
@@ -1359,23 +1373,17 @@ export class TrackScene {
 
       A CPR track altitude is in feet and the terrain RAW stores the same quantity scaled, so
       point[1] / zDivisor lands on the terrain height under the track directly. Checked
-      against Laguna: sampling the terrain beneath the centreline of every segment gives the
-      track sitting a median of 1.07 terrain units above it, with 95% of points between
-      +0.08 and +1.84, which is exactly what "Match ground alt" produces (it levels the
-      ground to the minimum altitude under the track, and banking drops one side below that).
+      against Laguna with the terrain decoded at full 10.6 precision: across all 6620 track
+      points the road sits a median of 2.0 ft above the ground, 5th to 95th percentile +0.5
+      to +5.4 ft, which is what "Match ground alt" produces (it levels the ground to the
+      minimum altitude under the track, and banking drops one side below that).
 
       The layer used to be lifted an extra 8 world units on top of that, roughly 11 feet,
       which is what made the track look like it hovered and the surrounding objects look
       buried. Coplanar z-fighting is a depth buffer problem, so it is solved with
       polygonOffset on the material instead of by moving the geometry.
     */
-    const pointToWorld = (point) => {
-      if (!point || point.length < 3) return [0, 0, 0];
-      const wx = 2 * Math.trunc(point[0]);
-      const wy = 2 * Math.trunc(point[2]);
-      const wz = point[1] / zDivisor;
-      return [wx, wz * hs, ws - wy];
-    };
+    const pointToWorld = (point) => cprPointToScene(point, hs, ws, zDivisor);
 
     const bucketFor = (buckets, materialIndex) => {
       const key = Math.max(0, Math.min(materials.length - 1, materialIndex | 0));
@@ -1395,15 +1403,22 @@ export class TrackScene {
       bucket.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
     };
 
-    for (let i = 0; i + 1 < surfaces.length; i++) {
-      const a = surfaces[i];
-      const b = surfaces[i + 1];
+    /*
+      Each record owns the stretch to the next one. On a closed circuit the last record's
+      stretch runs back to record 0; without it the start/finish line was a one-segment hole.
+      See cprSegmentPairs.
+    */
+    for (const [from, to] of cprSegmentPairs(surfaces)) {
+      const a = surfaces[from];
+      const b = surfaces[to];
       const aPts = a.points ?? [];
       const bPts = b.points ?? [];
       const laneCount = Math.min(aPts.length, bPts.length) - 1;
       if (laneCount < 1) continue;
+      // The game draws nothing of the layer beyond its walls; see cprVisibleSlots.
+      const visible = cprVisibleSlots(a);
 
-      for (let lane = 0; lane < laneCount; lane++) {
+      for (let lane = Math.max(0, visible.first); lane <= Math.min(laneCount - 1, visible.last); lane++) {
         /*
           A cross section slot collapsed on both segments has no area. Skipping those is what
           drops the unused slots and the pit lane band on tracks that have no pit lane there,
@@ -1802,8 +1817,10 @@ export class TrackScene {
 
     // World position in Three.js space
     const posX = wx;
+    const anchored = traxxTrueOrigin(trackData.origin) && !billboard;
     const posY = evo ? wz * hs
       : trackData.origin === "HB" ? wz * 3
+      : anchored ? wz * hs
       : wz * hs + (model.baseZ ?? 0) * 0.75;
     const posZ = ws - wy;
 
@@ -1813,6 +1830,8 @@ export class TrackScene {
     const modelMatrix = evo
       ? evoModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ)
       : traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ);
+    // Put the decoder's recentred mesh back on the model's own origin before it is turned.
+    if (anchored) modelMatrix.multiply(new THREE.Matrix4().makeTranslation(model.anchor?.x ?? 0, model.anchor?.y ?? 0, model.anchor?.z ?? 0));
 
     const group = new THREE.Group();
     const meshRoot = billboard ? new THREE.Group() : group;
@@ -2133,7 +2152,7 @@ export class TrackScene {
         this.applyColliderOffsets(colliders);
         this._moveColliderMarkers(colliders);
       },
-      spawn: () => trackSpawnPoint(trackData, frame, assembly),
+      spawn: () => trackSpawnPoint(trackData, frame, assembly, this._drive?.colliders),
       onStatus,
     });
 
@@ -2303,8 +2322,10 @@ export class TrackScene {
     if (!truck || !trackData) return null;
 
     const frame = createWorldFrame(trackData);
-    const { psi, ...position } = trackSpawnPoint(trackData, frame, assembly);
-    const ground = frame.heightAtFeet(position.x, position.z);
+    // On CPR the grid is on the road layer, a couple of feet above the terrain under it.
+    const road = trackData.raceTrackSurfaces?.length ? createRaceTrackSupport(trackData) : null;
+    const { psi, ...position } = trackSpawnPoint(trackData, frame, assembly, road);
+    const ground = groundForSpawn(frame, road, position.x, position.z);
 
     truck.reset();
     // Scene units, not feet: the truck is drawn true while the terrain is not, so its height
@@ -2613,26 +2634,6 @@ function resetBillboardGroup(group) {
     obj.matrix.copy(staticMatrix);
     obj.matrixWorldNeedsUpdate = true;
   }
-}
-
-/*
-  Whether a cross section slot is collapsed to zero width on this segment.
-
-  pointOffset is the lateral offset of each point from the centreline, in feet, and is the
-  direct answer. At Laguna segment 0 it runs -48, -48, -48, -36, -24, -24, 0, 24 ... so the
-  two Left unused slots and every pit slot are flat against their neighbour.
-
-  Falling back to comparing the world positions covers a track whose pointOffset block failed
-  to parse, since a collapsed slot repeats its coordinates in plist as well.
-*/
-function isDegenerateSlot(surface, lane) {
-  const offsets = surface.pointOffsets;
-  if (offsets && offsets.length > lane + 1) return offsets[lane] === offsets[lane + 1];
-  const points = surface.points ?? [];
-  const a = points[lane];
-  const b = points[lane + 1];
-  if (!a || !b) return true;
-  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
 function normalizeRaceTextureIndex(index, textureCount) {

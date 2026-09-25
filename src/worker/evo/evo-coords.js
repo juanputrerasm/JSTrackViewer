@@ -46,7 +46,12 @@
 /** Terrain cell size, in world units. */
 export const EVO_CELL_SIZE = 32;
 
-/** Divisor turning a raw uint16 height into world units. */
+/**
+ * Divisor turning a raw uint16 height into world units: Evo terrain is 11.5 fixed point,
+ * uint16LE / 32.0, fraction kept. CPR's grid is the same size and byte order but 10.6
+ * (uint16LE / 64.0), so the two must never share a decoder chosen by cell width; see
+ * shared/terrain-height.js.
+ */
 export const EVO_HEIGHT_DIVISOR = 32;
 
 /*

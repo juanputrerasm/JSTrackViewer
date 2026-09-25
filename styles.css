@@ -51,6 +51,26 @@ body {
   white-space: nowrap;
 }
 
+.brand h1 a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-version {
+  margin-left: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.brand p {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .load-controls {
   display: flex;
   align-items: center;
@@ -297,6 +317,8 @@ input[type="checkbox"] {
 .slider-row span { min-width: 28px; text-align: right; font-family: var(--mono); }
 
 /* ── Minimap ────────────────────────────────── */
+.nav-speed-row { margin-top: 8px; max-width: 220px; }
+
 .minimap {
   display: block;
   width: 100%;

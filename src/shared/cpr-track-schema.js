@@ -170,16 +170,20 @@ export const CPR_WALL_LAYERS = {
   Height of one wall panel, in feet.
 
   Not recoverable from the strings: the real values are hardcoded in the engine, and
-  CRaceTrack::makeWallList would have to be disassembled to read them. 9 feet is derived from
-  the art instead. Wall panel RAWs are 256x64 per strip, and Laguna averages
-  11816.64 / 331 = 35.7 feet per segment, so a panel that spans one segment at the texture's
-  own 4:1 aspect is 8.9 feet tall. That also matches what a trackside advertising hoarding
-  actually is.
+  CRaceTrack::makeWallList would have to be disassembled to read them.
+
+  4.5 feet is calibrated against the original game. The first estimate was 9 feet, from the
+  art: wall panel RAWs are 256x64 per strip and Laguna averages 11816.64 / 331 = 35.7 feet per
+  segment, so a panel spanning one segment at the texture's 4:1 aspect would be 8.9 feet.
+  That looked right only while CPR altitude was converted at half scale (`/ 4` into 2 ft
+  steps), which drew a 9 ft panel at 4.5 ft. Once altitude moved to its true `/ 2`, walls came
+  out twice as tall as in-game screenshots of Laguna, so a panel does not span one segment at
+  the texture's own aspect; it is half that height.
 
   Treat this as calibrated rather than known. It is the one number in this file that is not
   read off the data.
 */
-export const CPR_WALL_PART_HEIGHT_FT = 9;
+export const CPR_WALL_PART_HEIGHT_FT = 4.5;
 
 /*
   A CPR track point is in feet. The viewer places it with x and z scaled by 2 world units per
@@ -188,4 +192,126 @@ export const CPR_WALL_PART_HEIGHT_FT = 9;
 */
 export function cprFeetToWorldY(feet, heightScale, zDivisor) {
   return (feet * (heightScale ?? 3)) / (zDivisor || 2);
+}
+
+/*
+  Whether a cross section slot is collapsed to zero width on this segment.
+
+  pointOffset is the lateral offset of each point from the centreline, in feet, and is the
+  direct answer. At Laguna segment 0 it runs -48, -48, -48, -36, -24, -24, 0, 24 ... so the
+  two Left unused slots and every pit slot are flat against their neighbour.
+
+  Falling back to comparing the world positions covers a track whose pointOffset block failed
+  to parse, since a collapsed slot repeats its coordinates in plist as well.
+*/
+export function isDegenerateSlot(surface, lane) {
+  const offsets = surface.pointOffsets;
+  if (offsets && offsets.length > lane + 1) return offsets[lane] === offsets[lane + 1];
+  const points = surface.points ?? [];
+  const a = points[lane];
+  const b = points[lane + 1];
+  if (!a || !b) return true;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+/** The centreline of a cross section, halfway between the two mirror points 9 and 10. */
+function sectionCentre(surface) {
+  const points = surface?.points ?? [];
+  const a = points[CPR_CROSS_SECTION_MIDPOINT - 1] ?? points[0];
+  const b = points[CPR_CROSS_SECTION_MIDPOINT] ?? a;
+  if (!a || !b) return null;
+  return [(a[0] + b[0]) / 2, (a[2] + b[2]) / 2];
+}
+
+/*
+  Whether a track is a closed circuit, so its last segment runs on into its first.
+
+  The .TRK stores one record per segment and each record owns the stretch from itself to the
+  next, so the last record's stretch, back to record 0, has no following record to reach and
+  was never drawn: a one-segment hole at the start/finish line. Nothing in the file says
+  "closed". Every stock track is, though, and all 17 end one ordinary segment short of their
+  start (Laguna: 30.0 ft, against a median segment of 35.8 ft and a longest of 108.8 ft;
+  Rio, the widest, 59.9 ft against a longest of 56.5 ft).
+
+  So a track counts as closed when the gap from its last section back to its first is no
+  longer than 1.5 times its own longest segment, and runs the same way the track does, which
+  keeps a point-to-point layout whose ends happen to lie near each other from being joined
+  across. A last section sitting ON the first needs no closing segment.
+*/
+export function cprTrackIsClosed(surfaces) {
+  const n = surfaces?.length ?? 0;
+  if (n < 3) return false;
+  const centres = surfaces.map(sectionCentre);
+  if (centres.some((c) => !c)) return false;
+
+  let longest = 0;
+  for (let i = 0; i + 1 < n; i++) {
+    const length = Math.hypot(centres[i + 1][0] - centres[i][0], centres[i + 1][1] - centres[i][1]);
+    if (length > longest) longest = length;
+  }
+  const last = centres[n - 1];
+  const gapX = centres[0][0] - last[0];
+  const gapZ = centres[0][1] - last[1];
+  const gap = Math.hypot(gapX, gapZ);
+  if (gap < 1 || gap > longest * 1.5) return false;
+
+  const dirX = last[0] - centres[n - 2][0];
+  const dirZ = last[1] - centres[n - 2][1];
+  return dirX * gapX + dirZ * gapZ > 0;
+}
+
+/**
+ * The [from, to] record pairs whose stretch is drawn, in order: each record to the next, plus
+ * the last back to the first on a closed circuit. The scene and the drive colliders both build
+ * from this, so what is drawn and what is solid cannot disagree.
+ */
+export function cprSegmentPairs(surfaces) {
+  const n = surfaces?.length ?? 0;
+  const pairs = [];
+  for (let i = 0; i + 1 < n; i++) pairs.push([i, i + 1]);
+  if (cprTrackIsClosed(surfaces)) pairs.push([n - 1, 0]);
+  return pairs;
+}
+
+/**
+ * A .TRK point [x, altitude, along] in scene units: the transform the road layer is drawn with.
+ * Horizontal keeps the historical truncation to whole feet; altitude is feet over zDivisor.
+ */
+export function cprPointToScene(point, heightScale, worldSize, zDivisor) {
+  if (!point || point.length < 3) return [0, 0, 0];
+  const wx = 2 * Math.trunc(point[0]);
+  const wy = 2 * Math.trunc(point[2]);
+  return [wx, (point[1] / zDivisor) * heightScale, worldSize - wy];
+}
+
+/*
+  The cross section slots the game actually draws: everything between the outermost wall on
+  each side, and nothing beyond.
+
+  A record keeps its full 20 point section, including the tree and unused slots outside the
+  shoulder walls (Laguna segment 0 has 12 ft of "Left tree" to "Left shoulder" beyond its left
+  wall), and CPR's renderer never shows them: in the game the track layer stops dead at its
+  walls, with the terrain taking over behind. So a slot is drawn only when it lies on the
+  road side of both walls. The left half's walls are points below CPR_CROSS_SECTION_MIDPOINT
+  and the outermost one is the lowest index; the right half's are the rest and the outermost
+  is the highest. A side with no wall is drawn out to its last slot, as before.
+
+  Slot `lane` runs from point `lane` to point `lane + 1`, so the left clip drops slots below
+  the wall point and the right clip drops slots from the wall point on. Walls come from the
+  owning record, the same one that decides whether a wall is drawn.
+
+  @returns {{ first: number, last: number }} inclusive slot range; empty when first > last
+*/
+export function cprVisibleSlots(surface) {
+  const pointCount = surface?.points?.length ?? 0;
+  const walls = surface?.wallTypes ?? [];
+  let first = 0;
+  let last = pointCount - 2;
+  for (let point = 0; point < CPR_CROSS_SECTION_MIDPOINT && point < pointCount; point++) {
+    if (CPR_WALL_LAYERS[walls[point] ?? 0]) { first = point; break; }
+  }
+  for (let point = pointCount - 1; point >= CPR_CROSS_SECTION_MIDPOINT; point--) {
+    if (CPR_WALL_LAYERS[walls[point] ?? 0]) { last = point - 1; break; }
+  }
+  return { first, last };
 }

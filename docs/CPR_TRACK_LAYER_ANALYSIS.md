@@ -439,12 +439,21 @@ seg   trkAlt   alt/4   terrain sample   raw16/64
 200    929.9   232.5             232      232.1
 ```
 
-Across all 6620 track points the track sits a median of 1.07 terrain units above the
-interpolated ground, with the 5th to 95th percentile spanning +0.54 to +1.84. That is exactly
-what `Match ground alt` produces, since it levels the ground to the minimum altitude under
-the track and banking then drops one side below that. Only 0.36% of points fall more than one
+Across all 6620 track points the track sits a median of 2.0 ft (0.51 CPR steps) above the
+interpolated ground, with the 5th to 95th percentile spanning +0.5 to +5.4 ft. That is what
+`Match ground alt` produces, since it levels the ground to the minimum altitude under the
+track and banking then drops one side below that. Only 0.66% of points fall more than one
 unit below the terrain, and terrain poking through the track is an authentic artifact of the
 original engine anyway, which the guide calls out at Memorial.
+
+These figures use the terrain at full precision, `raw16 / 64.0`. They were first measured
+against terrain floored by `raw16 >>> 6` (the viewer's old decode), which reads a median of
+1.07 and a 5th to 95th percentile of +0.54 to +1.84: flooring drops the ground by an average
+of about half a step under a road whose altitude keeps its fraction.
+
+The CPR step in that table (`alt / 4`, `raw16 / 64`) is 4 ft. The viewer draws CPR at 2 ft
+legacy steps, `alt / 2` and `raw16 / 64 * 2`, which is the scale its BIN models share with
+MTM2; see `docs/cpr-racetrack-layer-implementation-guide.md` section 3 for the evidence.
 
 So the bias is now zero and coplanar z-fighting is handled with `polygonOffset` on the
 material instead. Units only, with no slope factor: the road and the walls share materials,
@@ -467,6 +476,61 @@ Two smaller open points, both flagged in the code:
   is one visual check against the game.
 - Whether a wall belongs to the segment it is stored on and spans forward, which is what the
   code assumes, or spans backward. Either way it only changes the panel at each end of a run.
+
+### 5.1 Closing the circuit
+
+Each `.TRK` record owns the stretch from itself to the next record, so the last record's
+stretch, back to record 0, has no following record and was never drawn: a one-segment hole
+across the start/finish line. The file has no "closed" flag, but every stock track is a
+circuit, and all 17 end one ordinary segment short of their start:
+
+```
+track      segments  median seg  longest seg  last -> first
+LAGUNA        331       35.8        108.8         30.0
+RIO           262       39.4         56.5         59.9
+MILWAUKE      188       24.4         54.7         49.2
+```
+
+(`CRaceTrack.length` does not settle it: it is the nominal lap length, exactly 5,280 ft at
+Milwaukee and Nazareth.)
+
+`cprTrackIsClosed` in `src/shared/cpr-track-schema.js` treats a track as closed when the gap
+from its last section back to its first is at least 1 ft, no more than 1.5 times its own
+longest segment, and continues the direction the track was travelling. `cprSegmentPairs` then
+adds the pair `[last, 0]`, drawn with the last record's own texture and wall entries. The
+scene and the drive colliders both build from those pairs.
+
+### 5.2 The road layer in drive mode
+
+The road surface, curbs, walls and catch fencing are not in the heightfield, and drive mode
+used to know only the heightfield and the `.SIT` objects: on a CPR track the wheels ran on the
+ground 2 ft under the road and the truck drove through every wall. `src/drive/racetrack-collider.js`
+builds one static mesh collider per drawn segment from the same records and transform the
+scene uses. Road quads are flat enough to carry a wheel, so `supportAt` answers with the road;
+wall quads are vertical and as tall as their whole stack, so the hull contacts stop the truck.
+Spawning and reset drop the truck onto the road rather than the terrain beneath it.
+
+Known limit: wheels are not collision volumes in the sim, for any game, so a monster truck
+can straddle a 4.5 ft wall that passes under its body between the tyres.
+
+### 5.3 Two CPR renderer rules
+
+**The layer stops at its walls.** A record keeps its whole 20 point section, including the
+tree and unused slots outside the shoulder walls (Laguna segment 0 has 12 ft of "Left tree"
+to "Left shoulder" beyond its left wall), but the game draws nothing of the track layer
+outside its walls: the terrain takes over directly behind them. `cprVisibleSlots` draws only
+the slots between the outermost wall on each side (the lowest-index wall below the midpoint,
+the highest at or above it). Across all 5,040 stock segments this hides only off-track slots,
+never a curb or road slot. The drive colliders use the same range, so nothing beyond a wall is
+solid either.
+
+**Terrain cells split on alternating diagonals.** Traxx interpolates, and JTraxx draws, a cell
+along (cx,cz)-(cx+1,cz+1) when cx + cz is even and along (cx+1,cz)-(cx,cz+1) when it is odd.
+The viewer used the first diagonal everywhere. On CPR the difference shows at the foot of
+walls on a slope: at Laguna, between the main straight and the turn below it, the fixed split
+pushes a terrain triangle through the Texaco panel that the checkerboard split, and the game,
+do not. The SIT loader sets `cellSplit = "checkerboard"` on CPR terrain and the mesh builder
+and the drive frame's `heightAtFeet`/`normalAtFeet` both follow it. MTM keeps the fixed split.
 
 ## 6. Things the documentation confirms we already handle correctly
 

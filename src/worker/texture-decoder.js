@@ -73,15 +73,21 @@ export function decodeRawTexture(rawBytes, actBytes, textureName, options = {}) 
     - VGA palettes, 6-bit channels, 0..63, which is what the era's hardware DACs took.
 
   A 6-bit palette used as if it were 8-bit renders at roughly a quarter brightness, which is
-  the "everything is nearly black" look. Detection is by content, the same way JSPod does it:
-  if any channel byte exceeds 63 the palette must be 8-bit, because a 6-bit one cannot
-  produce that value. Otherwise scale, with (v*255 + 31)/63 so 0 maps to 0 and 63 maps to
-  exactly 255 rather than 252.
+  the "everything is nearly black" look. Detection is by content: if any channel byte exceeds
+  63 the palette must be 8-bit, because a 6-bit one cannot produce that value.
 
-  A palette that is genuinely 8-bit but happens to use only dark colours is indistinguishable
-  from a 6-bit one, and gets brightened. That is the same trade JSPod makes: the false
-  positive is a dim palette rendered bright, the false negative is every 6-bit palette in the
-  game rendered black.
+  Not exceeding 63 is NOT enough to call it 6-bit, though. The rule used to be exactly that,
+  and it brightened every genuinely dark 8-bit palette about fourfold. Across all 7,356 .ACT
+  files in the stock MTM1, MTM2, CPR, TV, Fury3 and Hellbender PODs there are 40 whose
+  channels stay at or under 63, and every one is simply a dark palette: MI4BLACK, RA4BLACK
+  (all zeros), NITESKY, the TSHADOW truck shadows, Hellbender's CAVSKY, and Laguna's LAGQ28CC,
+  LAGQ28D9 and LAGQ799, the walkway's shadow baked into three road quads, which came out as
+  bright tan dirt. None of the 40 reaches 63; the brightest is 60.
+
+  A real VGA palette is a DAC table and uses its full range, so its brightest channel is 63.
+  That is the test now: a palette is 6-bit when its largest channel byte is exactly 63, and
+  is scaled with (v*255 + 31)/63 so 0 maps to 0 and 63 to exactly 255 rather than 252.
+  Anything darker is taken as stored.
 */
 export function decodeActPalette(actBytes) {
   if (!actBytes || actBytes.length < LEGACY_PALETTE_SIZE) return null;
@@ -89,9 +95,12 @@ export function decodeActPalette(actBytes) {
     ? actBytes.subarray(0, LEGACY_PALETTE_SIZE)
     : actBytes.slice(0, LEGACY_PALETTE_SIZE);
 
+  let max = 0;
   for (let i = 0; i < LEGACY_PALETTE_SIZE; i++) {
-    if (raw[i] > 63) return raw.slice();          // 8-bit, use as-is
+    if (raw[i] > max) max = raw[i];
   }
+  // 8-bit, or a dark 8-bit palette that never needed a bright entry: use as stored.
+  if (max !== 63) return raw.slice();
   const out = new Uint8Array(LEGACY_PALETTE_SIZE);
   for (let i = 0; i < LEGACY_PALETTE_SIZE; i++) {
     out[i] = Math.round((raw[i] * 255 + 31) / 63);

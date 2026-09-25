@@ -171,6 +171,26 @@ export class TrackViewerApp {
     }
 
     // Sliders
+    /*
+      Fly speed for the arrow keys and A/Z, as a percentage of the camera's full rate. The
+      full rate crosses a whole track in about five seconds, which is too fast to look at
+      anything, so the default is a quarter of it. The choice is remembered per browser.
+    */
+    const speedSlider = doc.getElementById("nav-speed-slider");
+    const speedLabel  = doc.getElementById("nav-speed-value");
+    try {
+      const saved = localStorage.getItem("jstv.navSpeed");
+      if (saved !== null && !Number.isNaN(parseInt(saved, 10))) speedSlider.value = saved;
+    } catch { /* storage unavailable: keep the default */ }
+    const applyNavSpeed = () => {
+      const v = parseInt(speedSlider.value, 10);
+      speedLabel.textContent = `${v}%`;
+      this._scene.nav?.setSpeedFactor(v / 100);
+      try { localStorage.setItem("jstv.navSpeed", String(v)); } catch { /* ignore */ }
+    };
+    speedSlider.addEventListener("input", applyNavSpeed);
+    applyNavSpeed();
+
     const gridSlider = doc.getElementById("grid-span-slider");
     const gridLabel  = doc.getElementById("grid-span-value");
     gridSlider.addEventListener("input", () => {

@@ -69,7 +69,11 @@ export function buildMeshShape(model, box, trackData) {
 
   // The same origin _buildBinModel uses, in scene units.
   const posX = wx;
-  const posY = evo ? wz * heightScale : origin === "HB" ? wz * 3 : wz * heightScale + (model.baseZ ?? 0) * 0.75;
+  // Turned about the model's own origin for the SIT family, exactly as scene.js now draws it
+  // (see traxxTrueOrigin there); every other game keeps the recentred mesh plus baseZ.
+  const anchored = !evo && origin !== "HB" && origin !== "TV" && origin !== "F3" && origin !== "TV/F3";
+  const [ax, ay, az] = anchored ? [model.anchor?.x ?? 0, model.anchor?.y ?? 0, model.anchor?.z ?? 0] : [0, 0, 0];
+  const posY = evo ? wz * heightScale : origin === "HB" ? wz * 3 : anchored ? wz * heightScale : wz * heightScale + (model.baseZ ?? 0) * 0.75;
   const posZ = worldSize - wy;
 
   const [r0, r1, r2] = traxxRotationRows(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0);
@@ -102,9 +106,9 @@ export function buildMeshShape(model, box, trackData) {
       const base = n * 9;
       for (let k = 0; k < 3; k++) {
         const vertex = indices ? indices[i + k] : i + k;
-        const vx = positions[vertex * 3];
-        const vy = positions[vertex * 3 + 1];
-        const vz = positions[vertex * 3 + 2];
+        const vx = positions[vertex * 3] + ax;
+        const vy = positions[vertex * 3 + 1] + ay;
+        const vz = positions[vertex * 3 + 2] + az;
         let fx, fy, fz;
         if (evo) {
           // scene.js draws SMF vertices as Y-up, with Y(-psi) X(-theta) Z(phi).
@@ -159,6 +163,55 @@ export function buildMeshShape(model, box, trackData) {
     marks: new Uint32Array(n),
     mark: 0,
   };
+  buildGrid(shape);
+  return shape;
+}
+
+/**
+ * A shape from triangles already in world feet, for geometry that is not a placed model:
+ * the CPR road layer. Stored relative to `centre` like every other shape, so the same
+ * support, ray and contact queries answer for it.
+ *
+ * @param {number[]} coords  x, y, z per vertex, three vertices per triangle, world feet
+ * @param {{x,y,z}} centre   the shape's origin, world feet
+ * @returns {object|null}    null when every triangle is degenerate
+ */
+export function buildTriangleShape(coords, centre) {
+  const total = Math.floor(coords.length / 9);
+  if (!total) return null;
+  const tris = new Float64Array(total * 9);
+  const normals = new Float64Array(total * 3);
+  const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+
+  let n = 0;
+  for (let t = 0; t < total; t++) {
+    const base = n * 9;
+    for (let k = 0; k < 3; k++) {
+      tris[base + k * 3] = coords[t * 9 + k * 3] - centre.x;
+      tris[base + k * 3 + 1] = coords[t * 9 + k * 3 + 1] - centre.y;
+      tris[base + k * 3 + 2] = coords[t * 9 + k * 3 + 2] - centre.z;
+    }
+    const e1x = tris[base + 3] - tris[base], e1y = tris[base + 4] - tris[base + 1], e1z = tris[base + 5] - tris[base + 2];
+    const e2x = tris[base + 6] - tris[base], e2y = tris[base + 7] - tris[base + 1], e2z = tris[base + 8] - tris[base + 2];
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    const length = Math.hypot(nx, ny, nz);
+    if (!(length > 1e-9)) continue;
+    normals[n * 3] = nx / length;
+    normals[n * 3 + 1] = ny / length;
+    normals[n * 3 + 2] = nz / length;
+    for (let k = 0; k < 3; k++) {
+      const x = tris[base + k * 3], y = tris[base + k * 3 + 1], z = tris[base + k * 3 + 2];
+      if (x < bounds.minX) bounds.minX = x; if (x > bounds.maxX) bounds.maxX = x;
+      if (y < bounds.minY) bounds.minY = y; if (y > bounds.maxY) bounds.maxY = y;
+      if (z < bounds.minZ) bounds.minZ = z; if (z > bounds.maxZ) bounds.maxZ = z;
+    }
+    n++;
+  }
+  if (!n) return null;
+
+  const shape = { centre: { ...centre }, count: n, tris, normals, bounds, marks: new Uint32Array(n), mark: 0 };
   buildGrid(shape);
   return shape;
 }

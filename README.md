@@ -25,7 +25,7 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 - **Detailed track rendering**: display terrain, textures, models, courses, checkpoints, ramps, ground boxes, collision boxes, trucks, water, and backdrops. Tracks that name more than one background model show all of them.
 - **Route markers**: numbered checkpoint markers for MTM, MTM2, CART Precision Racing and 4x4 Evolution 1/2, plus the navigation point, tunnel and powerup markers for Terminal Velocity, Fury3 and Hellbender.
 - **Hellbender level data**: the underground cavern layer with its own terrain, ground boxes and objects, plus navigation points with their objective text, animated textures, tunnels, powerups, and the per-world planet and mission names.
-- **CPR racetrack layers**: render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays.
+- **CPR racetrack layers**: render `.TRK` and `.TTX` road surfaces, walls, textures, and wireframe overlays, following the game's own rules: closed circuits are joined across the start/finish line and the layer stops at its walls. In Test Drive the road carries the truck and the walls stop it.
 - **Sun position**: every game states where its sun is, and the viewer reads it, names the compass point, and lets you move it. MTM, MTM2, CART Precision Racing, Terminal Velocity, Fury3 and Hellbender store it as a fixed-point vector on `.LVL` line 17; 4x4 Evolution stores the same thing as `lightSourceVector`.
 - **Sun shadows**: objects, vegetation and the driven truck cast shadows onto the terrain and the road surface. Sun light and its shadows are separate toggles, so the lighting can stay while the shadows go.
 - **Texture presentation**: switch between smooth and sharp (pixelated) filtering, and toggle the two-pixel tile crop that the older games relied on, to compare it against the full tile.
@@ -40,7 +40,6 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 | Content | Support |
 |---|---|
 | POD1 | Original Terminal Reality archive layout with 32-byte directory name fields |
-| POD1-64 (Extended POD1) | POD1-compatible Community Patch 3 layout with 64-byte directory name fields |
 | POD2 | Indexed archive layout used by 4x4 Evolution 1 and 2 |
 | ZIP | POD archives packaged in ZIP files |
 | SIT | MTM, MTM2, and CART Precision Racing track definitions |
@@ -58,8 +57,6 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 | RAW + ACT + OPA | 4x4 Evolution paletted textures with an 8-bit opacity plane |
 | TIFF | 4x4 Evolution 2 palette-indexed art, with an optional alpha sample |
 | RA0, RA1, and CL0 | Ground-box and collision data |
-
-“POD1-64” is not a 64-bit archive format or an official new POD version. It identifies the POD1-compatible layout that widens each directory name field from 32 to 64 bytes, allowing Community Patch 3 content to use longer asset paths.
 
 ## Requirements
 
@@ -104,6 +101,7 @@ Then open <http://localhost:8080/>. There is no build step and no package instal
 | Mouse wheel | Move along the view direction |
 | Home | Reset near course segment 0 |
 | Minimap click | Move to the selected map position while preserving camera orientation |
+| Speed slider (under the minimap) | Scale arrow-key and A/Z travel speed, 5% to 100%; defaults to 25% and is remembered per browser |
 
 ## Test Drive
 
@@ -173,8 +171,9 @@ src/
 - Rendering is intended for inspection. Apart from Test Drive, the viewer does not emulate the games: no AI, audio, weapons, enemies, or game scripting.
 - Test Drive reads Monster Truck Madness and Monster Truck Madness 2 truck archives. 4x4 Evolution trucks use a different manifest and are refused rather than misread.
 - Test Drive handling is a feel-alike, not the original. Monster Truck Madness 2 keeps its mass, spring rates, gearing and tire grip in the executable rather than in track or truck files, so those values are approximated; see the [physics notes](docs/MTM2_PHYSICS_NOTES.md).
-- Test Drive collides with terrain and track objects. It does not simulate other trucks, damage, or race rules beyond checkpoint order and lap timing.
-- CART Precision Racing wall heights are calibrated from the wall art rather than read from the engine, so absolute wall height is approximate.
+- Test Drive collides with terrain, track objects, and the CART Precision Racing road surface and walls. It does not simulate other trucks, damage, or race rules beyond checkpoint order and lap timing.
+- Test Drive collides the truck's body, not its wheels, so a monster truck can straddle a low wall that passes under the chassis between its tires.
+- CART Precision Racing wall heights are calibrated against in-game screenshots rather than read from the engine, so absolute wall height is approximate.
 - CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
 - CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
 - Terminal Velocity/Fury3 and Hellbender tunnels are not supported. Hellbender's underground is not a tunnel: it is part of the same level and is drawn.
@@ -198,9 +197,9 @@ src/
 
 ## Related projects
 
-- [JTraxx](https://github.com/juanputrerasm/JTraxx3): desktop track editor on which JSTrackViewer is based.
-- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer): browser-based MTM1 and MTM2 truck viewer.
 - [JSPod](https://github.com/juanputrerasm/JSPod): browser-based POD archive and individual-asset viewer.
+- [JSMTM2Converter](https://github.com/juanputrerasm/JSMTM2Converter) browser-based EVO to MTM2 track & truck converter.
+- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer): browser-based MTM1 and MTM2 truck viewer.
 
 JSTrackViewer follows the lineage of JTraxx and the original Traxx track editor for Monster Truck Madness and Monster Truck Madness 2.
 

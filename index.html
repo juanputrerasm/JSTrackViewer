@@ -18,7 +18,7 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <h1>JSTrackViewer</h1>
+        <h1><a href="https://github.com/juanputrerasm/JSTrackViewer">JSTrackViewer <span class="app-version">v0.9.8</span></a></h1>
         <p>Online TRI Track viewer</p>
       </div>
       <div class="load-controls">
@@ -43,6 +43,11 @@
         <section class="panel" id="minimap-panel" hidden>
           <h2>Navigation</h2>
           <canvas id="minimap" class="minimap" width="220" height="220"></canvas>
+          <div class="slider-row nav-speed-row">
+            <label for="nav-speed-slider">Speed</label>
+            <input id="nav-speed-slider" type="range" min="5" max="100" value="25" step="5">
+            <span id="nav-speed-value">25%</span>
+          </div>
         </section>
 
         <section class="panel" id="markers-panel">

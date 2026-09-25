@@ -170,6 +170,9 @@ export async function loadTrack(podIndex, getBytes, choice, heightScale) {
       ...terrainMesh,
       rawData: doc.terrain.rawData ? doc.terrain.rawData.slice().buffer : null,
       rawBytesPerCell: doc.terrain.rawBytesPerCell ?? 1,
+      heightDivisor: doc.terrain.heightDivisor ?? null,
+      heightUnitScale: doc.terrain.heightUnitScale ?? 1,
+      cellSplit: doc.terrain.cellSplit ?? "fixed",
     } : null,
     skyTexture: skyTextureDecoded ? { rgba: skyTextureDecoded.rgba.buffer, width: skyTextureDecoded.width, height: skyTextureDecoded.height } : null,
 
@@ -243,7 +246,7 @@ function serializeModels(models) {
       normals: m.normals.buffer,
       uvs: m.uvs.buffer,
     }));
-    out[k] = { name: model.name, format: model.format, baseZ: model.baseZ, magnifyPower: model.magnifyPower, meshes };
+    out[k] = { name: model.name, format: model.format, baseZ: model.baseZ, magnifyPower: model.magnifyPower, anchor: model.anchor ?? { x: 0, y: 0, z: 0 }, meshes };
   }
   return out;
 }

@@ -93,8 +93,9 @@ Most CPR implementation errors come from mixing these spaces:
    `(x, altitude, along-map)` even though different code calls the last coordinate `y` or
    `z`.
 2. **Legacy terrain-height space**: the scalar height consumed by the Traxx-style terrain
-   renderer. CPR converts file altitude to this space with `/ 4`; ordinary 8-bit MTM data
-   uses `/ 2` for SIT placements.
+   renderer, one step per 2 feet, which is also the scale BIN models are drawn at. SIT and
+   TRK altitudes are feet in all three SIT games, so both CPR and MTM convert with `/ 2`.
+   CPR's own native step (`alt / 4`, `raw16 / 64`) is 4 feet, two legacy steps.
 3. **Renderer scene space**: JSTrackViewer uses X-right, Y-up, Z mirrored relative to the
    second horizontal map axis. A default altitude scale of 3 is applied after conversion to
    legacy height space.
@@ -103,7 +104,7 @@ For a stock CPR `.TRK` point `p = [px, pAltitude, pAlong]`, current JSTrackViewe
 
 ```text
 sceneX = 2 * trunc(px)
-sceneY = (pAltitude / 4) * heightScale
+sceneY = (pAltitude / 2) * heightScale
 sceneZ = worldSize - 2 * trunc(pAlong)
 
 worldSize   = terrainGridSize * 64
@@ -137,22 +138,16 @@ sceneY        = legacyHeight * heightScale
 ```
 
 Stock CPR terrain stores a little-endian unsigned 16-bit value per cell. It is a 10.6
-fixed-point legacy height:
+fixed-point CPR native height, and CPR SIT and TRK altitudes are four times that native
+height:
 
 ```text
 raw16         = raw[2*i] | (raw[2*i + 1] << 8)
-legacyHeight  = raw16 / 64.0
-sceneY        = legacyHeight * heightScale
+cprStep       = raw16 / 64.0            (native, 4 ft)
+cprStep       = cprFileAltitude / 4.0   (native, 4 ft)
 ```
 
-CPR SIT placements and TRK point altitudes use a source scale four times the legacy height:
-
-```text
-legacyHeight  = cprFileAltitude / 4.0
-sceneY        = (cprFileAltitude / 4.0) * heightScale
-```
-
-Consequently, a terrain point and a TRK point align when approximately:
+so a terrain point and a TRK point align when approximately:
 
 ```text
 raw16 / 64 == trkAltitude / 4
@@ -162,36 +157,67 @@ raw16       == 16 * trkAltitude
 At Laguna, a grid sample around a vehicle with SIT altitude `762.388062` is about `12160`:
 
 ```text
-762.388062 / 4 = 190.597 legacy steps
-12160 / 64     = 190.000 legacy steps
+762.388062 / 4 = 190.597 CPR steps
+12160 / 64     = 190.000 CPR steps
 ```
 
-The difference includes terrain interpolation and the vehicle's authored clearance. This is
-the correct scale; using the MTM2 `/ 2` rule on CPR makes placements and the road layer float
-far above the terrain.
+That alignment fixes the ratio between terrain and file altitude, but not the absolute
+vertical scale, and the viewer once took the CPR step as its legacy step. That drew terrain,
+road and placements at half height against the BIN models, which are drawn at the same
+scale in every SIT game. The SIT files settle which is right. The editor drops an object so
+its lowest vertex touches the ground, lifting its pivot by the model's depth, and across
+Laguna, Mid-Ohio and Detroit that lift is exactly `-minZ / 8` CPR steps for every model,
+against `-minZ / 4` legacy steps in MTM2 (Alaska). Same model, same depth, so:
+
+```text
+legacyHeight  = cprStep * 2
+              = raw16 / 64.0 * 2
+              = cprFileAltitude / 2     (feet / 2, as in MTM2)
+sceneY        = legacyHeight * heightScale
+```
+
+`src/shared/terrain-height.js` carries this as `heightDivisor = 64` (native) and
+`heightUnitScale = 2` (legacy steps per native step) on the CPR terrain descriptor, and
+`LEGACY_ALTITUDE_DIVISOR = 2` for SIT and TRK altitude. At one legacy step per CPR step every
+CPR object was buried by half its depth: a median of 7 ft at Laguna, 12.6 ft for the 50 ft
+tower. Using `/ 2` on the altitude alone, without doubling the terrain as well, makes
+placements and the road layer float above the terrain instead.
 
 If the authoring altitude values are treated as feet, which is how CPREDIT presents its
 coordinates, CPR's RAW quantization is `1/16` foot while an MTM2 byte height is a much coarser
 2-foot step. More safely stated without assigning physical units: CPR has 64 fractional
 levels per legacy height step, while stock MTM2 has only whole steps.
 
-### 3.2 Current JSTrackViewer precision caveat
+### 3.2 JSTrackViewer terrain precision
 
-The current terrain builder samples a two-byte legacy height as follows:
+JSTrackViewer used to sample a two-byte legacy height with the JTraxx rule:
 
 ```js
 if (hi === 0) return lo;
 return (lo | (hi << 8)) >>> 6;
 ```
 
-That reproduces the legacy integer height and provides a compatibility fallback for an
-8-bit value stored in a two-byte cell, but `>>> 6` discards CPR's six fractional bits. The
-TRK renderer does not discard its fractional altitude. A new implementation that values
-geometric precision should use `raw16 / 64.0`, while retaining an explicit compatibility
-mode if exact current-viewer or legacy raster behavior is required.
+`>>> 6` discards CPR's six fractional bits, while the TRK renderer keeps its fractional
+altitude, so the ground sat up to 63/64 of a step low under the road. All 17 stock CPR RAWs
+use the low bits (Laguna: 65,277 of 65,536 cells) and none has a zero high byte.
+
+The viewer now decodes every heightfield through `src/shared/terrain-height.js`. The SIT
+loader declares `heightDivisor = 64` on a CPR grid and the Evo loader declares 32, and the
+decode divides in floating point:
+
+```text
+CPR  uint16LE / 64.0   10.6 fixed point
+Evo  uint16LE / 32.0   11.5 fixed point
+MTM  uint8             whole steps
+```
+
+The two 16-bit encodings are the same size and byte order, so the divisor is declared by the
+loader, never inferred from the cell width. The JTraxx rule survives only as
+`legacyWholeHeight16`, for a 16-bit grid whose loader declares no encoding.
 
 Do not add a constant vertical lift to the racetrack. Measurements over Laguna put the TRK
-surface a median of about 1.07 legacy terrain units above the interpolated terrain, with the
+surface a median of about 2.0 ft above the precisely decoded terrain (4.3 ft against the old
+floored terrain), with the
 difference explained by CPREDIT's “Match ground alt” operation and banking. JSTrackViewer
 previously added a lift and made the whole road hover. It now keeps the coordinates unchanged
 and uses a depth-buffer polygon offset instead:
@@ -712,27 +738,29 @@ The current wall construction table is:
 
 | Type | Bottom-to-top stack | Total calibrated height |
 |---:|---|---:|
-| 1 | texture part 0 × 1 | 9 ft |
-| 2 | parts 0, 1, 2 × 1 each | 27 ft |
-| 3 | part 0 × 1; catch fence × 2 | 27 ft |
-| 4 | parts 0, 1, 2, 3 × 1 each | 36 ft |
-| 5 | part 0 × 1; catch fence × 2; part 1 × 1 | 36 ft |
-| 6 | parts 0, 1 × 1 each | 18 ft |
-| 7 | part 0 × 9 | 81 ft |
+| 1 | texture part 0 × 1 | 4.5 ft |
+| 2 | parts 0, 1, 2 × 1 each | 13.5 ft |
+| 3 | part 0 × 1; catch fence × 2 | 13.5 ft |
+| 4 | parts 0, 1, 2, 3 × 1 each | 18 ft |
+| 5 | part 0 × 1; catch fence × 2; part 1 × 1 | 18 ft |
+| 6 | parts 0, 1 × 1 each | 9 ft |
+| 7 | part 0 × 9 | 40.5 ft |
 
-One unit is `CPR_WALL_PART_HEIGHT_FT = 9` feet. The stack ordering is supported by CPREDIT
-names, editor behavior, and which part columns vary in stock data. The 9-foot unit itself is
-**calibrated**, not verified from executable logic: a 256×64 panel has a 4:1 aspect, and
-Laguna's average longitudinal slice is about 35.7 feet, implying an 8.9-foot panel.
+One unit is `CPR_WALL_PART_HEIGHT_FT = 4.5` feet. The stack ordering is supported by CPREDIT
+names, editor behavior, and which part columns vary in stock data. The 4.5-foot unit itself is
+**calibrated** against in-game screenshots of Laguna, not verified from executable logic. An
+earlier estimate of 9 feet (a 256×64 panel's 4:1 aspect over Laguna's average 35.7-foot
+slice) only looked right while CPR altitude was drawn at half scale; at the true `/ 2`
+altitude it made walls twice the in-game height.
 
 To replace the calibration with an exact value, measure a known original-game view or
-disassemble `CRaceTrack::makeWallList` in CPREDIT. Do not present 9 feet as a proven file
+disassemble `CRaceTrack::makeWallList` in CPREDIT. Do not present 4.5 feet as a proven file
 constant.
 
 For each layer in a wall stack:
 
 ```text
-partHeightScene = (9 / 4) * heightScale
+partHeightScene = (4.5 / 2) * heightScale
 top             = base + layer.units * partHeightScene
 
 q0 = base0 + vertical(base)
@@ -1010,9 +1038,8 @@ else if byteLength/2 is an integer square N*N: grid=N, bytesPerCell=2
 else use CLR/LTE evidence or reject explicitly
 ```
 
-Use the two-byte layout, not the `origin` label alone, to select the `/ 4` placement divisor.
-This is how the current shared parser keeps custom/malformed data behavior tied to the actual
-terrain encoding.
+Use the two-byte layout, not the `origin` label alone, to select the CPR terrain encoding
+(`raw16 / 64`, times 2 into legacy steps). SIT placement altitude is `/ 2` for every SIT game.
 
 ### 12.5 Stadium and backdrop differences
 
@@ -1130,9 +1157,10 @@ At minimum, add the following tests.
 
 ### 15.4 Altitude
 
-- CPR raw bytes `00 40` decode as `0x4000 / 64 = 256` legacy steps in precise mode.
-- CPR TRK altitude `1024` maps to the same 256 legacy steps.
-- MTM2 SIT altitude `512` maps to 256 legacy steps with `/ 2`, not `/ 4`.
+- CPR raw bytes `00 40` decode as `0x4000 / 64 = 256` CPR steps, 512 legacy steps.
+- CPR TRK altitude `1024` maps to the same 256 CPR steps, 512 legacy steps (`1024 / 2`).
+- MTM2 SIT altitude `512` maps to 256 legacy steps with `/ 2`.
+- Stock objects rest on the terrain: SIT lift above ground equals `-minZ / 4` legacy steps.
 - The same CPR base transform is used for road vertices and wall-part heights.
 - No constant road lift is present.
 - A precise-mode terrain test retains nonzero low six bits.
@@ -1159,7 +1187,7 @@ These must remain labeled rather than silently hardened into “format facts”:
 | TTX surface enum | Verified from CPREDIT and stock data |
 | Packed wall texture bits and vertical slicing | Verified |
 | Catch fence is global implicit art | Verified |
-| CPR `/ 4` versus MTM2 `/ 2` altitude conversion | Verified by terrain/placement alignment |
+| CPR altitude and terrain in feet, `/ 2` into legacy steps as in MTM2 | Verified by object lift versus model depth on Laguna, Mid-Ohio, Detroit and MTM2 Alaska |
 | CPR RAW six fractional height bits | Verified format; discarded by current terrain rendering |
 | Horizontal float handling | Current TRK path truncates; current SIT placement path preserves floats |
 | 9-foot wall part | Calibrated, not recovered from code |
@@ -1180,8 +1208,8 @@ These must remain labeled rather than silently hardened into “format facts”:
 - [ ] Accept `vehicleFile`/`.CAR` without confusing it with `truckFile`/truck `.TRK`.
 - [ ] Dispatch the race-type enum by game family.
 - [ ] Infer one-byte versus two-byte terrain samples from the RAW.
-- [ ] Decode CPR little-endian 10.6 heights, preferably without discarding the low six bits.
-- [ ] Use `/ 4` for CPR two-byte SIT/TRK altitude and `/ 2` for classic MTM placements.
+- [x] Decode CPR little-endian 10.6 heights without discarding the low six bits.
+- [x] Convert CPR SIT/TRK altitude with `/ 2` like MTM, and CPR terrain with `raw16 / 64 * 2`.
 - [ ] Locate the layer from the LVL RAW basename.
 - [ ] Parse and preserve the complete TRK record in order.
 - [ ] Parse TTX texture flags as surface types.

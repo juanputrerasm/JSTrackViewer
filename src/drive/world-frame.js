@@ -29,6 +29,8 @@
   to the terrain rather than trusting it.
 */
 
+import { heightAtCell } from "../shared/terrain-height.js";
+
 /** Scene units per foot, across the map. */
 export const UNITS_PER_FOOT_H = 2;
 /** Scene units per foot, vertically. UNITS_PER_FOOT_V / UNITS_PER_FOOT_H is TRAXX_Z_STRETCH. */
@@ -50,8 +52,6 @@ export function createWorldFrame(trackData) {
   const gridSize = terrain?.gridSize ?? 256;
   const cellSize = terrain?.cellSize ?? DEFAULT_CELL_SIZE;
   const heightScale = terrain?.heightScale ?? DEFAULT_HEIGHT_SCALE;
-  const bytesPerCell = terrain?.rawBytesPerCell ?? 1;
-  const heightDivisor = terrain?.heightDivisor ?? 0;
   const worldSize = gridSize * cellSize;
 
   /*
@@ -65,31 +65,32 @@ export function createWorldFrame(trackData) {
     ? (terrain.rawData instanceof Uint8Array ? terrain.rawData : new Uint8Array(terrain.rawData))
     : null;
 
-  /** One raw sample, in height steps. Mirrors sampleHeight in worker/terrain-builder.js. */
+  /**
+   * One raw sample, in height steps, with its fraction: the same shared decode the mesh
+   * builder uses, so CPR's 10.6 and Evo's 11.5 grids keep their low bits under the wheels.
+   */
   function stepsAtCell(cx, cz) {
-    if (!raw) return 0;
-    const x = cx < 0 ? 0 : (cx > gridSize - 1 ? gridSize - 1 : cx);
-    const z = cz < 0 ? 0 : (cz > gridSize - 1 ? gridSize - 1 : cz);
-    const off = (x + z * gridSize) * bytesPerCell;
-    if (bytesPerCell === 1) return raw[off] ?? 0;
-    const lo = raw[off] ?? 0;
-    const hi = raw[off + 1] ?? 0;
-    // An explicit divisor means the encoding is known (Evo's 11.5 fixed point). Otherwise the
-    // MTM reading: a zero high byte is an 8-bit grid stored two bytes wide.
-    if (heightDivisor) return (lo | (hi << 8)) / heightDivisor;
-    if (hi === 0) return lo;
-    return (lo | (hi << 8)) >>> 6;
+    return heightAtCell(terrain, raw, cx, cz);
   }
 
   const stepsToFeet = (steps) => steps * heightScale / UNITS_PER_FOOT_V;
 
   /*
+    Whether a cell is split along its other diagonal, (cx+1,cz) to (cx,cz+1). Only on a
+    checkerboard terrain (CPR), and only where cx + cz is odd; see cellSplit in
+    terrain-builder.js. The wheels have to meet the triangles that are drawn.
+  */
+  const checkerboard = terrain?.cellSplit === "checkerboard";
+  const splitsOther = (cx, cz) => checkerboard && ((cx + cz) & 1) === 1;
+
+  /*
     Terrain height under a point, in feet, interpolated over the same two triangles the mesh
     is built from.
 
-    Getting the diagonal right matters more than it sounds. terrain-builder.js winds each cell
-    as (v0,v1,v2) and (v0,v2,v3), which puts the split along v0 to v2, that is from the cell's
-    (cx,cz) corner to its (cx+1,cz+1) corner. Interpolating bilinearly instead would put the
+    Getting the diagonal right matters more than it sounds. terrain-builder.js winds a cell
+    as (v0,v1,v2) and (v0,v2,v3) unless it is an odd cell on a checkerboard terrain (CPR),
+    which is split the other way (see splitsOther). The usual split is along v0 to v2, that
+    is from the cell's (cx,cz) corner to its (cx+1,cz+1) corner. Interpolating bilinearly instead would put the
     wheels above the surface on one half of every cell and below it on the other, and on MTM's
     32 ft cells that error is large enough to bounce a truck.
 
@@ -114,9 +115,17 @@ export function createWorldFrame(trackData) {
     const h11 = stepsAtCell(cx + 1, cz + 1);
     const h01 = stepsAtCell(cx, cz + 1);
 
-    const steps = u >= w
-      ? h00 + (h10 - h00) * u + (h11 - h10) * w
-      : h00 + (h11 - h01) * u + (h01 - h00) * w;
+    let steps;
+    if (splitsOther(cx, cz)) {
+      // Split along v1-v3: (v0,v1,v3) covers u + w <= 1, (v1,v2,v3) the rest.
+      steps = u + w <= 1
+        ? h00 + (h10 - h00) * u + (h01 - h00) * w
+        : h11 + (h01 - h11) * (1 - u) + (h10 - h11) * (1 - w);
+    } else {
+      steps = u >= w
+        ? h00 + (h10 - h00) * u + (h11 - h10) * w
+        : h00 + (h11 - h01) * u + (h01 - h00) * w;
+    }
     return stepsToFeet(steps);
   }
 
@@ -149,7 +158,15 @@ export function createWorldFrame(trackData) {
     // Slopes in feet per foot along +x (u) and along -z (w).
     let dhdu;
     let dhdw;
-    if (u >= w) {
+    if (splitsOther(cx, cz)) {
+      if (u + w <= 1) {
+        dhdu = (h10 - h00) / cellFt;
+        dhdw = (h01 - h00) / cellFt;
+      } else {
+        dhdu = (h11 - h01) / cellFt;
+        dhdw = (h11 - h10) / cellFt;
+      }
+    } else if (u >= w) {
       dhdu = (h10 - h00) / cellFt;
       dhdw = (h11 - h10) / cellFt;
     } else {

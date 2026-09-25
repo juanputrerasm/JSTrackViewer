@@ -4,6 +4,9 @@ import { loadGroundBoxes } from "./gbox-loader.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { loadRaceTrackLayer } from "./racetrack-loader.js";
 import { podRawSide } from "./texture-decoder.js";
+import {
+  CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE, LEGACY_ALTITUDE_DIVISOR,
+} from "../shared/terrain-height.js";
 
 /**
  * Parses MTM2/MTM1/CPR tracks from a SIT entry in a POD archive.
@@ -210,7 +213,7 @@ function parseBoxBlock(lines, blockStart, isRamp, doc) {
 
   const iposIdx = indexOfLinePrefix(lines, "ipos", blockStart, endIndex);
   if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
-    box.position = parseLegacyWorldTriplet(lines[iposIdx + 1], doc.terrain.rawBytesPerCell);
+    box.position = parseLegacyWorldTriplet(lines[iposIdx + 1]);
   }
 
   const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", blockStart, endIndex);
@@ -279,11 +282,11 @@ function parseCourseBlocks(lines, startCursor, count, course, doc) {
 
     const cstartIdx = indexOfLinePrefix(lines, "cstart", cursor);
     if (cstartIdx >= 0 && cstartIdx + 1 < lines.length) {
-      segment.start = parseLegacyWorldTriplet(lines[cstartIdx + 1], doc.terrain.rawBytesPerCell);
+      segment.start = parseLegacyWorldTriplet(lines[cstartIdx + 1]);
     }
     const cendIdx = indexOfLinePrefix(lines, "cend", cursor);
     if (cendIdx >= 0 && cendIdx + 1 < lines.length) {
-      segment.end = parseLegacyWorldTriplet(lines[cendIdx + 1], doc.terrain.rawBytesPerCell);
+      segment.end = parseLegacyWorldTriplet(lines[cendIdx + 1]);
     }
     const swIdx = indexOfLinePrefix(lines, "&cSpeedLimit,cTrackWidth", cursor);
     if (swIdx >= 0 && swIdx + 1 < lines.length) {
@@ -369,7 +372,6 @@ function parseBackdrop(sitLines, doc) {
 }
 
 function parseTrucks(sitLines, doc) {
-  const rbpc = doc.terrain.rawBytesPerCell;
 
   /*
     Slot 0: the player's own truck, under "*** Your Truck (Not used anymore) ***" with no block
@@ -380,7 +382,7 @@ function parseTrucks(sitLines, doc) {
   */
   const playerSection = indexOfLine(sitLines, "*** Your Truck (Not used anymore) ***");
   if (playerSection >= 0) {
-    doc.trucks.push({ ...parseTruckBlock(sitLines, playerSection + 1, rbpc), playerSlot: true });
+    doc.trucks.push({ ...parseTruckBlock(sitLines, playerSection + 1), playerSlot: true });
   }
 
   // Slots 1+: NPC vehicles under "*** Vehicles ***"
@@ -391,12 +393,12 @@ function parseTrucks(sitLines, doc) {
   for (let i = 0; i < count; i++) {
     cursor = nextBlockStart(sitLines, cursor);
     if (cursor < 0) return;
-    doc.trucks.push(parseTruckBlock(sitLines, cursor + 1, rbpc));
+    doc.trucks.push(parseTruckBlock(sitLines, cursor + 1));
     cursor++;
   }
 }
 
-function parseTruckBlock(lines, startIdx, rawBytesPerCell) {
+function parseTruckBlock(lines, startIdx) {
   const truck = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, name: "" };
   const nameIdx = indexOfLinePrefix(lines, "truckFile", startIdx);
   if (nameIdx >= 0 && nameIdx + 1 < lines.length) {
@@ -404,7 +406,7 @@ function parseTruckBlock(lines, startIdx, rawBytesPerCell) {
   }
   const iposIdx = indexOfLinePrefix(lines, "ipos", startIdx);
   if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
-    truck.position = parseLegacyWorldTriplet(lines[iposIdx + 1], rawBytesPerCell);
+    truck.position = parseLegacyWorldTriplet(lines[iposIdx + 1]);
   }
   const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", startIdx);
   if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
@@ -486,6 +488,18 @@ function inferTerrain(doc) {
   }
   doc.terrain.gridSize = gridSize;
   doc.terrain.rawBytesPerCell = rawBytesPerCell;
+  /*
+    A 16-bit grid behind a SIT is CPR's, 10.6 fixed point: native height = raw16 / 64.0,
+    fraction kept, in 4 ft CPR steps; heightUnitScale 2 turns those into the 2 ft steps the
+    rest of the viewer (and every BIN model) is scaled for. See shared/terrain-height.js.
+    MTM1 and MTM2 terrain is one byte per cell (none of their stock PODs holds a
+    131,072-byte grid). Evo's 16-bit grid is 11.5 and comes through its own loader.
+  */
+  const cpr = rawBytesPerCell === 2;
+  doc.terrain.heightDivisor = cpr ? CPR_HEIGHT_DIVISOR : null;
+  doc.terrain.heightUnitScale = cpr ? CPR_HEIGHT_UNIT_SCALE : 1;
+  // CPR splits its terrain cells on alternating diagonals; see cellSplit in terrain-builder.js.
+  doc.terrain.cellSplit = cpr ? "checkerboard" : "fixed";
   // CLR bytes per cell: 1 or 2
   if (clrData) {
     const cells = gridSize * gridSize;
@@ -496,16 +510,21 @@ function inferTerrain(doc) {
 // .SIT positions are feet; Traxx stores them as ipos = 2*feet horizontally and feet/2
 // vertically, wrapping negatives into the 16384-unit world (TrackPODFile.cpp Pod1SitToIpos).
 //
+// That holds for CPR too. CPR's own reading, altitude / 4, gives 4 ft CPR steps, which the
+// viewer carries as 2 ft legacy steps like the terrain, so the divisor is 2 for all three
+// games. This used to be `/ 4` for CPR, which drew every CPR object at half its height above
+// the ground against a model drawn at full size, and buried it.
+//
 // Traxx itself has to quantise, because ipos is an int: the original truncated with
 // `2*(int)atof(..)`, which lost half-steps and made positions walk downward on every
 // load/save round trip, and the Community Patch 3 fork fixed that by carrying a separate
 // 1/256-of-a-step fraction per axis (xfraction/yfraction/zfraction). A viewer never writes
 // the file back, so it needs neither the split nor the quantisation: keeping the value as a
 // float is strictly more precise than either.
-function parseLegacyWorldTriplet(value, rawBytesPerCell) {
+function parseLegacyWorldTriplet(value) {
   const parts = value.split(",");
   if (parts.length < 3) return [0, 0, 0];
-  const vDiv = rawBytesPerCell === 2 ? 4.0 : 2.0;
+  const vDiv = LEGACY_ALTITUDE_DIVISOR;
   let x = 2 * parseFloat(parts[0].trim());
   let y = 2 * parseFloat(parts[2].trim());
   const z = parseFloat(parts[1].trim()) / vDiv;

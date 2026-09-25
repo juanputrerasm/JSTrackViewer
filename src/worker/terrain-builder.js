@@ -1,4 +1,5 @@
 import { decodeRawTexture, podRawSide } from "./texture-decoder.js";
+import { decodeHeightSample } from "../shared/terrain-height.js";
 
 export const CELL_SIZE = 64;
 const ATLAS_TILE_SIZE = 64;
@@ -41,14 +42,29 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   /*
     Horizontal and vertical scale are properties of the terrain, not constants.
 
-    The MTM family is 64 world units per cell and encodes a 16-bit height as a 10.6 fixed
-    point value, which is what the historical `>>> 6` was. 4x4 Evolution is 32 units per cell
-    with a 11.5 fixed point height, so it sets cellSize 32 and heightDivisor 32 and keeps its
-    own units - see evo-coords.js. A descriptor that says nothing gets the MTM values, so
-    every existing track builds exactly as before.
+    The MTM family is 64 world units per cell with a one-byte height. CPR keeps the 64 unit
+    cell but stores a 16-bit 10.6 fixed point height, so its loader sets heightDivisor 64,
+    and heightUnitScale 2 because a CPR step is two MTM steps.
+    4x4 Evolution is 32 units per cell with a 11.5 fixed point height, so it sets cellSize 32
+    and heightDivisor 32 and keeps its own units - see evo-coords.js. The division keeps the
+    fraction in both; see shared/terrain-height.js for why the divisor must be declared
+    rather than inferred from the cell width. A descriptor that says nothing gets the MTM
+    values, so every 8-bit track builds exactly as before.
   */
   const cellSize = terrain.cellSize ?? CELL_SIZE;
+
+  /*
+    Which diagonal splits each cell.
+
+    "fixed" is every cell from its (cx,cz) corner to (cx+1,cz+1), as this viewer always drew.
+    "checkerboard" is the Traxx rule (TrackPODTerrain.cpp InterpolateRawAtPoint, and JTraxx's
+    TerrainGeometryBuilder): the same diagonal where cx + cz is even and the other one,
+    (cx+1,cz) to (cx,cz+1), where it is odd. CPR's own renderer splits that way, which is
+    what gives its hillsides their diamond facets, so its loader asks for it.
+  */
+  const checkerboard = terrain.cellSplit === "checkerboard";
   const heightDivisor = terrain.heightDivisor ?? null;
+  const heightUnitScale = terrain.heightUnitScale ?? 1;
 
   /*
     Build the texture atlas, or reuse one.
@@ -94,10 +110,10 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         continue;
       }
 
-      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz,     heightDivisor) + heightOffset;
-      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz,     heightDivisor) + heightOffset;
-      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1, heightDivisor) + heightOffset;
-      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1, heightDivisor) + heightOffset;
+      const h00 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz,     heightDivisor, heightUnitScale) + heightOffset;
+      const h10 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz,     heightDivisor, heightUnitScale) + heightOffset;
+      const h11 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx + 1, cz + 1, heightDivisor, heightUnitScale) + heightOffset;
+      const h01 = sampleHeight(rawData, rawBytesPerCell, gridSize, cx,     cz + 1, heightDivisor, heightUnitScale) + heightOffset;
 
       const x0 = cx * cellSize;
       const x1 = (cx + 1) * cellSize;
@@ -130,7 +146,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         const ox = (v === 1 || v === 2) ? 1 : 0;
         const oz = (v === 2 || v === 3) ? 1 : 0;
         const n = cornerNormal(rawData, rawBytesPerCell, gridSize, cx + ox, cz + oz,
-                               heightDivisor, heightOffset, hs, cellSize);
+                               heightDivisor, heightUnitScale, heightOffset, hs, cellSize);
         normals[(vBase + v) * 3 + 0] = n[0] * facing;
         normals[(vBase + v) * 3 + 1] = n[1] * facing;
         normals[(vBase + v) * 3 + 2] = n[2] * facing;
@@ -177,7 +193,16 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
       }
 
       // Indices (2 triangles), wound the other way for a surface seen from below.
-      if (faceDown) {
+      if (checkerboard && ((cx + cz) & 1)) {
+        // Split along v1-v3: (v0,v1,v3) and (v1,v2,v3), same facing as the fixed split.
+        if (faceDown) {
+          indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 3; indices[iBase + 2] = vBase + 1;
+          indices[iBase + 3] = vBase + 1; indices[iBase + 4] = vBase + 3; indices[iBase + 5] = vBase + 2;
+        } else {
+          indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 1; indices[iBase + 2] = vBase + 3;
+          indices[iBase + 3] = vBase + 1; indices[iBase + 4] = vBase + 2; indices[iBase + 5] = vBase + 3;
+        }
+      } else if (faceDown) {
         indices[iBase + 0] = vBase;     indices[iBase + 1] = vBase + 2; indices[iBase + 2] = vBase + 1;
         indices[iBase + 3] = vBase;     indices[iBase + 4] = vBase + 3; indices[iBase + 5] = vBase + 2;
       } else {
@@ -188,7 +213,10 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   }
 
   return {
-    gridSize, cellSize, heightScale: hs,
+    // The height encoding travels with the mesh so every main-thread sampler decodes the grid
+    // the same way the mesh did.
+    gridSize, cellSize, heightScale: hs, heightDivisor, heightUnitScale,
+    cellSplit: checkerboard ? "checkerboard" : "fixed",
     positions: positions.buffer,
     normals: normals.buffer,
     uvs: uvs.buffer,
@@ -460,9 +488,10 @@ function decodeTerrainTexture(tex, trackPalette) {
   so the Z tangent is negated, which is why the north term comes out positive rather than
   negative. Edges clamp, which flattens the outermost row by half a cell and is invisible.
 */
-function cornerNormal(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor, heightOffset, hs, cellSize) {
-  const at = (x, z) => sampleHeight(rawData, rawBytesPerCell, gridSize,
-                                    Math.max(0, x), Math.max(0, z), heightDivisor) + heightOffset;
+function cornerNormal(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor, heightUnitScale,
+                      heightOffset, hs, cellSize) {
+  const at = (x, z) => sampleHeight(rawData, rawBytesPerCell, gridSize, Math.max(0, x),
+                                    Math.max(0, z), heightDivisor, heightUnitScale) + heightOffset;
   const dx = (at(cx + 1, cz) - at(cx - 1, cz)) * 0.5 * hs;
   const dz = (at(cx, cz + 1) - at(cx, cz - 1)) * 0.5 * hs;
   const nx = -dx;
@@ -472,21 +501,10 @@ function cornerNormal(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor,
   return [nx / len, ny / len, nz / len];
 }
 
-function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor) {
+function sampleHeight(rawData, rawBytesPerCell, gridSize, cx, cz, heightDivisor, heightUnitScale) {
   if (!rawData) return 0;
   const x = Math.min(cx, gridSize - 1);
   const z = Math.min(cz, gridSize - 1);
-  const off = (x + z * gridSize) * rawBytesPerCell;
-  if (rawBytesPerCell === 1) return rawData[off] ?? 0;
-  const lo = rawData[off] ?? 0;
-  const hi = rawData[off + 1] ?? 0;
-  /*
-    An explicit divisor means the grid's encoding is known, so divide and keep the fraction.
-    Evo's low five bits are real elevation - ASPEN alone uses 8,617 distinct heights - and
-    shifting them away terraces every slope into 1-unit steps.
-  */
-  if (heightDivisor) return (lo | (hi << 8)) / heightDivisor;
-  // MTM-family fallback: a zero high byte is treated as an 8-bit grid stored two bytes wide.
-  if (hi === 0) return lo;
-  return (lo | (hi << 8)) >>> 6;
+  return decodeHeightSample(rawData, (x + z * gridSize) * rawBytesPerCell, rawBytesPerCell,
+                            heightDivisor, heightUnitScale);
 }
