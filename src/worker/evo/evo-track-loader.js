@@ -1,7 +1,7 @@
 import { resolveAsset, findEntry } from "../pod-format.js";
 import { archiveTitle, replaceExtension, basenameWithoutExtension } from "../../shared/path-utils.js";
 import { buildTerrainMesh } from "../terrain-builder.js";
-import { parseEvoSit } from "./evo-sit-parser.js";
+import { evoTrackTypeName, parseEvoSit } from "./evo-sit-parser.js";
 import { parseEvoLvl, parseEvoWat } from "./evo-lvl-parser.js";
 import { parseEvoTex } from "./evo-tex-parser.js";
 import { parseEvoVeg } from "./veg-parser.js";
@@ -201,7 +201,7 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
     podComment: podIndex.comment ?? "",
     fileName: sitEntry.title,
     trackName: sit.trackName || stem,
-    trackType: sit.raceType,
+    trackType: evoTrackTypeName(sit.raceType),
     weatherMask: sit.weatherMask,
     ambientSound: sit.ambientSound,
     author: sit.author,

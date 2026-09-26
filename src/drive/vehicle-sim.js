@@ -252,6 +252,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     // Seconds spent upside down, which is what decides when the truck is put back on the course.
     invertedFor: 0,
     shiftTimer: 0,
+    // Manual gearbox: the driver shifts and the pedals never swap. See shift().
+    manual: false,
   };
 
   /**
@@ -1105,6 +1107,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
   function resolveReverse(dt, input) {
     const throttle = clamp(input.throttle ?? 0, 0, 1);
     const brake = clamp(input.brake ?? 0, 0, 1);
+    // A manual gearbox selects reverse itself and drives it on the throttle.
+    if (state.manual) return { throttle, brake };
     const forwardSpeed = dot(state.vel, rotate(state.orientation, v3(0, 0, -1)));
     const stopped = Math.abs(forwardSpeed) < REVERSE_ENGAGE_SPEED;
 
@@ -1124,7 +1128,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
 
   function autoShift() {
     // Reverse is a gear the driver selects, not one the gearbox shifts out of.
-    if (state.gear < 0) return;
+    if (state.manual || state.gear < 0) return;
     const gears = params.transmission.gear_ratio;
     if (state.gear > 0 && state.rpm >= params.transmission.upshift_rpm && state.gear < gears.length) {
       state.gear++;
@@ -1133,6 +1137,31 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
       state.gear--;
       state.shiftTimer = params.transmission.shiftTime;
     }
+  }
+
+  /*
+    A driver's gear change, for the manual gearbox.
+
+    Up and down one gear at a time, with the same shift interruption the automatic has. Below
+    first is reverse, and only once the truck has all but stopped, the same rule the automatic
+    uses to engage it: dropping into reverse at speed is not a gear change, it is a gearbox
+    being destroyed. Out of reverse, up goes to first.
+  */
+  function shift(direction) {
+    const gears = params.transmission.gear_ratio;
+    let next = state.gear;
+    if (direction > 0) {
+      next = state.gear < 0 ? 1 : Math.min(gears.length, state.gear + 1);
+    } else if (state.gear > 1) {
+      next = state.gear - 1;
+    } else if (state.gear === 1) {
+      const forwardSpeed = dot(state.vel, rotate(state.orientation, v3(0, 0, -1)));
+      if (Math.abs(forwardSpeed) < REVERSE_ENGAGE_SPEED) next = -1;
+    }
+    if (next === state.gear) return false;
+    state.gear = next;
+    state.shiftTimer = params.transmission.shiftTime;
+    return true;
   }
 
   function torqueAt(rpm) {
@@ -1196,6 +1225,11 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     reset,
     step,
     readState,
+    /** Manual gearbox on or off; switching back to automatic lets it pick the gear again. */
+    setManual(manual) { state.manual = manual === true; },
+    get manual() { return state.manual; },
+    shiftUp: () => shift(1),
+    shiftDown: () => shift(-1),
     get orientation() { return state.orientation; },
     /** Arrays in wheel order, for the renderer. */
     wheelCompression: () => wheels.map((w) => w.compression),

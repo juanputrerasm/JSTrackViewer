@@ -29,6 +29,8 @@ export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
   // Parse SIT metadata (after LVL)
   parseSitMetadata(sitLines, doc);
 
+  if (doc.origin === "CPR") applyCprStandInMasses(doc.boxes);
+
   return doc;
 }
 
@@ -135,6 +137,32 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   loadRaceTrackLayer(podIndex, getBytes, rawName, doc);
 }
 
+/*
+  Weights for the CPR scenery a car is meant to knock about.
+
+  CPREDIT has the object types for it (its box type menu reads Undefined, Sign, Barricade,
+  Tree, Cone, Crushed Car, Checkpoint, the same numbering MTM2 uses) and a "Set Box Mass"
+  command, but every stock CPR object is saved as type 0 with mass 0, cones included. Mass 0
+  means immovable to the drive colliders, so a traffic cone stopped a truck like a wall.
+
+  The stand-ins are MTM2's own values for the same objects, in slugs as the file stores them:
+  its CONE.BIN (type 4) at 0.093243, about 3 lb, and its RR4SIGN signs (type 1) at 7.770249,
+  about 250 lb, for Laguna's LG3MIL distance marker boards. They apply only where the file
+  says 0, so a track that states a mass keeps it.
+*/
+const CPR_STAND_IN_MASS = [
+  [/^(LG4CONE|VN4CONEA)\.BIN$/i, 0.093243],
+  [/^LG3MIL[1-4]\.BIN$/i, 7.770249],
+];
+
+function applyCprStandInMasses(boxes) {
+  for (const box of boxes) {
+    if (box.mass) continue;
+    const match = CPR_STAND_IN_MASS.find(([pattern]) => pattern.test(box.modelName ?? ""));
+    if (match) box.mass = match[1];
+  }
+}
+
 function parseSitMetadata(sitLines, doc) {
   // !Race Track Name
   const nameIdx = indexOfLine(sitLines, "!Race Track Name");
@@ -146,7 +174,9 @@ function parseSitMetadata(sitLines, doc) {
 
   // Track Race Type
   const typeIdx = indexOfLine(sitLines, "Track Race Type");
-  if (typeIdx >= 0 && typeIdx + 1 < sitLines.length) doc.trackType = trackTypeFromValue(parseLeadingInt(sitLines[typeIdx + 1]));
+  if (typeIdx >= 0 && typeIdx + 1 < sitLines.length) {
+    doc.trackType = trackTypeFromValue(parseLeadingInt(sitLines[typeIdx + 1]), doc.origin);
+  }
 
   /*
     @Redbook Audio Track: the CD audio track the game plays on this course.
@@ -576,9 +606,25 @@ function detectSitOrigin(sitLines, sitTitle = "") {
   return "MTM1";
 }
 
-function trackTypeFromValue(v) {
-  // MTM2 values: 0=unset, 1=drag, 2=circuit, 3=rally, 4=rumble
-  return ["UNKNOWN", "DRAG", "CIRCUIT", "RALLY", "RUMBLE"][v] ?? "UNKNOWN";
+/*
+  "Track Race Type" means different things in the two games that write it.
+
+    MTM1 / MTM2   0 = unset, 1 = drag, 2 = circuit, 3 = rally, 4 = rumble
+    CPR           4 = road, 5 = speedway, 6 = short oval, 7 = street
+
+  The CPR names are CPREDIT's own, from the "D. Autoset track type" prompt
+  ("4 = road, 5 = speedway, 6 = short oval, 7 = street :"), and the 17 stock tracks bear them
+  out: Laguna Seca, Mid-Ohio, Road America, Portland and Detroit are 4; California and
+  Michigan are 5; Gateway, Homestead, Milwaukee, Nazareth and Rio are 6; Surfers Paradise,
+  Long Beach, Cleveland, Toronto and Vancouver are 7. Read through the MTM table, every CPR
+  road course came out as RUMBLE.
+*/
+const MTM_TRACK_TYPES = { 1: "DRAG", 2: "CIRCUIT", 3: "RALLY", 4: "RUMBLE" };
+const CPR_TRACK_TYPES = { 4: "ROAD", 5: "SPEEDWAY", 6: "SHORT OVAL", 7: "STREET" };
+
+function trackTypeFromValue(v, origin) {
+  const table = origin === "CPR" ? CPR_TRACK_TYPES : MTM_TRACK_TYPES;
+  return table[v] ?? "UNKNOWN";
 }
 
 function indexOfLine(lines, value) {

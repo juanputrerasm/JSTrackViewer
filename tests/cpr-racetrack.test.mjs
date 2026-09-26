@@ -187,3 +187,32 @@ test("the wall clip never hides a curb or road slot on any stock CPR track", {
   }
   assert.ok(segments > 1000);
 });
+
+test("CPR track types use CPREDIT's names, not MTM2's", {
+  skip: hasStockPod(`${CPR_DIR}/LAGUNA.POD`) ? false : `no local CPR install at ${CPR_DIR}`,
+}, () => {
+  const expected = {
+    "LAGUNA.POD": "ROAD", "ELKHART.POD": "ROAD", "CALI.POD": "SPEEDWAY", "MICHIGAN.POD": "SPEEDWAY",
+    "MILWAUKE.POD": "SHORT OVAL", "NAZ.POD": "SHORT OVAL", "TORONTO.POD": "STREET", "VANCVR.POD": "STREET",
+  };
+  for (const [file, type] of Object.entries(expected)) {
+    if (!hasStockPod(`${CPR_DIR}/${file}`)) continue;
+    const pod = indexStockPod(`${CPR_DIR}/${file}`);
+    const sit = pod.podIndex.entries.find((e) => e.title.endsWith(".SIT"));
+    assert.equal(parseSitTrack(pod.podIndex, pod.getBytes, sit, "").trackType, type, file);
+  }
+});
+
+test("CPR cones and marker boards get MTM2's weights, so a truck can knock them about", {
+  skip: hasStockPod(`${CPR_DIR}/LAGUNA.POD`) ? false : `no local CPR install at ${CPR_DIR}`,
+}, () => {
+  const pod = indexStockPod(`${CPR_DIR}/LAGUNA.POD`);
+  const sit = pod.podIndex.entries.find((e) => e.title.endsWith(".SIT"));
+  const doc = parseSitTrack(pod.podIndex, pod.getBytes, sit, "");
+  const cones = doc.boxes.filter((b) => b.modelName === "LG4CONE.BIN");
+  const markers = doc.boxes.filter((b) => /^LG3MIL[1-4]\.BIN$/.test(b.modelName));
+  assert.ok(cones.length && cones.every((b) => b.mass === 0.093243));
+  assert.ok(markers.length && markers.every((b) => b.mass === 7.770249));
+  // Everything else keeps the file's mass 0, so a tent or a walkway stays put.
+  assert.ok(doc.boxes.filter((b) => /TENT|WLK/.test(b.modelName)).every((b) => b.mass === 0));
+});

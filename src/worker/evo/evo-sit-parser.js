@@ -424,3 +424,28 @@ function triple(value) {
   const parts = evoNumbers(value);
   return parts.length === 3 ? parts : [0, 0, 0];
 }
+
+/*
+  "Track Race Type" as a name, for 4x4 Evolution 1 and 2.
+
+  Three values are established from the stock tracks rather than assumed:
+
+    2  CIRCUIT   Silverton Pass, Truck Stop 101, Baja Beach, Tri Baja 250: the last checkpoint
+                 sits back at the starting grid (39 to 175 units away), a closed lap.
+    3  RALLY     Pikes Peak: the last checkpoint is about 3,800 units from the grid, point to
+                 point. The Evo track editor's manual names exactly these two kinds: "A
+                 circuit track is one that ends where it begins ... A rally track is one that
+                 goes from point A to point B."
+    6  MISSION   El Norte and Obstacle Park (Evo 2): trigger boxes instead of a race route,
+                 El Norte with 83 triggers, no checkpoints and a track length of 0.
+
+  2 and 3 are also MTM2's circuit and rally codes, and the Evo .SIT header still carries MTM2's
+  drag race fields, so the numbering is inherited. Other values are not guessed at: they are
+  shown as their number.
+*/
+const EVO_TRACK_TYPES = { 2: "CIRCUIT", 3: "RALLY", 6: "MISSION" };
+
+export function evoTrackTypeName(raceType) {
+  if (!raceType) return "UNKNOWN";
+  return EVO_TRACK_TYPES[raceType] ?? `TYPE ${raceType}`;
+}

@@ -4,7 +4,7 @@ import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes } from "./zip-utils.js";
 
 const APP_TITLE = "JSTrackViewer";
-const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · V Camera · R Reset";
+const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · V Camera · R Reset";
 const OPFS_PATH = "track-viewer/current.pod";
 // Track and truck archives have separate OPFS paths and separate indexes in the worker.
 const TRUCK_OPFS_PATH = "track-viewer/truck.pod";
@@ -369,6 +369,10 @@ export class TrackViewerApp {
       });
       this._renderFlags.checkpoints = !["MTM1", "MTM2", "EVO1", "EVO2", "CPR"].includes(result.origin);
       this._doc.getElementById("tog-checkpoints").checked = this._renderFlags.checkpoints;
+      // The 2px terrain overlap hides seams on MTM2 and Evo's tile sets, and only blurs the
+      // others' (MTM1, CPR, TV, Fury3, Hellbender), so it starts on per game. Still a toggle.
+      this._renderFlags.terrainOverlap = ["MTM2", "EVO1", "EVO2"].includes(result.origin);
+      this._doc.getElementById("tog-terrain-overlap").checked = this._renderFlags.terrainOverlap;
       this._scene.setTrack(result, this._renderFlags, this._heightScale);
       if (this._truckAssembly) {
         this._scene.setDriveTruck(this._truckAssembly);
@@ -409,8 +413,14 @@ export class TrackViewerApp {
   }
 
   _updateTruckButtons() {
-    const ready = !!(this._scene._trackData && (this._truckChoices.length || this._truckAssembly));
-    this._doc.getElementById("drive-btn").disabled = !ready;
+    // Drive and its hitbox overlay mean nothing until a truck POD is open, so they are not
+    // shown at all before then; with a truck but no track, Drive shows but stays disabled.
+    const hasTruck = !!(this._truckChoices.length || this._truckAssembly);
+    const ready = !!(this._scene._trackData && hasTruck);
+    const drive = this._doc.getElementById("drive-btn");
+    drive.hidden = !hasTruck;
+    drive.disabled = !ready;
+    this._doc.getElementById("hitboxes-row").hidden = !hasTruck;
   }
 
   async _loadTruckFromFile(file) {
@@ -532,8 +542,15 @@ export class TrackViewerApp {
     const dl = this._doc.getElementById("truck-info");
     if (!dl) return;
     const rows = [];
-    if (status.speed !== undefined) rows.push(["Speed", `${status.speed.toFixed(0)} mph`]);
-    if (status.gear !== undefined) rows.push(["Gear", status.airborne ? `${status.gear} (airborne)` : String(status.gear)]);
+    // status.speed is mph; 1 mph is exactly 1.609344 km/h.
+    if (status.speed !== undefined) {
+      rows.push(["Speed", `${status.speed.toFixed(0)} mph / ${(status.speed * 1.609344).toFixed(0)} km/h`]);
+    }
+    if (status.gear !== undefined) {
+      const gear = status.gear < 0 ? "R" : String(status.gear);
+      rows.push(["Gear", status.airborne ? `${gear} (airborne)` : gear]);
+    }
+    if (status.manual !== undefined) rows.push(["Gearbox", status.manual ? "Manual (A/Z shift)" : "Automatic"]);
     if (status.rpm !== undefined) rows.push(["Engine", `${status.rpm.toFixed(0)} rpm`]);
     if (status.view) rows.push(["View", status.view]);
 

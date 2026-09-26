@@ -108,13 +108,13 @@ Then open <http://localhost:8080/>. There is no build step and no package instal
 Test Drive puts a truck on the track you are viewing and lets you drive it. The truck comes from its own archive, so a track POD and a truck POD are open at the same time.
 
 1. Load a track as usual.
-2. In the **Test Drive** panel, choose **Load truck POD** and open a Monster Truck Madness or Monster Truck Madness 2 truck archive.
+2. In the **Test Drive** panel, choose **Load truck POD** and open a Monster Truck Madness or Monster Truck Madness 2 truck archive. The **Drive** button appears once a truck archive is open.
 3. Pick a truck from the list.
 4. Choose **Drive**. The truck is placed at the first starting grid slot.
 
-While driving, the panel reports speed, the selected gear, engine rpm and the active camera. On a track that carries checkpoints it also reports the lap number, the next checkpoint, the current lap time and your best lap; a track without checkpoints, such as a drag strip or a stadium, simply omits those rows.
+While driving, the panel reports speed in mph and km/h, the selected gear, whether the gearbox is automatic or manual, engine rpm and the active camera. On a track that carries checkpoints it also reports the lap number, the next checkpoint, the current lap time and your best lap; a track without checkpoints, such as a drag strip or a stadium, simply omits those rows.
 
-**Show hitboxes** draws a wireframe around everything the simulation can collide with, which is the quickest way to tell an invisible wall from a rendering gap. Objects that have a model are collided against the model itself rather than an oversized authored box, so you can pull up against a tree instead of stopping several metres short of it, and tree foliage no longer stops the truck while its trunk does.
+**Show hitboxes** draws a wireframe around everything the simulation can collide with, which is the quickest way to tell an invisible wall from a rendering gap. Objects that have a model are collided against the model itself rather than an oversized authored box, so you can pull up against a tree instead of stopping several metres short of it, and tree foliage no longer stops the truck while its trunk does. Light objects with a mass, such as cones, are knocked aside; CART Precision Racing stores no masses, so its cones and Laguna Seca's distance markers borrow Monster Truck Madness 2's weights.
 
 Loading a different track or a different truck parks you automatically. The truck stays loaded, so you can drop straight into the next track.
 
@@ -122,7 +122,9 @@ Loading a different track or a different truck parks you automatically. The truc
 |---|---|
 | Up Arrow / W | Throttle |
 | Down Arrow / S | Brake and reverse |
-| Left / Right Arrow, or A / D | Steer |
+| Left / Right Arrow, or A / D | Steer (arrows only in manual) |
+| M | Toggle the manual gearbox |
+| A / Z | Shift up / down in manual; Z from first selects reverse at a standstill, and the throttle drives it |
 | Space | Handbrake |
 | V | Cycle the cameras: chase near, chase far, cockpit, free orbit |
 | R | Return to the starting grid |

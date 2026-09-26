@@ -228,6 +228,13 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
           onStatus?.({ view: cameras.viewLabel });
         } else if (action === "reset") {
           placeAtSpawn();
+        } else if (action === "toggleManual") {
+          sim.setManual(!sim.manual);
+          input.setManual(sim.manual);
+        } else if (action === "shiftUp") {
+          sim.shiftUp();
+        } else if (action === "shiftDown") {
+          sim.shiftDown();
         }
       }
 
@@ -281,6 +288,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
         onStatus?.({
           speed: state.speed * 0.681818,
           gear: state.gear,
+          manual: sim.manual,
           rpm: state.rpm,
           view: cameras.viewLabel,
           race: checkpoints.state,
@@ -302,6 +310,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
         onStatus?.({
           speed: state.speed * 0.681818,  // ft/s to mph
           gear: state.gear,
+          manual: sim.manual,
           rpm: state.rpm,
           airborne: state.airborne,
           view: cameras.viewLabel,

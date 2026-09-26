@@ -17,6 +17,15 @@ const THROTTLE_KEYS = ["ArrowUp", "KeyW"];
 const BRAKE_KEYS = ["ArrowDown", "KeyS"];
 const LEFT_KEYS = ["ArrowLeft", "KeyA"];
 const RIGHT_KEYS = ["ArrowRight", "KeyD"];
+/*
+  Manual gearbox: M toggles it, and while it is on A and Z shift up and down, which is MTM2's
+  own manual shifting. A is also a steering key, so in manual both WASD steering keys stand
+  down together (a one-sided A-less pair would be worse than none) and the arrows steer.
+*/
+const MANUAL_TOGGLE_KEY = "KeyM";
+const SHIFT_UP_KEY = "KeyA";
+const SHIFT_DOWN_KEY = "KeyZ";
+const MANUAL_STEER_KEYS = new Set(["KeyA", "KeyD"]);
 const HANDBRAKE_KEYS = ["Space"];
 
 /*
@@ -39,6 +48,7 @@ export function createDriveInput(element) {
   let padViewWasDown = false;
   let padResetWasDown = false;
   let enabled = false;
+  let manual = false;
 
   const onKeyDown = (event) => {
     if (!enabled) return;
@@ -56,6 +66,9 @@ export function createDriveInput(element) {
       if (code === "KeyV") pressed.push("nextView");
       if (code === "KeyR") pressed.push("reset");
       if (code === "KeyC") pressed.push("freeCamera");
+      if (code === MANUAL_TOGGLE_KEY) pressed.push("toggleManual");
+      if (manual && code === SHIFT_UP_KEY) pressed.push("shiftUp");
+      if (manual && code === SHIFT_DOWN_KEY) pressed.push("shiftDown");
     }
     held.add(code);
     // The arrows and space scroll the page otherwise, which is disorienting mid-jump.
@@ -75,7 +88,7 @@ export function createDriveInput(element) {
   element.addEventListener("blur", onBlur);
   window.addEventListener("blur", onBlur);
 
-  const anyHeld = (codes) => codes.some((code) => held.has(code));
+  const anyHeld = (codes) => codes.some((code) => held.has(code) && !(manual && MANUAL_STEER_KEYS.has(code)));
 
   function readPad() {
     const pads = navigator.getGamepads?.() ?? [];
@@ -95,6 +108,9 @@ export function createDriveInput(element) {
     },
 
     get enabled() { return enabled; },
+
+    /** Whether A and Z shift gears (manual) or A steers (automatic). */
+    setManual(value) { manual = value === true; },
 
     /** The current control positions, plus any one-shot actions since the last read. */
     read() {
