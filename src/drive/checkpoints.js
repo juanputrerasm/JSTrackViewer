@@ -17,6 +17,7 @@
   perfectly good, which is the one failure nobody forgives in a racing game.
 */
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./world-frame.js";
+import { isCprPitCheckpoint } from "../shared/cpr-track-schema.js";
 
 const TYPE_CHECKPOINT = 6;
 
@@ -33,8 +34,12 @@ export function createCheckpoints(trackData) {
   const toFeetH = 1 / UNITS_PER_FOOT_H;
   const toFeetV = 1 / UNITS_PER_FOOT_V;
 
+  /*
+    CPR's first three checkpoints belong to the pit lane (see cprCheckpointRole), so a lap is
+    only the start/finish and the ordinary gates, and gate 0 is the start/finish line.
+  */
   const gates = (trackData?.boxes ?? [])
-    .filter((box) => (box.type ?? 0) === TYPE_CHECKPOINT)
+    .filter((box) => (box.type ?? 0) === TYPE_CHECKPOINT && !isCprPitCheckpoint(box.checkpointRole))
     .map((box) => {
       const [wx = 0, wy = 0, wz = 0] = box.position ?? [];
       return {

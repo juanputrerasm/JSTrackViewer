@@ -23,6 +23,8 @@ const RIGHT_KEYS = ["ArrowRight", "KeyD"];
   down together (a one-sided A-less pair would be worse than none) and the arrows steer.
 */
 const MANUAL_TOGGLE_KEY = "KeyM";
+/** The truck's lights: headlights, light bar and specials. See truck-lights.js. */
+const LIGHTS_KEY = "KeyL";
 const SHIFT_UP_KEY = "KeyA";
 const SHIFT_DOWN_KEY = "KeyZ";
 const MANUAL_STEER_KEYS = new Set(["KeyA", "KeyD"]);
@@ -67,6 +69,7 @@ export function createDriveInput(element) {
       if (code === "KeyR") pressed.push("reset");
       if (code === "KeyC") pressed.push("freeCamera");
       if (code === MANUAL_TOGGLE_KEY) pressed.push("toggleManual");
+      if (code === LIGHTS_KEY) pressed.push("toggleLights");
       if (manual && code === SHIFT_UP_KEY) pressed.push("shiftUp");
       if (manual && code === SHIFT_DOWN_KEY) pressed.push("shiftDown");
     }

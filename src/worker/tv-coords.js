@@ -29,25 +29,26 @@ const EDITOR_CELL_SIZE = 64;
  * Converts a raw TV-family (x, y, z) triple to the viewer's editor-space [x, y, altitude].
  *
  * Coordinates are frequently negative in shipped content, so the horizontal wrap is required
- * rather than defensive. Positions land on cell centres, which is where the editor placed
- * them: everything in these files is positioned per square.
+ * rather than defensive.
+ *
+ * Positions are kept exact, NOT snapped to a cell. 99.7% of the 16,323 placements in TV.pod,
+ * FURY3.POD and FURYSE.POD sit inside a cell rather than on a cell centre (only 0.3% do), and
+ * a heightfield sample (cx, cz) is a grid VERTEX at cx * 2^20: for ground-logic objects the
+ * stored Y equals the terrain interpolated between the four vertices around the exact
+ * position (99.9% of FURYSE, 92.6% of FURY3, 89% of TV within half a step), while reading the
+ * cell centre fits worst of every convention tried (48-74%). TVCAD's own "snap to grid"
+ * (X = GridX * 2^20) is an editor convenience that also lands on a vertex, not the centre.
  */
 export function tvPlacementToEditor(x, y, z, gridSize) {
   const g = gridSize > 0 ? gridSize : 256;
-  const gx = Math.floor(x / TV_UNITS_PER_CELL);
-  const gz = Math.floor(z / TV_UNITS_PER_CELL);
-  const wrappedX = ((gx % g) + g) % g;
-  const wrappedZ = ((gz % g) + g) % g;
-  return [
-    wrappedX * EDITOR_CELL_SIZE + EDITOR_CELL_SIZE / 2,
-    wrappedZ * EDITOR_CELL_SIZE + EDITOR_CELL_SIZE / 2,
-    tvHeightToAltitude(y),
-  ];
+  const gx = ((x / TV_UNITS_PER_CELL) % g + g) % g;
+  const gz = ((z / TV_UNITS_PER_CELL) % g + g) % g;
+  return [gx * EDITOR_CELL_SIZE, gz * EDITOR_CELL_SIZE, tvHeightToAltitude(y)];
 }
 
-/** Converts a raw TV-family Y to a heightfield altitude step. */
+/** Converts a raw TV-family Y to a (fractional) heightfield altitude step. */
 export function tvHeightToAltitude(y) {
-  return Math.max(0, Math.floor(y / TV_UNITS_PER_HEIGHT_STEP));
+  return Math.max(0, y / TV_UNITS_PER_HEIGHT_STEP);
 }
 
 /** Splits a comma-separated integer triple, or null when the line is not one. */

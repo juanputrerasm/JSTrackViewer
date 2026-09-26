@@ -87,6 +87,7 @@ export async function assembleTruck(podIndex, getBytes, manifest) {
       position: manifest.wheelAnchors[key] ?? { x: 0, y: 0, z: 0 },
       model,
       radius,
+      width: tireWidthOf(model),
     };
   });
 
@@ -126,14 +127,26 @@ export async function assembleTruck(podIndex, getBytes, manifest) {
     shockTextureName: hasChassisHardware ? (manifest.shockTextureName ?? "") : "",
     // The sim's chassis contact points, not decoration.
     scrapePoints: manifest.scrapePoints ?? [],
-    lights: (manifest.lights ?? [])
+    // Everything the lamps need to be drawn and to light the track: see drive/truck-lights.js.
+    lights: hasChassisHardware ? (manifest.lights ?? [])
       .filter((light) => light?.pos)
       .map((light) => ({
         pos: light.pos,
         radius: Math.max(light.bitmapRadius ?? 0.15, 0.1),
         index: light.index,
         type: light.type ?? 0,
-      })),
+        heading: light.heading ?? 0,
+        pitch: light.pitch ?? 0,
+        spinSpeed: light.spinSpeed ?? 0,
+        coneLength: light.coneLength ?? 0,
+        coneBaseRadius: light.coneBaseRadius ?? 0,
+        coneRimRadius: light.coneRimRadius ?? 0,
+        coneTexture: light.coneTexture ? normalizeArchiveName(light.coneTexture) : "",
+        sourceBitmap: light.sourceBitmap ? normalizeArchiveName(light.sourceBitmap) : "",
+        msOn: light.msOn ?? 0,
+        msOff: light.msOff ?? 0,
+      })) : [],
+    lightTextures: hasChassisHardware ? await loadLightTextures(podIndex, getBytes, manifest, warnings) : [],
     textures,
     // Handy for the spawn: how far the body origin sits above the ground with the suspension
     // fully extended. Phase 0 measured 6.00 ft for BIGFOOT on SUMMIT1 against 6.80 ft here,
@@ -232,6 +245,13 @@ function tireRadiusOf(model) {
   return Math.max(b.span.x, b.span.y, b.span.z) / 2;
 }
 
+/** The tread width: the smallest of the disc's three spans, by the same reasoning. */
+function tireWidthOf(model) {
+  const b = boundsOf(model);
+  if (!b) return 0;
+  return Math.min(b.span.x, b.span.y, b.span.z);
+}
+
 function restHeightOf(wheels) {
   const front = wheels.find((w) => w.key.startsWith("faxle")) ?? wheels[0];
   if (!front?.radius) return 0;
@@ -305,6 +325,41 @@ async function loadTextures(podIndex, getBytes, models, manifest, hasChassisHard
       textures.push(decodeRawTexture(bytes, palettes.paletteFor(name, rawEntry, "model"), name));
     } catch (error) {
       warnings.push(`Texture ${name}: ${error?.message ?? error}`);
+    }
+  }
+  return textures;
+}
+
+/*
+  The bitmaps a light draws with: its flare (HEADLITE.RAW, BRLTFORD.RAW, ...) and its beam
+  texture (LITEFUZZ.RAW, REDFUZZ.RAW, BLUEFUZZ.RAW). The flares ship beside the trucks; the
+  stock game keeps the three fuzz textures in STARTUP.POD, so a truck POD normally lacks them
+  and the rig falls back to a generated speckle of the same tint. Not a warning, then.
+*/
+async function loadLightTextures(podIndex, getBytes, manifest, warnings) {
+  const names = new Set();
+  for (const light of manifest.lights ?? []) {
+    if (light?.sourceBitmap) names.add(normalizeArchiveName(light.sourceBitmap));
+    if (light?.coneTexture && light.coneLength > 0) names.add(normalizeArchiveName(light.coneTexture));
+  }
+  const palettes = createPaletteResolver(podIndex, getBytes, "MTM2", null);
+  const textures = [];
+  for (const name of names) {
+    try {
+      const hd = findHdSibling(podIndex, name);
+      if (hd) {
+        const decoded = await decodeTrueColorTexture(getBytes(hd.entry), hd.entry.title, hd.extension === ".TGA" ? "TGA" : "PNG");
+        decoded.name = name;
+        textures.push(decoded);
+        continue;
+      }
+      const rawEntry = findArtSibling(podIndex, name, ".RAW");
+      if (!rawEntry) continue;
+      const bytes = getBytes(rawEntry);
+      if (!podRawSide(bytes.length)) continue;
+      textures.push(decodeRawTexture(bytes, palettes.paletteFor(name, rawEntry, "model"), name));
+    } catch (error) {
+      warnings.push(`Light bitmap ${name}: ${error?.message ?? error}`);
     }
   }
   return textures;

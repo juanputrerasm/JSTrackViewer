@@ -47,8 +47,8 @@ The header was previously known only in part, with six unexplained lines. Dumpin
   7: atmos.pup                powerup placements
   8: atmos.ani                animated texture definitions
   9: atmos.tdf                tunnel definitions
- 10: sky.raw                  sky texture
- 11: fog.act                  fog palette
+ 10: sky.raw                  sky texture, or STARS.VOX / SPACE.VOX for a star field
+ 11: fog.act                  sky palette: colours 192-207 become slots 240-255 (section 11)
  12: atmos.def                object placements
  13: atmos.nav                navigation points
  14: fog.mod                  music
@@ -75,7 +75,7 @@ surface levels, 1 on all 148 tunnel levels. Nothing else occurs.
 | 7 | **`.PUP` powerups** | **no** | **Section 4, unrendered map content** |
 | 8 | **`.ANI` animated textures** | **no** | **Section 6** |
 | 9 | **`.TDF` tunnel definitions** | **no** | **Section 3, the tunnel markers** |
-| 10, 11 | Sky RAW, fog ACT | 10 only | Minor |
+| 10, 11 | Sky RAW, sky ACT | yes | Section 11, the sky ceiling and horizon colour |
 | 12 | `.DEF` objects | yes | Already correct, see section 5 |
 | 13 | **`.NAV` navigation points** | **no** | **Section 2, the marker layer** |
 | 14 to 21 | Music, fog, LTE, lighting | all but 15 | Minor |
@@ -630,6 +630,124 @@ A caution learned the hard way: the first version of this mirror reproduced the 
 every Hellbender object. The mirror now transcribes the JS control flow line by line, and the
 Hellbender archive is part of the check.
 
+## 10. TVCAD and FuryEdit: model scale, exact placement, and named enumerations
+
+Two more period sources were read after section 9: the decompiled VB3 source of TVCAD 1.0
+(Matt Tagliaferri, 1995) and FuryEdit.exe, the Fury3 editor, disassembled. Both settle
+questions the level data alone left open. Some of it supersedes earlier sections.
+
+### 10.1 The DEF header, named
+
+TVCAD's reader and its Object Properties form name every header slot:
+
+```
+Logic, <not exposed>, HitRadius, CtrX, CtrY, CtrZ, complex.bin, simple.bin
+thrust, rotation speed, fire speed, fire strength, weapon
+briefing flag, random flag, drop chance (0-100), drop powerup type (-1 = random)
+```
+
+So **slot 2 is the hit radius**, not a generic "size" (section 5.2), and slot 0 indexes the 42
+logic names in TVCAD.INI ("Ground/Static", "Flying (Smart)", "Tree" ...).
+
+### 10.2 Model scale
+
+FuryEdit sizes a model as `world = raw * 65536 / magnify` on the full int32 vertex
+(0x4053b0: `scale = (0x7FFFFFFF / magnify) * 2`, then fixmul). The hit radius confirms it
+independently: across 193 TV and Fury3 definitions it equals the model's vertex radius at that
+scale times 1.00 to 1.4, never less (exactly 1.000 for CUBE, STATION, FACBILD).
+
+These are placement units, 2^20 per 64-unit cell, so a TV/F3 model is `raw * 4 / magnify`
+editor units. The viewer's old divisor (10922.667, the height-step scale) drew every model at
+**75% of its width**. The same derivation at Hellbender's 2^19 per cell reproduces its existing
+divisor (4096) exactly, which is the check that the rule holds across the family.
+
+Vertically, a terrain step is 2^15 world units, so true proportion is 2 scene units per step.
+The terrain is drawn at the user's height scale (3 by default), but models are drawn in their
+true proportions with no vertical stretch: the hit radius is a sphere, so the engine's world is
+isotropic, and the height scale is a display exaggeration of the ground only. Stretching models
+by `heightScale / 2` was tried and visibly elongated them (FIRSMALL.BIN at 2.5:1 against its
+authored 1.7:1). Models turn about their own
+origin (the base, on every ground model) rather than their recentred bounding box.
+
+### 10.3 Placement is exact, not per cell
+
+This supersedes the "positions land on cell centres" reading of sections 2 and 5.1.
+
+- 99.7% of 16,323 placements sit inside a cell; 0.3% are on a centre.
+- A heightfield sample is a grid **vertex**. For ground-logic objects the stored Y equals the
+  terrain interpolated at the exact position: 99.9% (FURYSE), 92.6% (FURY3), 89% (TV), against
+  48 to 74% for the cell-centre reading the viewer used.
+- TVCAD's own snap (`X = GridX * 2^20`) also lands on a vertex. It is an editor convenience,
+  not the format.
+
+The viewer now keeps X, Z and Y exact for DEF, NAV, PUP and TDF alike, and markers sample the
+terrain bilinearly at their exact position.
+
+### 10.4 Powerup names and models
+
+FuryEdit holds two parallel 12-entry pointer tables (0x5c8a28, 0x5c8a58): the pickup model and
+Fury3's name for each type. They agree slot for slot with TVCAD.INI's PowerUps list:
+
+| Type | Model | TV name | Fury3 name |
+|---|---|---|---|
+| 0 | POWERLAS | Laser | Rapid-Fire Lasers |
+| 1 | POWERPLA | Plasma | ServoKinetic Lasers |
+| 2 | POWERANT | Ion Burst | Dispersion Cannons |
+| 3 | POWERMIS | Missile | Dead-On Missiles |
+| 4 | POWERGMI | Guided Missile | Vipers |
+| 5 | POWERSUP | Super Missile | Bion Fury Missiles |
+| 6 | POWERSHE | Shield Restore | Shields Restored |
+| 7 | POWERVIS | Invisibility | Invisibility |
+| 8 | POWERINV | Invincibility | Invincibility |
+| 9 | POWERFIR | Smart Bomb | FFF |
+| 10 | POWERZAP | AfterBurner | Turbo Thrust |
+| 11 | POWERCAN | Energy Can | Shield Boost |
+
+This supersedes the "naming them would mean guessing" note in section 9.1. The same table
+names a definition's drop type. The pickup models ship in STARTUP.POD, so they only render
+when the open archive carries them; otherwise the marker is drawn alone. Hellbender keeps the
+bare index until its type order is confirmed.
+
+## 11. The sky: a flat ceiling, a horizon colour, and fog
+
+Read from GAME.EXE (Terminal Velocity), a Watcom LE executable, after applying its fixups.
+Fury3 and Hellbender ship the same sky files in the same shape, so the same rules are applied
+to them; Hellbender's executable was not available to confirm it.
+
+**Palette** (0x17be0). Every sky texture is 64x64 and uses only palette slots 240-254, which
+are black in every .ACT. At load the engine opens the line 11 ACT, seeks 0x240 bytes (colour
+192) and copies 0x30 bytes (16 colours) into slots 240-255. So one shared SKY.RAW is
+recoloured per level by BLUESKY.ACT, DSRTSKY.ACT, LAVASKY.ACT and so on. Every sky ACT holds a
+16-step gradient at 192-207 and repeats the last colour from 208.
+
+**Horizon colour**. Slot 255 (ACT colour 207) is the horizon. The engine clears the screen to
+it before drawing the sky, and row 15 of the 16 x 256 .FOG remap table sends every colour to
+it, so terrain fogs into the colour the sky ends in.
+
+**Geometry** (0x18b60). One flat textured square at altitude 256 (0x800000 world units, one
+step above the highest terrain and the same constant as the flight ceiling), +-2^29 world
+units (512 cells) around world origin, fixed to the world. UVs run 0..0x3FFFFFFF in 16.16
+texels over a 256-texel space, so the texture repeats 64 times across it: once every 16 cells,
+16 times per map, seamless across the wrap. The engine draws it with the camera offset divided
+by 256, a smaller square around the camera that looks identical.
+
+**Modes** (dispatcher 0x18a90):
+
+| Condition | Drawn |
+|---|---|
+| Line 10 is STARS.VOX (a 0-byte sentinel) | Slots 240-255 cleared to black, 2000 generated stars (0x17b50) |
+| Camera below the ceiling band (H - 4 steps), Sky Texture on (default) | Clear to slot 255, then the textured square |
+| Same, Sky Texture off | An untextured variant |
+| Camera within 4 steps of the ceiling | The square plus anything above it |
+| Camera above the band | Clear to slot 255 only |
+
+**Fog distance** was not located in the rasteriser. The viewer ties it to its own Distance
+slider: fog starts at 40% of the view distance and reaches the horizon colour at the view
+distance. The ceiling fades over the same range, computed per fragment on the true distance.
+
+In the viewer, Sky and Fog are View Options toggles shown for TV, Fury3 and Hellbender levels,
+and they take the place of the MTM and CPR backdrop.
+
 ## Appendix A: verified constants
 
 | Constant | Value | How established |
@@ -638,8 +756,9 @@ Hellbender archive is part of the check.
 | Heightfield | 1 byte per cell, 0 to 255 | same, plus the manual |
 | Texture map | 1 byte per cell, plain index, no flag bits | max CLR byte == textureCount - 1 in 66 of 66 levels |
 | Textures per level | 2 to 171 observed, 256 ceiling | measured across all surface levels |
-| DEF/NAV/PUP/TDF horizontal | 2^20 units per cell, signed, wraps | NAV to DEF exact position match |
-| DEF/NAV/PUP/TDF vertical | 2^15 units per altitude step | placement altitude == terrain height, zero error |
+| DEF/NAV/PUP/TDF horizontal | 2^20 units per cell, signed, wraps, sub-cell exact | NAV to DEF exact position match; section 10.3 |
+| DEF/NAV/PUP/TDF vertical | 2^15 units per altitude step, fractional | interpolated terrain at the exact position; section 10.3 |
+| Model vertices | raw * 65536 / magnify world units | FuryEdit 0x4053b0 and DEF hit radius; section 10.2 |
 | Heading | 65536 per full turn, 0 north, 16384 east | manual, Navigation Points |
 | Angles | 65536 per full turn | existing `TR_ANGLE_TO_RAD`, unchanged |
 | Speeds and rates | 65536 = 1.0 per second | manual, Enemy Editor |

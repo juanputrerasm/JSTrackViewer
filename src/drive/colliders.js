@@ -159,6 +159,14 @@ export function createColliders(trackData, frame) {
     const box = boxes[boxIndex];
     const type = box.type ?? 0;
     if (PASS_THROUGH.has(type)) continue;
+    /*
+      A billboard turns to face the camera, so no fixed collider can match what is drawn, and
+      MTM2's own camera-facing type (8, "No collide (facing)") is pass-through. CPR's trees and
+      Evo's CNonCollideFacing carry the flag instead of MTM2's type number. MTM2's type 9,
+      "Collide (facing)", is drawn facing too but is meant to be solid, so it keeps a collider
+      in its authored yaw: close enough for the round trunk it is used for.
+    */
+    if (box.billboard === true) continue;
     // Evo checkpoint and non-colliding classes are triggers/visuals. Their records have no
     // Traxx `type`, so passing them through the MTM fallback made invisible 32-unit walls.
     if (evo && (box.boxType === TYPE_CHECKPOINT || box.sourceClass === "CCheckpoint" || box.sourceClass?.startsWith("CNonCollide"))) continue;

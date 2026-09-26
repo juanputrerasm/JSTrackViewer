@@ -139,10 +139,27 @@ function mrglRecordInts(token, reader) {
   return -1;
 }
 
-// Geometry divisors matching JTraxx constants
+/*
+  Geometry divisors: editor units per vertex = (raw >> 1) * 65536 / (magnify * divisor).
+
+  The TV-family engines size a model as world = raw * 65536 / magnify, on the full int32.
+  FuryEdit.exe computes a model's extents exactly that way (0x4053b0: scale =
+  (0x7FFFFFFF / magnify) * 2, then fixmul against each raw vertex), and every .DEF header's
+  hit radius agrees: it equals the model's vertex radius at that scale times 1.00..1.4
+  (median 1.15, exactly 1.000 for CUBE, STATION and FACBILD) across 193 TV and Fury3
+  definitions. Those world units are the placement units, so the divisor follows from each
+  game's world units per 64-unit editor cell:
+
+    TV/F3  2^20 per cell -> raw * 4 / magnify -> divisor 8192
+    HB     2^19 per cell -> raw * 8 / magnify -> divisor 4096
+
+  TV/F3 used to take 10922.667 (= 2^15 / 3, the vertical height-step scale), which drew every
+  model at 75% of its width. The HB value was already right, and the same derivation
+  reproduces it, which is the check that the rule holds across the family.
+*/
 const DIVISOR_LEGACY    = 64.0;
 const DIVISOR_HB        = 4096.0;
-const DIVISOR_TV_F3     = 10922.667;
+const DIVISOR_TV_F3     = 8192.0;
 
 export function decodeBinModel(bytes, modelName, origin) {
   const model = {

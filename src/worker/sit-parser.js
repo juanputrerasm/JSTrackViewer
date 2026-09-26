@@ -4,6 +4,7 @@ import { loadGroundBoxes } from "./gbox-loader.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { loadRaceTrackLayer } from "./racetrack-loader.js";
 import { podRawSide } from "./texture-decoder.js";
+import { cprCheckpointRole } from "../shared/cpr-track-schema.js";
 import {
   CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE, LEGACY_ALTITUDE_DIVISOR,
 } from "../shared/terrain-height.js";
@@ -29,7 +30,15 @@ export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
   // Parse SIT metadata (after LVL)
   parseSitMetadata(sitLines, doc);
 
-  if (doc.origin === "CPR") applyCprStandInMasses(doc.boxes);
+  if (doc.origin === "CPR") {
+    applyCprStandInMasses(doc.boxes);
+    markCprTreesAsBillboards(doc.boxes);
+    // What each checkpoint is for; see cprCheckpointRole.
+    const checkpointCount = doc.boxes.filter((box) => box.type === 6).length;
+    for (const box of doc.boxes) {
+      if (box.type === 6) box.checkpointRole = cprCheckpointRole(box.checkpointSequence, checkpointCount);
+    }
+  }
 
   return doc;
 }
@@ -140,26 +149,48 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
 /*
   Weights for the CPR scenery a car is meant to knock about.
 
-  CPREDIT has the object types for it (its box type menu reads Undefined, Sign, Barricade,
-  Tree, Cone, Crushed Car, Checkpoint, the same numbering MTM2 uses) and a "Set Box Mass"
-  command, but every stock CPR object is saved as type 0 with mass 0, cones included. Mass 0
-  means immovable to the drive colliders, so a traffic cone stopped a truck like a wall.
+  CPREDIT's box type menu reads Undefined, Sign, Barricade, Tree, Cone, Crushed Car,
+  Checkpoint: the same numbering MTM2 uses, where its CONE.BIN is type 4 and its RR4SIGN signs
+  are type 1. CPREDIT also has "Set Box Mass", but every stock CPR object is saved with mass 0,
+  which the drive colliders read as immovable.
 
-  The stand-ins are MTM2's own values for the same objects, in slugs as the file stores them:
-  its CONE.BIN (type 4) at 0.093243, about 3 lb, and its RR4SIGN signs (type 1) at 7.770249,
-  about 250 lb, for Laguna's LG3MIL distance marker boards. They apply only where the file
-  says 0, so a track that states a mass keeps it.
+  So a CPR Cone (4) or Sign (1) with no mass of its own takes MTM2's value for the same object,
+  in slugs as the file stores them: 0.093243 for a cone (about 3 lb) and 7.770249 for a sign
+  (about 250 lb). Nothing else is touched: a tent, a walkway or an Undefined box keeps mass 0.
+
+  The stock tracks never actually use types 1 or 4. Their cones (LG4CONE, VN4CONEA) and
+  Laguna's distance marker boards (LG3MIL1-4) are all saved as type 0, so those models are
+  read as the Cone and Sign they are.
 */
-const CPR_STAND_IN_MASS = [
-  [/^(LG4CONE|VN4CONEA)\.BIN$/i, 0.093243],
-  [/^LG3MIL[1-4]\.BIN$/i, 7.770249],
+const CPR_TYPE_SIGN = 1;
+const CPR_TYPE_CONE = 4;
+const CPR_STAND_IN_MASS = { [CPR_TYPE_SIGN]: 7.770249, [CPR_TYPE_CONE]: 0.093243 };
+const CPR_MODEL_TYPE = [
+  [/^(LG4CONE|VN4CONEA)\.BIN$/i, CPR_TYPE_CONE],
+  [/^LG3MIL[1-4]\.BIN$/i, CPR_TYPE_SIGN],
 ];
+
+/*
+  CPR's Tree type (3 in CPREDIT's menu) is MTM2's "Always Face" (type 8): every one of the
+  1,643 stock CPR type 3 objects is a tree or a palm, and their models are single flat quads
+  that only read as trees turned toward the camera. Marked here rather than by type number in
+  the scene, because type 3 in MTM2 is something else entirely (hay bales, solid).
+*/
+const CPR_TYPE_TREE = 3;
+
+function markCprTreesAsBillboards(boxes) {
+  for (const box of boxes) {
+    if (box.type === CPR_TYPE_TREE) box.billboard = true;
+  }
+}
 
 function applyCprStandInMasses(boxes) {
   for (const box of boxes) {
     if (box.mass) continue;
-    const match = CPR_STAND_IN_MASS.find(([pattern]) => pattern.test(box.modelName ?? ""));
-    if (match) box.mass = match[1];
+    const byModel = CPR_MODEL_TYPE.find(([pattern]) => pattern.test(box.modelName ?? ""));
+    const kind = byModel ? byModel[1] : box.type;
+    const mass = CPR_STAND_IN_MASS[kind];
+    if (mass) box.mass = mass;
   }
 }
 

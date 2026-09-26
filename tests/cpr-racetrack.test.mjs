@@ -104,6 +104,23 @@ test("the road carries a wheel at its own altitude, above the terrain", () => {
   assert.ok(Math.abs(createRaceTrackSupport(trackData).supportAt(x, z, 210) - 200) < 1e-6);
 });
 
+test("ground poking up through the road is held under it, as the road is drawn over it", () => {
+  const trackData = straightTrack();
+  trackData.terrain.rawData = new Uint8Array(256 * 256).fill(105);   // 210 ft, above the road
+  const frame = createWorldFrame(trackData);
+  const worldFeet = 256 * 64 / 2;
+  const x = 2000, z = worldFeet - 1018;
+  // Under the road the ground sits just below the tarmac, flat, so the road carries the truck.
+  const under = frame.heightAtFeet(x, z);
+  assert.ok(under < 200 && under > 199, `ground under road ${under}`);
+  assert.deepEqual(frame.normalAtFeet(x, z), { x: 0, y: 1, z: 0 });
+  // Beside the road the ground is untouched.
+  assert.ok(Math.abs(frame.heightAtFeet(x + 200, z) - 210) < 1e-9);
+  // Ground already below the road is left where it is.
+  trackData.terrain.rawData = new Uint8Array(256 * 256).fill(90);
+  assert.ok(Math.abs(createWorldFrame(trackData).heightAtFeet(x, z) - 180) < 1e-9);
+});
+
 test("a wall stops a hull point going through it, and faces the truck", () => {
   const trackData = straightTrack();
   const colliders = createColliders(trackData, createWorldFrame(trackData));
@@ -215,4 +232,39 @@ test("CPR cones and marker boards get MTM2's weights, so a truck can knock them 
   assert.ok(markers.length && markers.every((b) => b.mass === 7.770249));
   // Everything else keeps the file's mass 0, so a tent or a walkway stays put.
   assert.ok(doc.boxes.filter((b) => /TENT|WLK/.test(b.modelName)).every((b) => b.mass === 0));
+});
+
+test("CPR checkpoints: three pit gates, then start/finish, then the lap's gates", {
+  skip: hasStockPod(`${CPR_DIR}/LAGUNA.POD`) ? false : `no local CPR install at ${CPR_DIR}`,
+}, async () => {
+  const { createCheckpoints } = await import("../src/drive/checkpoints.js");
+  let tracks = 0;
+  for (const file of readdirSync(CPR_DIR).filter((name) => name.endsWith(".POD"))) {
+    let pod;
+    try { pod = indexStockPod(`${CPR_DIR}/${file}`); } catch { continue; }
+    const sit = pod.podIndex.entries.find((e) => e.title.endsWith(".SIT"));
+    if (!sit) continue;
+    const doc = parseSitTrack(pod.podIndex, pod.getBytes, sit, "");
+    const checkpoints = doc.boxes.filter((b) => b.type === 6).sort((a, b) => a.checkpointSequence - b.checkpointSequence);
+    assert.deepEqual(checkpoints.slice(0, 4).map((b) => b.checkpointRole),
+      ["pitEntry", "pitSpeedLimit", "pitSpeedLimitEnd", "startFinish"], file);
+    assert.ok(checkpoints.slice(4).every((b) => b.checkpointRole === "gate"), file);
+
+    // The lap counts start/finish and the ordinary gates only, starting at start/finish.
+    const lap = createCheckpoints({ ...doc, terrain: { ...doc.terrain, heightScale: 3 } });
+    assert.equal(lap.gateCount, checkpoints.length - 3, file);
+    assert.equal(lap.gates[0].sequence, 3, file);
+    tracks++;
+  }
+  assert.ok(tracks >= 10);
+});
+
+test("a CPR track with fewer than four checkpoints has no pit roles", () => {
+  // cprCheckpointRole is the rule the SIT reader applies to each checkpoint.
+  return import("../src/shared/cpr-track-schema.js").then(({ cprCheckpointRole }) => {
+    assert.equal(cprCheckpointRole(0, 3), "gate");
+    assert.equal(cprCheckpointRole(0, 6), "pitEntry");
+    assert.equal(cprCheckpointRole(3, 6), "startFinish");
+    assert.equal(cprCheckpointRole(5, 6), "gate");
+  });
 });

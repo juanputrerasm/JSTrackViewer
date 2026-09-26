@@ -299,6 +299,37 @@ input[type="url"]:focus, input[type="text"]:focus {
   font-size: 12px;
 }
 
+.subhead {
+  margin: 4px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.course-toggle-list {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.course-toggle-list label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* The course's own line colour, so a checkbox reads against what it draws. */
+.course-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
 input[type="checkbox"] {
   accent-color: var(--accent);
   cursor: pointer;
@@ -315,6 +346,7 @@ input[type="checkbox"] {
 .slider-row label { color: var(--text-dim); min-width: 60px; }
 .slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
 .slider-row span { min-width: 28px; text-align: right; font-family: var(--mono); }
+.slider-row select { flex: 1; min-width: 0; }
 
 /* ── Minimap ────────────────────────────────── */
 .nav-speed-row { margin-top: 8px; max-width: 220px; }

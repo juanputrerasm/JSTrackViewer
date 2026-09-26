@@ -107,17 +107,39 @@ export function buildRaceTrackShapes(trackData) {
   return shapes;
 }
 
+/** Bucket size of the road support index, in feet. */
+const SUPPORT_BUCKET_FT = 64;
+
 /**
- * The road surface alone, answering supportAt like the full collider set does, for placing a
- * truck on the grid before drive mode (and its colliders) exists. A linear scan, which is fine
- * for a one-off placement and would not be for a simulation step.
+ * The road surface alone, answering supportAt like the full collider set does. Used to place
+ * a truck on the grid before drive mode (and its colliders) exists, and by world-frame to
+ * keep the ground under the road. The latter asks on every wheel and hull query, so segments
+ * are bucketed on a coarse grid rather than scanned.
  */
 export function createRaceTrackSupport(trackData) {
   const shapes = buildRaceTrackShapes(trackData);
+  const buckets = new Map();
+  const key = (bx, bz) => bx * 65536 + bz;
+  for (const shape of shapes) {
+    const { centre, bounds } = shape;
+    const x0 = Math.floor((centre.x + bounds.minX) / SUPPORT_BUCKET_FT);
+    const x1 = Math.floor((centre.x + bounds.maxX) / SUPPORT_BUCKET_FT);
+    const z0 = Math.floor((centre.z + bounds.minZ) / SUPPORT_BUCKET_FT);
+    const z1 = Math.floor((centre.z + bounds.maxZ) / SUPPORT_BUCKET_FT);
+    for (let bx = x0; bx <= x1; bx++) {
+      for (let bz = z0; bz <= z1; bz++) {
+        const k = key(bx, bz);
+        if (!buckets.has(k)) buckets.set(k, []);
+        buckets.get(k).push(shape);
+      }
+    }
+  }
   return {
     supportAt(x, z, y) {
+      const near = buckets.get(key(Math.floor(x / SUPPORT_BUCKET_FT), Math.floor(z / SUPPORT_BUCKET_FT)));
+      if (!near) return null;
       let best = null;
-      for (const shape of shapes) {
+      for (const shape of near) {
         const { centre, bounds } = shape;
         const lx = x - centre.x, lz = z - centre.z;
         if (lx < bounds.minX || lx > bounds.maxX || lz < bounds.minZ || lz > bounds.maxZ) continue;

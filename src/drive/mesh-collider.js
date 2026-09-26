@@ -71,7 +71,10 @@ export function buildMeshShape(model, box, trackData) {
   const posX = wx;
   // Turned about the model's own origin for the SIT family, exactly as scene.js now draws it
   // (see traxxTrueOrigin there); every other game keeps the recentred mesh plus baseZ.
-  const anchored = !evo && origin !== "HB" && origin !== "TV" && origin !== "F3" && origin !== "TV/F3";
+  const tvFamily = origin === "TV" || origin === "F3" || origin === "TV/F3";
+  const anchored = !evo && origin !== "HB";
+  // scene.js modelZStretch: TV-family models keep their true proportions, the rest keep 0.75.
+  const zStretch = tvFamily ? 1 : 0.75;
   const [ax, ay, az] = anchored ? [model.anchor?.x ?? 0, model.anchor?.y ?? 0, model.anchor?.z ?? 0] : [0, 0, 0];
   const posY = evo ? wz * heightScale : origin === "HB" ? wz * 3 : anchored ? wz * heightScale : wz * heightScale + (model.baseZ ?? 0) * 0.75;
   const posZ = worldSize - wy;
@@ -120,9 +123,9 @@ export function buildMeshShape(model, box, trackData) {
           fy = py / 1.5;
           fz = (-sy * rx + cy * pz) / 2;
         } else {
-          // Scene = (r0.v, 0.75 * r2.v, -r1.v) in units; feet divide by 2, 1.5 and 2.
+          // Scene = (r0.v, zStretch * r2.v, -r1.v) in units; feet divide by 2, 1.5 and 2.
           fx = (r0[0] * vx + r0[1] * vy + r0[2] * vz) / 2;
-          fy = (r2[0] * vx + r2[1] * vy + r2[2] * vz) / 2;
+          fy = zStretch * (r2[0] * vx + r2[1] * vy + r2[2] * vz) / 1.5;
           fz = -(r1[0] * vx + r1[1] * vy + r1[2] * vz) / 2;
         }
         tris[base + k * 3] = fx;

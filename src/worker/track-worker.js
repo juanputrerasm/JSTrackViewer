@@ -535,6 +535,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       cellSplit: doc.terrain.cellSplit ?? "fixed",
     } : null,
     skyTexture: skyTextureDecoded,
+    // TV/F3/HB flat sky ceiling and horizon colour; see lvl-parser.js (lines 10 and 11).
+    tvSky: doc.tvSky
+      ? { stars: doc.tvSky.stars, horizon: [...doc.tvSky.horizon], gradient: [...doc.tvSky.gradient] }
+      : null,
     backdropModelName: doc.backdropModelName ?? null,
     backdropModelNames: doc.backdropModelNames ?? [],
     arena,

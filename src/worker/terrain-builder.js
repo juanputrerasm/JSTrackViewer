@@ -2,6 +2,8 @@ import { decodeRawTexture, podRawSide } from "./texture-decoder.js";
 import { decodeHeightSample } from "../shared/terrain-height.js";
 
 export const CELL_SIZE = 64;
+/** sizeof(TrackTerrainLight): ground, groundboxlower, groundboxupper, unused[4]. */
+const LTE_BYTES_PER_POINT = 7;
 const ATLAS_TILE_SIZE = 64;
 const TERRAIN_OVERLAP_PIXELS = 2;
 const MAX_ATLAS_COLS = 64;
@@ -92,6 +94,20 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const normals = new Float32Array(vertexCount * 3);
   const uvs = new Float32Array(vertexCount * 2);
   const uvsOverlap = new Float32Array(vertexCount * 2);
+  /*
+    Baked ground light, from the track's .LTE, for the MTM family.
+
+    Traxx's Lighting dialog bakes the terrain's shading into the LTE rather than leaving it to
+    the renderer: seven bytes per grid point (TrackTerrainLight), the first of which is the
+    ground brightness, from the Dark setting on slopes facing away from the sun to Bright on
+    those facing it (TrackPOD.cpp BuildLte). MTM and MTM2 draw their ground at that
+    brightness, which on the stock tracks averages about 88% of the texture. One value per
+    vertex, from the grid point the vertex sits on, as the heights are sampled. Null when
+    the track has no LTE in this layout (CPR's is two bytes per point, Evo has none).
+  */
+  const lteData = origin === "MTM1" || origin === "MTM2" ? terrain.lteData : null;
+  const lights = lteData && lteData.length >= gridSize * gridSize * LTE_BYTES_PER_POINT
+    ? new Float32Array(vertexCount) : null;
   const indices = new Uint32Array(cellCount * 6);
 
   for (let cz = 0; cz < gridSize; cz++) {
@@ -150,6 +166,11 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
         normals[(vBase + v) * 3 + 0] = n[0] * facing;
         normals[(vBase + v) * 3 + 1] = n[1] * facing;
         normals[(vBase + v) * 3 + 2] = n[2] * facing;
+        if (lights) {
+          const lx = Math.min(gridSize - 1, cx + ox);
+          const lz = Math.min(gridSize - 1, cz + oz);
+          lights[vBase + v] = lteData[(lx + lz * gridSize) * LTE_BYTES_PER_POINT] / 255;
+        }
       }
 
       // UV from CLR texture index (with mirror + rotation support).
@@ -221,6 +242,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     normals: normals.buffer,
     uvs: uvs.buffer,
     uvsOverlap: uvsOverlap.buffer,
+    lights: lights ? lights.buffer : null,
     indices: indices.buffer,
     // A reusing call must not hand back an atlas it does not own; see the note above.
     atlas: terrain.reusesAtlas === true ? null : {

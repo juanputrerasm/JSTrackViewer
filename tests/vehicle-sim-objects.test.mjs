@@ -184,3 +184,25 @@ test("drive-through boxes do not stop a truck", () => {
   const state = run(sim, 8, { throttle: 1, brake: 0, steer: 0 });
   assert.ok(state.ipos.x > gateX + 20, `should have driven straight through, reached x ${state.ipos.x.toFixed(1)}`);
 });
+
+test("a barrier lower than the body stops the tires instead of passing between them", () => {
+  /*
+    A 2.5 ft wall right across the truck's path, 40 ft ahead. The body's scrape points hang
+    about 4.3 ft up and clear it, and the tire centres are 3 ft up, over it too, so before the
+    tires had side and low sample points nothing met it and the truck drove straight through.
+    It is a thin, solid, model-less box, like a CPR pit wall seen end on.
+  */
+  const worldUnits = GRID * CELL;
+  const startZ = 600;                                  // feet, scene axes
+  const wallZ = startZ - 40;
+  const track = flatTrack([{
+    position: [1200, worldUnits - wallZ * 2, (FLAT_STEPS * 2 + 1.25) / 2],
+    width: 64, length: 2, height: 1.25 * 1.5, psi: 0, theta: 0, phi: 0, type: 0, mass: 0,
+  }]);
+  const { sim } = simOn(track, { x: 600, z: startZ });
+  const state = run(sim, 5, { throttle: 1, brake: 0, steer: 0 });
+  // The truck faces -z; its front tires sit about 6.1 ft ahead of the body origin with a 3 ft
+  // radius, so their leading edge is about 9 ft ahead. That edge must not be past the wall.
+  const frontEdge = state.ipos.z - 9.1;
+  assert.ok(frontEdge > wallZ - 1.5, `front tires went through the wall: edge at ${frontEdge.toFixed(1)}, wall at ${wallZ}`);
+});

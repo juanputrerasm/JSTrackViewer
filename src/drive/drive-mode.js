@@ -31,7 +31,7 @@ const STEP = 1 / 120;
 */
 const MAX_FRAME = 0.25;
 
-export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, trackData, onObjectsMoved }) {
+export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, onPose, trackData, onObjectsMoved, lights = null }) {
   /*
     The track's solid objects, if there are any.
 
@@ -188,7 +188,39 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
 
     truckObject.setPose(scenePosition, quaternion);
     truckObject.setWheelState(sim.wheelCompression(), sim.wheelSteer(), sim.wheelSpin());
+    // Where the truck is on the map: scene units across, and a heading in degrees clockwise
+    // from north, which is the fly camera's own convention, so the minimap draws either.
+    onPose?.({
+      x: state.ipos.x * UNITS_PER_FOOT_H,
+      z: state.ipos.z * UNITS_PER_FOOT_H,
+      yaw: (state.psi ?? 0) * 180 / Math.PI,
+    });
     return state;
+  }
+
+  /*
+    Put the truck down somewhere else, keeping its heading: the minimap's double-click. It
+    lands on whatever is solid there, road or terrain, like a spawn, and a lap in progress
+    does not survive the jump any more than it survives R.
+  */
+  function teleport(xFeet, zFeet) {
+    placeAt(xFeet, zFeet, sim.readState().psi ?? 0);
+  }
+
+  /** Drop the truck at a point and heading, onto whatever is solid there. */
+  function placeAt(xFeet, zFeet, psi) {
+    const y = groundForSpawn(frame, colliders, xFeet, zFeet) + (assembly?.restHeight ?? 6.8);
+    sim.reset({ x: xFeet, y, z: zFeet }, psi);
+    checkpoints?.reset();
+    accumulator = 0;
+    cameras.snap();
+    render();
+  }
+
+  /** Manual gearbox on or off, for the sim and for the keys that shift it. */
+  function setManual(manual) {
+    sim.setManual(manual);
+    input.setManual(sim.manual);
   }
 
   return {
@@ -229,8 +261,9 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
         } else if (action === "reset") {
           placeAtSpawn();
         } else if (action === "toggleManual") {
-          sim.setManual(!sim.manual);
-          input.setManual(sim.manual);
+          setManual(!sim.manual);
+        } else if (action === "toggleLights") {
+          lights?.toggle();
         } else if (action === "shiftUp") {
           sim.shiftUp();
         } else if (action === "shiftDown") {
@@ -276,6 +309,17 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
       const state = render();
 
       /*
+        Brake lights with the brake, reverse lights in reverse. In the automatic's reverse the
+        pedals swap (see resolveReverse in vehicle-sim.js), so there it is the throttle key
+        that slows the truck and lights the brakes.
+      */
+      if (lights) {
+        const reversing = state.gear < 0;
+        const slowing = reversing && !sim.manual ? controls.throttle > 0 : controls.brake > 0;
+        lights.setDriving({ braking: slowing || controls.handbrake === true, reversing });
+      }
+
+      /*
         Gates are tested once per frame rather than once per simulation step.
 
         A gate is metres across and a truck covers about a foot per step, so stepping it 120
@@ -311,6 +355,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
           speed: state.speed * 0.681818,  // ft/s to mph
           gear: state.gear,
           manual: sim.manual,
+          lights: lights ? lights.on : null,
           rpm: state.rpm,
           airborne: state.airborne,
           view: cameras.viewLabel,
@@ -324,6 +369,12 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
     zoom(delta) { cameras.zoom(delta); },
 
     respawn: placeAtSpawn,
+    teleport,
+    placeAt,
+    setManual,
+    /** The switched lights, for keeping them as they were across a truck swap. */
+    get lightsOn() { return lights?.on ?? false; },
+    setLights(on) { lights?.setOn(on); },
 
     dispose() {
       active = false;

@@ -61,6 +61,8 @@ export function collectMtmCheckpoints(boxes) {
     .map((box, index) => ({
       index,
       sequence: box.checkpointSequence ?? index,
+      // CPR only: pitEntry, pitSpeedLimit, pitSpeedLimitEnd, startFinish or gate.
+      role: box.checkpointRole ?? null,
       position: [...box.position],
     }));
 }

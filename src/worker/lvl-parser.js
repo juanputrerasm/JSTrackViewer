@@ -3,6 +3,7 @@ import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/
 import { loadGroundBoxes } from "./gbox-loader.js";
 import { loadUndergroundLayers, HB_UNDERGROUND_BIAS } from "./hb-underground.js";
 import { loadDefObjects } from "./def-loader.js";
+import { decodeBinModel } from "./bin-decoder.js";
 import { podRawSide } from "./texture-decoder.js";
 import { parseNavPoints } from "./nav-parser.js";
 import { parseHbNavPoints } from "./hb-nav-parser.js";
@@ -80,16 +81,36 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     }
   }
 
-  // Line 10: sky RAW texture
+  /*
+    Lines 10 and 11: the sky, read the way the engine reads it (GAME.EXE 0x17be0).
+
+    Line 10 names a 64x64 sky texture, or the sentinel STARS.VOX / SPACE.VOX (a 0-byte entry)
+    for a star field. Every sky texture in TV, Fury3 and Hellbender is drawn only in palette
+    slots 240-254, which are black in every .ACT: the engine fills them at load by opening the
+    line 11 ACT, seeking to colour 192 and copying 16 colours into slots 240-255. So one
+    shared SKY.RAW is recoloured per level (BLUESKY, DSRTSKY, LAVASKY ...), and the 16th
+    colour, slot 255, is the horizon: the engine clears the screen to it before drawing the
+    sky, and the last row of the .FOG table maps every colour onto it.
+  */
   if (lines.length > 10) {
     const skyName = normalizeArchiveName(lines[10]);
-    if (skyName.endsWith(".RAW") && !skyName.startsWith("NULL.")) {
+    const gradient = lines.length > 11 ? readSkyGradient(podIndex, getBytes, lines[11]) : null;
+    if (skyName.endsWith(".VOX")) {
+      doc.tvSky = { stars: true, gradient: gradient ?? new Uint8Array(48), horizon: [0, 0, 0] };
+    } else if (skyName.endsWith(".RAW") && !skyName.startsWith("NULL.")) {
       const skyEntry = resolveAsset(podIndex, skyName);
       if (skyEntry) {
         const skyData = getBytes(skyEntry);
-        const skyActEntry = resolveAsset(podIndex, replaceExtension(skyName, ".ACT"));
-        const skyAct = skyActEntry ? getBytes(skyActEntry) : doc.palette;
         const skySide = podRawSide(skyData.length) || 64;
+        let skyAct;
+        if (gradient) {
+          skyAct = new Uint8Array(768);
+          skyAct.set(gradient, SKY_PALETTE_FIRST_SLOT * 3);
+          doc.tvSky = { stars: false, gradient, horizon: [...gradient.subarray(45, 48)] };
+        } else {
+          const skyActEntry = resolveAsset(podIndex, replaceExtension(skyName, ".ACT"));
+          skyAct = skyActEntry ? getBytes(skyActEntry) : doc.palette;
+        }
         doc.skyTexture = { name: skyName, data: skyData, actData: skyAct, width: skySide, height: skySide };
       }
     }
@@ -133,7 +154,10 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     const pupName = normalizeArchiveName(lines[7]);
     if (pupName && !pupName.startsWith("NULL.")) {
       const pupEntry = resolveLvlDataAsset(podIndex, pupName);
-      if (pupEntry) doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize, doc.origin);
+      if (pupEntry) {
+        doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize, doc.origin);
+        loadPowerupModels(podIndex, getBytes, doc);
+      }
     }
   }
   if (lines.length > 8) {
@@ -207,6 +231,43 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
+
+/** Palette slot the engine copies the sky gradient into, and the ACT colour it reads from. */
+const SKY_PALETTE_FIRST_SLOT = 240;
+const SKY_ACT_FIRST_COLOUR = 192;
+const SKY_GRADIENT_COLOURS = 16;
+
+/*
+  The 16-colour sky gradient from a level's line 11 ACT: colours 192-207, exactly the 0x30
+  bytes the engine reads after seeking 0x240 into the file. Null when the ACT is missing.
+*/
+function readSkyGradient(podIndex, getBytes, actLine) {
+  const actName = normalizeArchiveName(actLine);
+  if (!actName || actName.startsWith("NULL.")) return null;
+  const entry = resolveAsset(podIndex, actName);
+  if (!entry) return null;
+  const bytes = getBytes(entry);
+  const start = SKY_ACT_FIRST_COLOUR * 3;
+  const end = start + SKY_GRADIENT_COLOURS * 3;
+  return bytes.length >= end ? new Uint8Array(bytes.subarray(start, end)) : null;
+}
+
+/*
+  Decodes the pickup model for each typed powerup, when the open archive has it.
+
+  The stock POWER*.BIN models ship in STARTUP.POD, not in a level archive, so on a stock
+  TV.pod or FURY3.POD this finds nothing and the powerups stay markers. A pickup whose model
+  is missing just keeps its modelName with no entry in doc.models, and the scene draws the
+  marker alone.
+*/
+function loadPowerupModels(podIndex, getBytes, doc) {
+  for (const powerup of doc.powerups ?? []) {
+    const name = powerup.modelName;
+    if (!name || doc.models[name]) continue;
+    const entry = resolveAsset(podIndex, name);
+    if (entry) doc.models[name] = decodeBinModel(getBytes(entry), name, doc.origin);
+  }
+}
 
 function loadTexList(podIndex, getBytes, texEntry, doc) {
   const text = new TextDecoder("latin1").decode(getBytes(texEntry));

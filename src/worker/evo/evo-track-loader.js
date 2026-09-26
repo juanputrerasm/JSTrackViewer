@@ -1,4 +1,5 @@
 import { resolveAsset, findEntry } from "../pod-format.js";
+import { lapRuns, matchEvoAiLineName, parseEvoAiLine } from "./evo-ai-lines.js";
 import { archiveTitle, replaceExtension, basenameWithoutExtension } from "../../shared/path-utils.js";
 import { buildTerrainMesh } from "../terrain-builder.js";
 import { evoTrackTypeName, parseEvoSit } from "./evo-sit-parser.js";
@@ -186,14 +187,29 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
 
   const trees = buildTreeInstances(veg, rawData, models);
 
-  const courses = sit.courses.map((course) => ({
-    segments: course.segments.map((segment) => ({
+  /*
+    The recorded AI lines, when the POD carries them, are the track's other courses: the
+    lines the trucks drive. Classes often share the same three laps, so identical files are
+    kept once. They also say which of the .SIT course's runs a lap uses; see lapRuns.
+  */
+  const aiLines = loadAiLines(podIndex, getBytes, stem);
+  const toCourse = (runs) => ({
+    segments: runs.map((segment) => ({
       start: evoPositionToBox(segment.start),
       end: evoPositionToBox(segment.end),
       speedLimit: segment.speedLimit,
       trackWidth: segment.trackWidth,
     })),
-  }));
+  });
+  const courses = sit.courses.map((course, i) => toCourse(i === 0 ? lapRuns(course.segments, aiLines) : course.segments));
+  for (const line of aiLines) {
+    const points = line.points.map(evoPositionToBox);
+    courses.push({
+      name: `AI line ${line.line}${line.classes.length < 3 ? ` (class ${line.classes.join(", ")})` : ""}`,
+      recorded: true,
+      segments: points.slice(0, -1).map((start, k) => ({ start, end: points[k + 1], speedLimit: 0, trackWidth: 0 })),
+    });
+  }
 
   return {
     origin,
@@ -514,4 +530,25 @@ function serializeModels(models, texturesWithAlpha) {
     };
   }
   return out;
+}
+
+/** Distinct AI lines for this track, in line order, each with the classes that use it. */
+function loadAiLines(podIndex, getBytes, stem) {
+  const byContent = new Map();
+  for (const entry of podIndex.entries ?? []) {
+    const id = matchEvoAiLineName(entry.name ?? entry.title ?? "", stem);
+    if (!id) continue;
+    const bytes = getBytes(entry);
+    const key = new TextDecoder("latin1").decode(bytes);
+    let line = byContent.get(key);
+    if (!line) {
+      const parsed = parseEvoAiLine(bytes);
+      if (parsed.points.length < 2) continue;
+      line = { ...parsed, line: id.line, classes: [] };
+      byContent.set(key, line);
+    }
+    line.classes.push(id.truckClass);
+    line.line = Math.min(line.line, id.line);
+  }
+  return [...byContent.values()].sort((a, b) => a.line - b.line || a.classes[0] - b.classes[0]);
 }

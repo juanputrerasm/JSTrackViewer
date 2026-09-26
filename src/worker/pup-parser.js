@@ -1,4 +1,5 @@
 import { placementToEditor, toDataLines } from "./tv-coords.js";
+import { tvPowerup } from "./tv-tables.js";
 
 /*
   .PUP powerup placements (Terminal Velocity / Fury3 / F!Zone).
@@ -14,10 +15,11 @@ import { placementToEditor, toDataLines } from "./tv-coords.js";
   placements, four fields on every line, type values 0..11. Hellbender ships one placement
   in one level, MORBOS3.
 
-  Type names are not recorded anywhere in the level data. The F!Zone manual describes the
-  powerup list as an editor enumeration ("To cycle through the list of powerups, press the P
-  key"), so a level only ever stores the index. The viewer reports the index rather than
-  inventing labels for it.
+  Type names are not recorded anywhere in the level data, but both period editors carry the
+  table: TVCAD.INI lists the twelve names in type order, and FuryEdit.exe holds the matching
+  POWER*.BIN pickup models and Fury3 names in two parallel pointer tables (see tv-tables.js).
+  They are attached for Terminal Velocity and Fury3 only; Hellbender ships the same pickup
+  models, but nothing yet confirms that its type indices mean the same thing.
 
   Most levels place few loose powerups: the manual says authors preferred to hide them inside
   destructible bunkers, which are ordinary .DEF objects with a spawn probability, so a sparse
@@ -44,10 +46,14 @@ export function parsePowerups(bytes, gridSize, origin) {
     if (parts.length < 4) break;
     const values = parts.slice(0, 4).map((v) => parseInt(v.trim(), 10));
     if (values.some((v) => !Number.isFinite(v))) break;
+    const known = origin === "HB" ? null : tvPowerup(values[3]);
     powerups.push({
       index: n,
       position: placementToEditor(values[0], values[1], values[2], gridSize, origin),
       type: values[3],
+      name: known?.name ?? "",
+      furyName: known?.furyName ?? "",
+      modelName: known?.model ?? "",
     });
   }
   return powerups;

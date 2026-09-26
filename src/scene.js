@@ -2,6 +2,9 @@ import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { heightAtCell, LEGACY_ALTITUDE_DIVISOR } from "./shared/terrain-height.js";
 import { TrackCamera } from "./nav.js";
+import { SunShadows } from "./sun-shadows.js";
+import { SunFlare } from "./sun-flare.js";
+import { TruckLightRig } from "./drive/truck-lights.js";
 import { buildTruckObject } from "./drive/truck-object.js";
 import { createWorldFrame } from "./drive/world-frame.js";
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./drive/world-frame.js";
@@ -20,6 +23,9 @@ import {
   cprSegmentPairs,
   cprVisibleSlots,
   isDegenerateSlot,
+  CPR_COURSE_PURPOSES,
+  CPR_CHECKPOINT_LABELS,
+  isCprPitCheckpoint,
 } from "./shared/cpr-track-schema.js";
 
 // The u1..u4 a CPR section falls back to when the .TRK has none: 16.16 fixed point for 4.0
@@ -36,6 +42,9 @@ const CPR_DEFAULT_SECTION_U_OUTER = 16384000;
   pull it in front of geometry it should be behind.
 */
 const CPR_DEPTH_NUDGE = { polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -2 };
+/** The road coverage mask: about a foot per texel, capped so a long circuit stays small. */
+const ROAD_MASK_UNITS_PER_TEXEL = 2;
+const ROAD_MASK_MAX_SIZE = 4096;
 
 const WATER_COLOR = 0x1a6090;
 const COURSE_COLOR = 0xffdd00;
@@ -43,6 +52,8 @@ const GBOX_COLOR = 0x00ff88;
 // Traxx box types (Include/TrackPODBox.h and cursh2\core\sim.h's enum BoxType).
 const BOXTYPE_CHECKPOINT        = 6;
 const BOXTYPE_NO_COLLIDE_FACING = 8;
+/** "Collide (facing)", Traxx's help: a facing tree with a solid trunk ("New Tree" in tracked2). */
+const BOXTYPE_COLLIDE_FACING    = 9;
 const BOXTYPE_RAMP              = 99;
 
 // Collision box colors matching JTraxx Java constants
@@ -130,17 +141,99 @@ function navLabelSuffix(point) {
   whichever game the track came from.
 */
 const CHECKPOINT_MARKER_COLOR = 0xffdd00;
+/** CPR's pit lane checkpoints, which are not part of a lap, and its start/finish line. */
+const PIT_CHECKPOINT_MARKER_COLOR = 0x39a0ff;
+const START_FINISH_MARKER_COLOR = 0xffffff;
+/** One colour per CPR course, in course order: three AI lines, pit road, pit row. */
+const CPR_COURSE_COLORS = [0xff4040, 0xff9a30, 0xffdd00, 0x35c95a, 0x39a0ff];
+/** The SIT games' courses: the main course in its usual yellow, then the AI lines. */
+const SIT_COURSE_COLORS = [COURSE_COLOR, 0xff4040, 0xff9a30, 0x35c95a, 0x39a0ff];
 /** Wireframe colour for the cavern surfaces, cool against the ground boxes' warmer edges. */
 const UNDERGROUND_WIRE_COLOR = 0x66aacc;
 /** How far out the directional light is placed; only its direction matters. */
 const SUN_DISTANCE = 5000;
-const SHADOW_SPAN = 2048;
-const SHADOW_ANCHOR_STEP = 64;
+/** The furthest the shadow cascades reach: the camera's far plane at the longest view distance. */
+const SHADOW_MAX_FAR = 256 * 64 * 1.5;
+/** Frames between checks for lit materials the shadow cascades have not been set up for. */
+const SHADOW_MATERIAL_SWEEP_FRAMES = 60;
 const GRID_COLOR = 0x444466;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
-const AMBIENT_COLOR = 0x888888;
 const SUN_COLOR = 0xfff4e0;
+/*
+  The fly camera's vertical field of view: MTM2's.
+
+  The TRI engine projects with a fixed 512 pixel focal length (Traxx models the same pinhole,
+  TRAXX_GL_CAMERA_FOCAL_X/Y), so its field of view depends on the resolution it runs at. At
+  1280x720 that is 2 * atan(360 / 512), about 70 degrees vertically and 103 across; measured
+  off an MTM2 screenshot at that size, the backdrop is 8.2 pixels per degree against the 8.9
+  that predicts. The viewer used 60, which drew the backdrop and everything else larger and
+  its mountains less often across the screen than the game does.
+*/
+const NAV_FOV = 2 * Math.atan(360 / 512) * 180 / Math.PI;
+const AMBIENT_COLOR = 0x888888;
+const AMBIENT_INTENSITY = 1.4;
+
+/*
+  Weather, as MTM2 offers it: a sky, and the light that goes with it.
+
+  Each preset scales the Sun panel's own intensity and the ambient light rather than
+  replacing them, so the sliders keep working under any weather. The backdrop is flat,
+  unlit geometry that would otherwise stay in full daylight against a dusk or night sky, so
+  it is tinted instead. At night the moon takes the sun's place, as a dim cool light that
+  still casts shadows.
+
+  Only the games whose own weather this imitates get it: MTM, MTM2, CPR and Evo. TV, Fury3
+  and Hellbender keep their own sky textures.
+*/
+const WEATHER_ORIGINS = new Set(["MTM1", "MTM2", "CPR", "EVO1", "EVO2"]);
+const WEATHERS = {
+  clear:  { sky: "CLOUDY2.PNG", celestial: "sun", sun: 1.0, sunColor: SUN_COLOR, ambient: 1.0, ambientColor: AMBIENT_COLOR,
+            backdrop: 0xffffff, backdropSaturation: 1.0, shadows: true },
+  cloudy: { sky: "CCLOUDS.PNG", celestial: "none", sun: 0.6, sunColor: SUN_COLOR, ambient: 1.05, ambientColor: AMBIENT_COLOR,
+            backdrop: 0xb4b4b8, backdropSaturation: 0.45, shadows: true },
+  dusk:   { sky: "DUSKSKY.png", celestial: "sun", sun: 0.65, sunColor: 0xffb070, ambient: 0.85, ambientColor: 0x8f7a7a,
+            backdrop: 0x7a6466, backdropSaturation: 0.9, shadows: true },
+  // Moonlight: a faint, cool light from where the moon is drawn, which is the sun's place.
+  night:  { sky: "NITESKY.PNG", celestial: "moon", sun: 0.16, sunColor: 0xa8b4ff, ambient: 0.38, ambientColor: 0x6a70a0,
+            backdrop: 0x3c3d58, backdropSaturation: 0.8, shadows: true },
+};
+/*
+  three.js lights physically: a Lambert surface reflects irradiance / pi. The light levels
+  above were set as display brightnesses, so every light is scaled by this to bring a flat
+  surface under the default sun to about the brightness MTM2 draws its ground at (88% of the
+  texture, the stock tracks' mean baked light; see terrain-builder.js).
+*/
+const LIGHT_SCALE = 2.5;
+/** The lowest sun elevation, as a sine, the baked terrain light is normalised against. */
+const LTE_MIN_SUN_HEIGHT = 0.1;
+/** How far, in world units, a flare visibility ray is followed over the terrain. */
+const SUN_RAY_REACH = 16384;
+/** How many times the sky texture goes round the horizon. */
+const SKY_REPEATS = 3;
+/** The width of the cross-fade that hides each repeat's seam, as a fraction of one repeat. */
+const SKY_SEAM_BLEND = 0.18;
+/** How far below the horizon the sky texture's bottom row sits, in radians (20 degrees). */
+const SKY_BELOW_HORIZON = Math.PI / 9;
 const BACKGROUND_COLOR = 0xbcd6e7;
+
+/*
+  The TV/F3/HB sky, as GAME.EXE draws it (0x18b60).
+
+  A single flat square at the world's ceiling: altitude 256 (0x800000 world units, one step
+  above the highest terrain and the same constant as the flight ceiling), spanning +-512 cells
+  around world origin, with the 64x64 sky texture repeated 64 times across it, i.e. once every
+  16 cells. The engine draws it with the camera offset divided by 256, which is the same
+  picture as a square 256 times smaller around the camera. The scene does the same, but picks
+  the factor each frame from the far plane: fixed at 1/256, the ceiling overhead would sit
+  closer than the near plane and be clipped away.
+*/
+const CELL_SIZE_UNITS = 64;
+const TV_SKY_ALTITUDE = 256;
+const TV_SKY_HALF_CELLS = 512;
+const TV_SKY_CELLS_PER_REPEAT = 16;
+const TV_STAR_COUNT = 2000;
+// Fog runs from this fraction of the view distance to the full view distance.
+const TV_FOG_START = 0.4;
 const EMPTY_BACKGROUND_COLOR = 0x151417;
 
 /**
@@ -183,9 +276,9 @@ const TRAXX_Z_STRETCH = 0.75;
  * Object matrix for geometry authored in Traxx local space (BIN models): T * S * R,
  * where T maps Traxx (jx,jy,jz) -> Three.js (jx, jz, -jy).
  */
-function traxxModelMatrix(psi, theta, phi, posX, posY, posZ) {
+function traxxModelMatrix(psi, theta, phi, posX, posY, posZ, zStretch = TRAXX_Z_STRETCH) {
   const [r0, r1, r2] = traxxRotationRows(psi, theta, phi);
-  const z = TRAXX_Z_STRETCH;
+  const z = zStretch;
   return new THREE.Matrix4().set(
         r0[0],     r0[1],     r0[2], posX,
     z * r2[0], z * r2[1], z * r2[2], posY,
@@ -215,7 +308,8 @@ function traxxPrismMatrix(psi, theta, phi, posX, posY, posZ) {
 }
 
 /*
-  True for the SIT family (MTM1, MTM2, CPR), whose models the scene turns about their own origin.
+  True for the SIT family (MTM1, MTM2, CPR) and the TV family (Terminal Velocity, Fury3,
+  F!Zone), whose models the scene turns about their own origin.
 
   ⛔ A SIT ALTITUDE IS WHERE THE MODEL'S ORIGIN GOES, AND THE MODEL TURNS ABOUT THAT ORIGIN.
   Traxx rotates the raw vertices and adds ipos (OpenGLTerrainRenderer.cpp
@@ -228,10 +322,35 @@ function traxxPrismMatrix(psi, theta, phi, posX, posY, posZ) {
   again, a whole model height too low. Terramar's upper bridge rails, rolled 180 degrees, sank
   into the deck beside the rails beneath it, where MTM2 draws them standing on it. Recentring
   also moved any model whose bounds are not centred on its origin sideways by the difference.
-  TV and Fury3 keep the old placement until their own renderer says otherwise.
+  TV and Fury3 follow the same rule: a placement is where the model's origin goes (the model
+  data puts that origin at the base of every ground model), and FuryEdit sizes and places
+  models from the raw vertices, not from recentred bounds. Hellbender keeps the old placement.
 */
 function traxxTrueOrigin(origin) {
-  return !isEvoOrigin(origin) && origin !== "HB" && origin !== "TV" && origin !== "F3" && origin !== "TV/F3";
+  return !isEvoOrigin(origin) && origin !== "HB";
+}
+
+/** Terminal Velocity, Fury3 and F!Zone. */
+function isTvFamilyOrigin(origin) {
+  return origin === "TV" || origin === "F3" || origin === "TV/F3";
+}
+
+/*
+  Vertical stretch applied to a model after it is turned.
+
+  A TV/F3 model is drawn in its true proportions. Its vertices are world units on every axis
+  (bin-decoder.js), and the engine treats them that way: each definition's hit radius is a
+  sphere that just encloses the model. So no stretch is applied, whatever the terrain height
+  scale; that setting exaggerates the ground, not the objects standing on it. Their placement
+  heights still follow it, so they stay on the surface.
+
+  Stretching by heightScale / 2 to "match" the terrain was tried and drew FIRSMALL.BIN at 2.5
+  times as tall as wide against its authored 1.7.
+
+  Hellbender keeps the Traxx 0.75, which its terrain shares.
+*/
+function modelZStretch(origin) {
+  return isTvFamilyOrigin(origin) ? 1 : TRAXX_Z_STRETCH;
 }
 
 /** True for the two 4x4 Evolution generations, which share one placement convention. */
@@ -270,16 +389,30 @@ export class TrackScene {
     this._trackData = null;
     this._renderFlags = {
       terrain: true, textures: true, grid: false,
-      courses: false, objects: true, gboxes: true,
+      objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true, terrainOverlap: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
-      racetrack: true, underground: true,
+      racetrack: true, underground: true, lensflare: true, sky: true, fog: true,
     };
     this._heightScale = 4;
     this._textureSmoothingEnabled = true;
     this._undergroundSurfaces = [];
     this._terrainUvTargets = [];
+    this._courses = [];
+    // Shared by both terrain materials, which survive a texture toggle; see _buildRoadMask.
+    this._roadMaskTarget = null;
+    this._roadMaskUniforms = {
+      roadMask: { value: null },
+      roadMaskBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      roadMaskEnabled: { value: 0 },
+      // Scales the lit result of LTE terrain back to its baked brightness; see _applyLighting.
+      lteGain: { value: 1 },
+    };
+    this._backdropUniforms = {
+      backdropTint: { value: new THREE.Color(0xffffff) },
+      backdropSaturation: { value: 1 },
+    };
     this._labelTextures = [];
     this._lastTime = 0;
     this._driveGeneration = 0;
@@ -308,7 +441,8 @@ export class TrackScene {
     this._renderer.toneMappingExposure = 1.0;
     this._renderer.shadowMap.enabled = true;
     this._renderer.shadowMap.type = THREE.PCFShadowMap;
-    this._renderer.shadowMap.autoUpdate = false;
+    // Checked every frame, but each cascade redraws only when SunShadows marks it; see there.
+    this._renderer.shadowMap.autoUpdate = true;
     this._container.appendChild(this._renderer.domElement);
     const { width, height } = this._container.getBoundingClientRect();
     this._renderer.setSize(width || 800, height || 600);
@@ -352,13 +486,15 @@ export class TrackScene {
       vegetation: new THREE.Group(),
       vegetationWire: new THREE.Group(),
       backdrop:   new THREE.Group(),
+      // The TV/F3/HB sky ceiling or star field, which stands in for a backdrop in those games.
+      tvSky:      new THREE.Group(),
     };
     for (const g of Object.values(this._groups)) this._scene.add(g);
   }
 
   _initCamera() {
     const { width, height } = this._container.getBoundingClientRect();
-    this._camera = new THREE.PerspectiveCamera(60, (width || 800) / (height || 600), 1, 120000);
+    this._camera = new THREE.PerspectiveCamera(NAV_FOV, (width || 800) / (height || 600), 1, 120000);
     this._nav = new TrackCamera(this._camera);
     this._nav.bindElement(this._container);
     this._nav.setGridSpanChangeCallback((gs) => { this._onGridSpanChange?.(gs); });
@@ -368,27 +504,200 @@ export class TrackScene {
   setNavigationChangeCallback(fn) { this._nav?.setChangeCallback(fn); }
 
   _initLights() {
-    this._ambient = new THREE.AmbientLight(AMBIENT_COLOR, 1.4);
+    this._ambient = new THREE.AmbientLight(AMBIENT_COLOR, AMBIENT_INTENSITY);
     this._scene.add(this._ambient);
     this._sun = new THREE.DirectionalLight(SUN_COLOR, 1.0);
     this._sun.position.set(1, 2, 0.5);
+    // Lights only when shadows are off; with them on, the cascades light instead.
     this._sun.castShadow = false;
-    this._sun.shadow.mapSize.set(1024, 1024);
-    const shadowCamera = this._sun.shadow.camera;
-    shadowCamera.left = shadowCamera.bottom = -SHADOW_SPAN / 2;
-    shadowCamera.right = shadowCamera.top = SHADOW_SPAN / 2;
-    shadowCamera.near = 1;
-    shadowCamera.far = SUN_DISTANCE * 3;
-    shadowCamera.updateProjectionMatrix();
-    this._sun.shadow.bias = -0.0001;
-    this._sun.shadow.normalBias = 0.5;
     this._scene.add(this._sun.target);
     this._scene.add(this._sun);
+    this._shadows = new SunShadows({
+      scene: this._scene, camera: this._camera, color: SUN_COLOR, intensity: 1.0,
+      maxFar: Math.min(this._camera.far, SHADOW_MAX_FAR),
+    });
+    this._shadowMaterialsDirty = true;
+    this._frameCount = 0;
     this._sunDirection = new THREE.Vector3(-1, -2, -0.5).normalize();
+    this._sunIntensity = 1.0;
+    this._weather = "clear";
+    this._skyTextures = {};
+    this._buildSky();
   }
 
   setSunIntensity(v) {
-    if (this._sun) this._sun.intensity = v;
+    this._sunIntensity = v;
+    this._applyLighting();
+  }
+
+  /*
+    The sky dome for weather: a sphere around the camera, drawn first and without depth so
+    the backdrop and everything else lands on top of it. The textures run from zenith (top)
+    to horizon (bottom), so V follows elevation. The bottom row is placed SKY_BELOW_HORIZON
+    under the horizon, because from a raised camera the sky shows past the edge of the map
+    there, and a clamped row stretched over that band draws as vertical streaks.
+
+    U goes round the horizon SKY_REPEATS times. The skies are photographs, not tiles, so
+    their left and right edges do not meet; mirroring them hides the join but turns every
+    seam into a symmetric inkblot. Instead each seam is cross-faded with the same sky read
+    half a repeat further on, where that second read has no seam of its own.
+  */
+  _buildSky() {
+    const geo = new THREE.SphereGeometry(1, 64, 32);
+    const uv = geo.attributes.uv;
+    const pos = geo.attributes.position;
+    for (let i = 0; i < uv.count; i++) {
+      const elevation = Math.asin(Math.max(-1, Math.min(1, pos.getY(i))));
+      uv.setXY(i, uv.getX(i) * SKY_REPEATS,
+        Math.max(0, (elevation + SKY_BELOW_HORIZON) / (Math.PI / 2 + SKY_BELOW_HORIZON)));
+    }
+    const mat = new THREE.MeshBasicMaterial({ side: THREE.BackSide, fog: false, depthTest: false, depthWrite: false });
+    /*
+      Below the texture's bottom row every texel along a column is the same, which draws as
+      vertical streaks wherever the sky shows past the edge of the map. Reading ever smaller
+      mip levels the further below the horizon a pixel is smooths that band into the sky's
+      average colour.
+    */
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying float vSkyHeight;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSkyHeight = position.y;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vSkyHeight;")
+        .replace("#include <map_fragment>", `
+        #ifdef USE_MAP
+          float skySeam = fract(vMapUv.x);
+          float skyFade = 1.0 - smoothstep(0.0, ${SKY_SEAM_BLEND.toFixed(3)}, min(skySeam, 1.0 - skySeam) * 2.0);
+          float skyBlur = 8.0 * smoothstep(${(-Math.sin(SKY_BELOW_HORIZON * 0.6)).toFixed(3)}, -0.7, vSkyHeight);
+          vec4 skyA = texture2D(map, vMapUv, skyBlur);
+          vec4 skyB = texture2D(map, vec2(vMapUv.x + 0.5, vMapUv.y), skyBlur);
+          diffuseColor *= mix(skyA, skyB, skyFade);
+        #endif`);
+    };
+    this._sky = new THREE.Mesh(geo, mat);
+    this._sky.frustumCulled = false;
+    this._sky.visible = false;
+    /*
+      Ordered through a group, not on the mesh: the backdrop is a Group at renderOrder -1, and
+      three.js sorts by the enclosing group's order before an object's own, so a lone mesh at
+      -2 still drew after the backdrop and covered its mountains.
+    */
+    const skyGroup = new THREE.Group();
+    skyGroup.renderOrder = -2;
+    skyGroup.add(this._sky);
+    this._scene.add(skyGroup);
+    this._flare = new SunFlare(skyGroup);
+    this._flareRay = new THREE.Raycaster();
+    this._sunBlocked = (origin, direction) => this._isSunBlocked(origin, direction);
+  }
+
+  _skyTexture(file) {
+    if (!this._skyTextures[file]) {
+      const tex = new THREE.TextureLoader().load(new URL(`./resources/${file}`, import.meta.url).href);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      this._skyTextures[file] = tex;
+    }
+    return this._skyTextures[file];
+  }
+
+  /** "clear", "cloudy", "dusk" or "night". Applies to the tracks in WEATHER_ORIGINS only. */
+  setWeather(name) {
+    this._weather = WEATHERS[name] ? name : "clear";
+    this._applyWeather();
+  }
+
+  get weather() { return this._weather; }
+
+  /** Whether the loaded track takes weather at all. */
+  weatherApplies() {
+    return WEATHER_ORIGINS.has(this._trackData?.origin);
+  }
+
+  _weatherPreset() {
+    return this.weatherApplies() ? WEATHERS[this._weather] : null;
+  }
+
+  _applyWeather() {
+    const preset = this._weatherPreset();
+    this._sky.material.map = preset ? this._skyTexture(preset.sky) : null;
+    this._sky.material.needsUpdate = true;
+    // A track's own sky texture (Evo) gives way to the weather's.
+    if (this._skyTextureMesh) this._skyTextureMesh.visible = !preset;
+    // The sun in a clear or dusk sky, the moon at night, neither behind cloud.
+    this._flare.setMode(preset?.celestial ?? "none");
+
+    // The backdrop is unlit, so the weather tints and greys it directly; see _installBackdropShader.
+    this._backdropUniforms.backdropTint.value.set(preset?.backdrop ?? 0xffffff);
+    this._backdropUniforms.backdropSaturation.value = preset?.backdropSaturation ?? 1;
+    this._applyLighting();
+    this._applyVisibility();
+  }
+
+  /*
+    Whether one of the flare's visibility rays is stopped before it reaches the sun: by the
+    ground, marched along the ray over the heightfield, or by a placed object or tree.
+    SUN.TXT's rays are MTM2's own occlusion test; what they are tested against here is the
+    viewer's choice, and the backdrop is left out because it is mostly transparent sky
+    above its mountains.
+  */
+  _isSunBlocked(origin, direction) {
+    const td = this._trackData;
+    if (!td) return false;
+    this._flareFrame ??= createWorldFrame(td);
+    const frame = this._flareFrame;
+    const world = this._worldSize(td);
+    for (let t = 16; t < SUN_RAY_REACH; t += 16 + t * 0.02) {
+      const x = origin.x + direction.x * t, y = origin.y + direction.y * t, z = origin.z + direction.z * t;
+      if (x < 0 || z < 0 || x > world || z > world) break;
+      const ground = frame.heightAtFeet(x / UNITS_PER_FOOT_H, z / UNITS_PER_FOOT_H) * UNITS_PER_FOOT_V;
+      if (y < ground) return true;
+    }
+    const ray = this._flareRay;
+    ray.set(origin, direction);
+    ray.far = this._camera.far;
+    ray.camera = this._camera;
+    const g = this._groups;
+    return ray.intersectObjects([g.objects, g.billboards, g.vegetation], true).length > 0;
+  }
+
+  _applyLighting() {
+    const preset = this._weatherPreset();
+    const sun = this._sunIntensity * (preset?.sun ?? 1);
+    const sunColor = preset?.sunColor ?? SUN_COLOR;
+    this._sun.intensity = sun * LIGHT_SCALE;
+    this._sun.color.set(sunColor);
+    this._shadows.setIntensity(sun * LIGHT_SCALE);
+    this._shadows.setColor(sunColor);
+    this._ambient.intensity = AMBIENT_INTENSITY * LIGHT_SCALE * (preset?.ambient ?? 1);
+    this._ambient.color.set(preset?.ambientColor ?? AMBIENT_COLOR);
+
+    /*
+      The baked-light gain for LTE terrain: pi over the irradiance an unshadowed, level patch
+      of ground gets on a clear day at the default sun strength. Under those conditions the
+      ground draws at exactly its LTE brightness; in shade, under weather, or with the Sun
+      slider moved, it draws that much darker or brighter. Measured against a fixed reference
+      rather than the current lights, or the weather would cancel itself out.
+    */
+    const height = Math.max(LTE_MIN_SUN_HEIGHT, -(this._sunDirection?.y ?? -1));
+    const ambient = new THREE.Color(AMBIENT_COLOR).multiplyScalar(AMBIENT_INTENSITY * LIGHT_SCALE);
+    const direct = new THREE.Color(SUN_COLOR).multiplyScalar(LIGHT_SCALE * height);
+    const reference = (ambient.r + direct.r + ambient.g + direct.g + ambient.b + direct.b) / 3;
+    this._roadMaskUniforms.lteGain.value = Math.PI / reference;
+  }
+
+  /** Lets the weather tint and grey an unlit backdrop material. */
+  _installBackdropShader(material) {
+    const uniforms = this._backdropUniforms;
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nuniform vec3 backdropTint;\nuniform float backdropSaturation;")
+        .replace("#include <map_fragment>", `#include <map_fragment>
+          float backdropGrey = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+          diffuseColor.rgb = mix(vec3(backdropGrey), diffuseColor.rgb, backdropSaturation) * backdropTint;`);
+    };
   }
 
   setGamma(v) {
@@ -398,8 +707,14 @@ export class TrackScene {
   // Set view distance in grid-cell units (1 cell = 64 world units)
   setViewDistance(cells) {
     const dist = cells * 64;
+    this._viewDistance = dist;
+    if (this._tvFog) {
+      this._tvFog.near = dist * TV_FOG_START;
+      this._tvFog.far = dist;
+    }
     this._camera.far = dist * 3;
     this._camera.updateProjectionMatrix();
+    this._shadows?.setMaxFar(Math.min(this._camera.far, SHADOW_MAX_FAR));
   }
 
   _initResize() {
@@ -412,6 +727,7 @@ export class TrackScene {
     if (!width || !height) return;
     this._camera.aspect = width / height;
     this._camera.updateProjectionMatrix();
+    this._shadows?.refit();
     this._renderer.setSize(width, height);
   }
 
@@ -431,11 +747,21 @@ export class TrackScene {
       else this._nav.update(dt);
       // Keep backdrop centered on camera so it never appears to move
       if (this._backdropMesh) this._backdropMesh.position.copy(this._camera.position);
+      this._updateTvSky();
+      if (this._sky.visible) {
+        // Inside the far plane whatever the view distance, and always around the camera.
+        this._sky.position.copy(this._camera.position);
+        this._sky.scale.setScalar(this._camera.far * 0.9);
+      }
       this._updateBillboards();
+      this._truckLights?.update(this._camera, time);
       this._updateTextureAnimations(dt);
-      this._updateShadowArea();
-      if (this._drive?.isActive && this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+      this._updateShadows();
+      const f = this._renderFlags;
+      this._flare.update(this._camera, this._sunDirection, this._sky.visible && f.sunlight !== false,
+        f.lensflare !== false && f.sunlight !== false && !!this._trackData, this._sunBlocked);
       this._renderer.render(this._scene, this._camera);
+      this._flare.render(this._renderer, this._camera);
     };
     requestAnimationFrame((t) => { this._lastTime = t; requestAnimationFrame(loop); });
   }
@@ -466,13 +792,21 @@ export class TrackScene {
     this._terrainUvTargets.push({ geometry, full, overlap });
   }
 
-  _updateShadowArea() {
-    if (!this._trackData || !this._sun.castShadow) return;
-    const x = Math.round(this._camera.position.x / SHADOW_ANCHOR_STEP) * SHADOW_ANCHOR_STEP;
-    const z = Math.round(this._camera.position.z / SHADOW_ANCHOR_STEP) * SHADOW_ANCHOR_STEP;
-    if (this._sun.target.position.x === x && this._sun.target.position.z === z) return;
-    this._sun.target.position.set(x, 0, z);
-    this._applySunDirection(false);
+  /*
+    Once a frame: set up any lit material the cascades have not seen, refit them to the
+    camera, and redraw the shadow maps only when something they depend on changed. The
+    sweep runs when the scene is known to have changed and once a second besides, so a
+    material created somewhere unexpected is never lit several times over for long.
+  */
+  _updateShadows() {
+    this._frameCount++;
+    if (this._shadowMaterialsDirty || this._frameCount % SHADOW_MATERIAL_SWEEP_FRAMES === 0) {
+      this._shadows.setupMaterials();
+      this._shadowMaterialsDirty = false;
+    }
+    // A driven truck moves every frame; the near cascades follow it closely, far ones in turn.
+    if (this._drive?.isActive) this._shadows.invalidateDynamic();
+    this._shadows.update();
   }
 
   setTextureSmoothingEnabled(enabled) {
@@ -480,6 +814,12 @@ export class TrackScene {
     const textures = [this._terrainAtlasTex, ...Object.values(this._modelTexCache ?? {})];
     for (const mesh of this._groups.racetrack.children) {
       if (mesh.material?.map) textures.push(mesh.material.map);
+    }
+    // The TV sky keeps its mipmaps: a tiled 64x64 ceiling shimmers badly without them.
+    const skyMap = this._tvSkyPlane?.material?.map;
+    if (skyMap) {
+      skyMap.magFilter = enabled ? THREE.LinearFilter : THREE.NearestFilter;
+      skyMap.needsUpdate = true;
     }
     for (const texture of textures) {
       if (!texture) continue;
@@ -513,7 +853,6 @@ export class TrackScene {
       textures:   !!this._terrainMesh,
       terrainOverlap: !!this._terrainMesh,
       grid:       !!this._terrainMesh,
-      courses:    has("courses"),
       objects,
       billboards: has("billboards"),
       checkpoints: has("checkpoints"),
@@ -529,9 +868,12 @@ export class TrackScene {
       powerups:   has("powerups"),
       water:      has("water"),
       backdrop:   has("backdrop"),
+      sky:        !!this._trackData?.tvSky,
+      fog:        !!this._trackData?.tvSky,
       animate:    (this._textureAnimations?.length ?? 0) > 0,
       sunlight:   true,
       shadows:    true,
+      lensflare:  this.weatherApplies(),
     };
   }
 
@@ -541,8 +883,9 @@ export class TrackScene {
     // CPR's road surface is its own layer, not one of the placed objects, and only CPR has
     // one. It gets its own toggle rather than riding on `objects`.
     this._groups.racetrack.visible = f.racetrack !== false;
+    // With the road hidden, the ground it covers is shown again.
+    this._roadMaskUniforms.roadMaskEnabled.value = this._roadMaskTarget && f.racetrack !== false ? 1 : 0;
     this._groups.terrainGrid.visible = f.grid;
-    this._groups.courses.visible = f.courses;
     this._groups.objects.visible = f.objects;
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboards.visible = f.objects;
@@ -579,10 +922,19 @@ export class TrackScene {
     this._groups.driveTruck.visible = true;
     this._groups.hitboxes.visible = f.hitboxes === true;
     this._groups.backdrop.visible = f.backdrop;
+    this._applyTvSky();
+    // The weather sky is background too, and goes with it.
+    if (this._sky) this._sky.visible = f.backdrop !== false && !!this._weatherPreset();
     if (this._sun) {
-      this._sun.visible = f.sunlight !== false;
-      this._sun.castShadow = this._sun.visible && f.shadows !== false && !!this._trackData;
-      if (this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+      // The cascades light the scene while they cast; otherwise the plain sun does.
+      const sunlight = f.sunlight !== false;
+      const shadows = sunlight && f.shadows !== false && !!this._trackData
+        && this._weatherPreset()?.shadows !== false;
+      if (shadows !== this._shadows.enabled) this._shadows.setEnabled(shadows);
+      this._sun.visible = sunlight && !shadows;
+      if (shadows) this._shadows.invalidate();
+      // The terrain material may just have been swapped for one not set up yet.
+      this._shadowMaterialsDirty = true;
     }
 
     // texture toggle: swap between textured and flat terrain material
@@ -607,8 +959,15 @@ export class TrackScene {
       from meshes. The truck's child is a Group with the whole vehicle nested under it, so the
       loop would free nothing at all and leak every mesh and material on each track change.
     */
+    this._truckLights?.dispose();
+    this._truckLights = null;
     this._driveTruck?.dispose();
     this._driveTruck = null;
+    // Course groups nest their line and label, which the flat loop below does not reach.
+    for (const { group } of this._courses) {
+      for (const child of group.children) { child.geometry?.dispose(); child.material?.dispose(); }
+    }
+    this._courses = [];
     for (const g of Object.values(this._groups)) {
       while (g.children.length) {
         const child = g.children[0];
@@ -633,6 +992,10 @@ export class TrackScene {
     this._terrainMatFlat = null;
     this._terrainAtlasTex?.dispose();
     this._terrainAtlasTex = null;
+    this._roadMaskTarget?.dispose();
+    this._roadMaskTarget = null;
+    this._roadMaskUniforms.roadMask.value = null;
+    this._roadMaskUniforms.roadMaskEnabled.value = 0;
     this._terrainAtlasN = 1;
     this._terrainAtlasCols = 1;
     this._terrainAtlasRows = 1;
@@ -642,6 +1005,12 @@ export class TrackScene {
     this._terrainAtlasPadding = 0;
     this._terrainAtlasSourceTileSize = 64;
     this._backdropMesh = null;
+    this._skyTextureMesh = null;
+    this._tvSkyPlane = null;
+    this._tvStars = null;
+    this._tvFog = null;
+    this._scene.fog = null;
+    this._flareFrame = null;
     this._arenaMesh = null;
     this._terrainRaw = null;
     this._terrainUvTargets = [];
@@ -652,7 +1021,8 @@ export class TrackScene {
     this._animationClock = 0;
     this._modelTexCache = {};
     this._trackData = null;
-    this._sun.castShadow = false;
+    this._shadows.setEnabled(false);
+    this._shadows.forgetMaterials();
     this._scene.background = null;
     this._renderer.setClearColor(EMPTY_BACKGROUND_COLOR);
   }
@@ -680,6 +1050,8 @@ export class TrackScene {
       for (const name of trackData.backdropModelNames ?? [trackData.backdropModelName]) {
         this._buildBackdropModel(name, trackData);
       }
+    } else if (trackData.tvSky) {
+      this._buildTvSky(trackData);
     } else if (trackData.skyTexture) {
       this._buildBackdropFromTexture(trackData.skyTexture);
     }
@@ -695,14 +1067,19 @@ export class TrackScene {
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
     if (trackData.checkpoints?.length) this._buildCheckpointMarkers(trackData);
     if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
-    if (trackData.powerups?.length) this._buildPowerups(trackData);
+    this._buildPowerups(trackData);
+    // Markers are map legends, not scenery: fog must not fade them out.
+    for (const name of ["navPoints", "checkpointMarkers", "tunnels", "powerups"]) {
+      this._groups[name].traverse((child) => { if (child.material) child.material.fog = false; });
+    }
     this._installTextureAnimations(trackData);
 
     this._nav.resetToCourseStart(trackData, this._heightScale);
 
     this._applyVisibility();
     this._updateSunFromTrackData(trackData);
-    this._updateShadowArea();
+    this._applyWeather();
+    this._shadowMaterialsDirty = true;
   }
 
   /*
@@ -791,6 +1168,8 @@ export class TrackScene {
     geo.setAttribute("normal",   new THREE.BufferAttribute(new Float32Array(normals), 3));
     this._registerTerrainUvs(geo, terrainData);
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+    const baked = !!terrainData.lights;
+    if (baked) geo.setAttribute("lteLight", new THREE.BufferAttribute(new Float32Array(terrainData.lights), 1));
 
     // Atlas texture
     const atlasImg = new ImageData(new Uint8ClampedArray(atlas.rgba), atlas.width, atlas.height);
@@ -804,6 +1183,8 @@ export class TrackScene {
 
     this._terrainMatTextured = new THREE.MeshLambertMaterial({ map: atlasTex, side: THREE.FrontSide });
     this._terrainMatFlat = new THREE.MeshLambertMaterial({ color: 0x4a7a4a, side: THREE.FrontSide });
+    this._installTerrainShader(this._terrainMatTextured, baked);
+    this._installTerrainShader(this._terrainMatFlat, baked);
     this._terrainAtlasTex = atlasTex;
     this._terrainAtlasN = atlas.textureCount;
     this._terrainAtlasCols = atlas.atlasCols ?? atlas.textureCount ?? 1;
@@ -892,6 +1273,168 @@ export class TrackScene {
     this._groups.backdrop.add(group);
   }
 
+  /*
+    The TV/F3/HB sky: a textured ceiling, or a star field on a level whose line 10 names the
+    STARS.VOX / SPACE.VOX sentinel. Either way the level's horizon colour (sky ACT colour 207,
+    black for stars) is what the engine clears the screen to, and what its fog ends in.
+  */
+  _buildTvSky(trackData) {
+    const sky = trackData.tvSky;
+    const horizon = new THREE.Color().setRGB(sky.horizon[0] / 255, sky.horizon[1] / 255, sky.horizon[2] / 255,
+      THREE.SRGBColorSpace);
+    this._tvHorizon = horizon;
+    const dist = this._viewDistance ?? 128 * 64;
+    this._tvFog = new THREE.Fog(horizon.clone(), dist * TV_FOG_START, dist);
+    this._tvSkyUniforms = {
+      skyHorizon: { value: horizon.clone() },
+      skyFogNear: { value: this._tvFog.near },
+      skyFogFar:  { value: this._tvFog.far },
+      skyFogOn:   { value: 1 },
+      skyShrink:  { value: 1 },
+    };
+
+    if (sky.stars) {
+      this._tvStars = this._buildTvStars();
+      this._groups.tvSky.add(this._tvStars);
+      return;
+    }
+    const skyTexture = trackData.skyTexture;
+    if (!skyTexture?.rgba) return;
+
+    const tex = new THREE.DataTexture(new Uint8ClampedArray(skyTexture.rgba), skyTexture.width, skyTexture.height,
+      THREE.RGBAFormat);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
+
+    /*
+      World origin is scene (0, y, worldSize): editor Y runs opposite to scene Z. Texture u
+      follows +X and v follows +editor Y, as the engine's corner UVs do, and the phase is
+      anchored at world 0 so a 256-cell map holds exactly 16 repeats and wraps without a seam.
+    */
+    const ws = this._worldSize(trackData);
+    const half = TV_SKY_HALF_CELLS * CELL_SIZE_UNITS;
+    const y = TV_SKY_ALTITUDE * this._heightScale;
+    const repeats = (2 * TV_SKY_HALF_CELLS) / TV_SKY_CELLS_PER_REPEAT;
+    const corners = [[-half, -half], [half, -half], [half, half], [-half, half]];
+    const positions = [];
+    const uvs = [];
+    for (const [ex, ey] of corners) {
+      positions.push(ex, y, ws - ey);
+      uvs.push(((ex + half) / (2 * half)) * repeats, ((ey + half) / (2 * half)) * repeats);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex, side: THREE.DoubleSide, fog: false, depthTest: false, depthWrite: false,
+    });
+    /*
+      The plane is drawn shrunk around the camera, so its fog is worked out on the true
+      distance: the view-space distance divided by the shrink factor, per fragment (the four
+      corners are all far away, so an interpolated per-vertex distance would fade everything).
+      It fades into the horizon colour over the same range as the terrain fog, which is what
+      the engine's fog table does to every colour on screen.
+    */
+    const uniforms = this._tvSkyUniforms;
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vSkyView;")
+        .replace("#include <project_vertex>", "#include <project_vertex>\nvSkyView = mvPosition.xyz;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>
+          varying vec3 vSkyView;
+          uniform float skyShrink;
+          uniform vec3 skyHorizon;
+          uniform float skyFogNear;
+          uniform float skyFogFar;
+          uniform float skyFogOn;`)
+        .replace("#include <map_fragment>", `#include <map_fragment>
+          float skyFade = skyFogOn * smoothstep(skyFogNear, skyFogFar, length(vSkyView) / skyShrink);
+          diffuseColor.rgb = mix(diffuseColor.rgb, skyHorizon, skyFade);`);
+    };
+    const plane = new THREE.Mesh(geo, mat);
+    plane.matrixAutoUpdate = false;
+    plane.frustumCulled = false;
+    plane.renderOrder = -1;
+    this._tvSkyPlane = plane;
+    this._groups.tvSky.add(plane);
+  }
+
+  /*
+    The star field of a space level. GAME.EXE generates 2000 stars at load (0x17b50) and
+    draws them as points; the positions here are a fixed pseudo-random set, so a level looks
+    the same on every load.
+  */
+  _buildTvStars() {
+    let seed = 0x2f6b1d;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const positions = new Float32Array(TV_STAR_COUNT * 3);
+    const colors = new Float32Array(TV_STAR_COUNT * 3);
+    for (let i = 0; i < TV_STAR_COUNT; i++) {
+      const z = random() * 2 - 1;
+      const a = random() * Math.PI * 2;
+      const r = Math.sqrt(1 - z * z);
+      positions.set([r * Math.cos(a), z, r * Math.sin(a)], i * 3);
+      const b = 0.35 + random() * 0.65;
+      colors.set([b, b, b], i * 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const stars = new THREE.Points(geo, new THREE.PointsMaterial({
+      size: 2, sizeAttenuation: false, vertexColors: true, fog: false, depthTest: false, depthWrite: false,
+    }));
+    stars.frustumCulled = false;
+    stars.renderOrder = -1;
+    return stars;
+  }
+
+  // Sky and fog follow their toggles; the clear colour is the horizon while either is on.
+  _applyTvSky() {
+    const f = this._renderFlags;
+    const sky = this._trackData?.tvSky;
+    this._groups.tvSky.visible = !!sky && f.sky !== false;
+    const fog = !!sky && f.fog !== false && !!this._tvFog;
+    this._scene.fog = fog ? this._tvFog : null;
+    if (this._tvSkyUniforms) this._tvSkyUniforms.skyFogOn.value = fog ? 1 : 0;
+    if (!this._trackData) return;
+    const horizonClear = !!sky && (f.sky !== false || fog);
+    if (horizonClear && this._tvHorizon) this._renderer.setClearColor(this._tvHorizon);
+    else this._renderer.setClearColor(BACKGROUND_COLOR);
+  }
+
+  // The ceiling drawn shrunk about the camera, and the star field kept around it.
+  _updateTvSky() {
+    if (!this._groups.tvSky.visible) return;
+    const cam = this._camera.position;
+    if (this._tvSkyPlane) {
+      // Farthest corner inside half the far plane; the picture is the same at any factor.
+      const reach = TV_SKY_HALF_CELLS * CELL_SIZE_UNITS * 2 * Math.SQRT2;
+      const k = Math.min(1, (this._camera.far * 0.5) / reach);
+      if (this._tvSkyUniforms) this._tvSkyUniforms.skyShrink.value = k;
+      this._tvSkyPlane.matrix.makeScale(k, k, k).setPosition(cam.x * (1 - k), cam.y * (1 - k), cam.z * (1 - k));
+      this._tvSkyPlane.matrixWorldNeedsUpdate = true;
+    }
+    if (this._tvStars) {
+      this._tvStars.position.copy(cam);
+      this._tvStars.scale.setScalar(this._camera.far * 0.9);
+    }
+    if (this._tvSkyUniforms && this._tvFog) {
+      this._tvSkyUniforms.skyFogNear.value = this._tvFog.near;
+      this._tvSkyUniforms.skyFogFar.value = this._tvFog.far;
+    }
+  }
+
   _buildBackdropFromTexture(skyTexture) {
     const { rgba, width, height } = skyTexture;
     const tex = new THREE.DataTexture(new Uint8ClampedArray(rgba), width, height, THREE.RGBAFormat);
@@ -903,6 +1446,7 @@ export class TrackScene {
       new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, fog: false, depthTest: false, depthWrite: false })
     );
     this._backdropMesh.renderOrder = -1;
+    this._skyTextureMesh = this._backdropMesh;
     this._groups.backdrop.add(this._backdropMesh);
   }
 
@@ -943,6 +1487,7 @@ export class TrackScene {
         ? new THREE.MeshBasicMaterial({ map: this._modelTexCache[texName], side: THREE.BackSide, fog: false, depthTest: false, depthWrite: false, ...alphaOpts })
         : new THREE.MeshBasicMaterial({ color: mesh.color ?? 0x334466, side: THREE.BackSide, fog: false, depthTest: false, depthWrite: false });
 
+      this._installBackdropShader(mat);
       group.add(new THREE.Mesh(geo, mat));
     }
 
@@ -990,22 +1535,71 @@ export class TrackScene {
   _buildCourses(trackData) {
     const hs = this._heightScale;
     const ws = this._worldSize(trackData);
-    const addCourse = (course, color) => {
+    const evo = trackData.origin === "EVO1" || trackData.origin === "EVO2";
+    const toScene = (p) => new THREE.Vector3(p[0], p[2] * hs + 8, ws - p[1]);
+    const addCourse = (course, color, { loop = true, label = null, labelLift = 0 } = {}) => {
       if (!course?.segments?.length) return;
-      const pts = [];
-      for (const seg of course.segments) {
-        // pos[0]=JTraxx X, pos[1]=JTraxx Y(depth→flip), pos[2]=JTraxx Z(height)
-        if (seg.start) pts.push(new THREE.Vector3(seg.start[0], seg.start[2] * hs + 8, ws - seg.start[1]));
-        if (seg.end)   pts.push(new THREE.Vector3(seg.end[0],   seg.end[2]   * hs + 8, ws - seg.end[1]));
-      }
+      const segments = course.segments.filter((seg) => seg.start && seg.end)
+        .map((seg) => [toScene(seg.start), toScene(seg.end)]);
+      // A recorded AI line is already the path driven; only the .SIT runs need corners.
+      const pts = evo && !course.recorded ? evoCoursePath(segments, loop) : segments.flat();
       if (pts.length < 2) return;
       const geo = new THREE.BufferGeometry().setFromPoints(pts);
       const mat = new THREE.LineBasicMaterial({ color, linewidth: 2, depthTest: false, depthWrite: false });
-      const line = new THREE.LineLoop(geo, mat);
+      // An Evo loop already runs its closing turn back to the first point.
+      const line = loop && !evo ? new THREE.LineLoop(geo, mat) : new THREE.Line(geo, mat);
       line.renderOrder = 1000;
-      this._groups.courses.add(line);
+      // One group per course, behind its own checkbox; see courseList.
+      const group = new THREE.Group();
+      group.visible = false;
+      group.add(line);
+      if (label) {
+        // Named at its first point, so each course says what it is for.
+        const sprite = this._makeLabelSprite(label, color);
+        sprite.position.copy(pts[0]).setY(pts[0].y + MARKER_LABEL_HEIGHT + labelLift);
+        group.add(sprite);
+      }
+      this._groups.courses.add(group);
+      this._courses.push({ label: label ?? "Course", color, group });
     };
-    addCourse(trackData.primaryCourse, COURSE_COLOR);
+
+    /*
+      Every course is drawn, each in its own colour and named at its start.
+
+      CPR has five and each has its own job: three AI racing lines, the pit road lap and pit
+      row (CPR_COURSE_PURPOSES); pit row is not a lap, so it is left open. The SIT games
+      (MTM1, MTM2, Evo) have a main course followed by up to four extended ones, which are the
+      lines the computer trucks follow: Traxx's notes put trucks not locking onto the course
+      down to a track having no extended courses. Evo keeps its computer drivers' lines as
+      recorded laps instead (see evo-ai-lines.js), which arrive named.
+    */
+    const courses = [trackData.primaryCourse, ...(trackData.extendedCourses ?? [])];
+    const isCpr = trackData.origin === "CPR";
+    courses.forEach((course, i) => {
+      const purpose = isCpr ? CPR_COURSE_PURPOSES[i] : null;
+      const name = isCpr ? purpose?.name : (course?.name ?? (i === 0 ? "Main course" : `AI line ${i}`));
+      addCourse(course, (isCpr ? CPR_COURSE_COLORS : SIT_COURSE_COLORS)[i] ?? COURSE_COLOR, {
+        loop: purpose?.lap ?? true,
+        label: name ? `C${i} ${name}` : `C${i}`,
+        // The AI lines are usually copies of each other and share a first point, so each
+        // label sits at its own height instead of printing over the others.
+        labelLift: i * 45,
+      });
+    });
+  }
+
+  /**
+   * The loaded track's courses, in course order, for the sidebar to give each its own
+   * checkbox. What they are depends on the game: CPR's five named purposes, or a SIT track's
+   * main course and AI lines.
+   */
+  courseList() {
+    return this._courses.map(({ label, color, group }, index) => ({ index, label, color, visible: group.visible }));
+  }
+
+  setCourseVisible(index, visible) {
+    const course = this._courses[index];
+    if (course) course.group.visible = visible;
   }
 
   /*
@@ -1027,8 +1621,9 @@ export class TrackScene {
     error rather than as a deliberate altitude. Sampling the heightfield makes every marker
     agree with the surface under it.
 
-    Markers land on cell centres, so averaging the cell's four corners is the bilinear height
-    at the point the marker actually occupies rather than the height of one of its corners.
+    The height is bilinear between the four vertices around the point. For a marker on a cell
+    centre that is the average of the cell's corners; TV-family markers keep their exact
+    sub-cell position (tv-coords.js), and bilinear is what lands them on the surface there.
 
     A 16-bit heightfield is read two ways, because two games write one: CPR is 10.6 fixed
     point (divisor 64) and Evo is 11.5 (divisor 32), and each loader states its divisor on the
@@ -1042,14 +1637,19 @@ export class TrackScene {
     const raw = this._terrainRaw;
     if (!raw || !terrain) return 0;
     const gridSize = terrain.gridSize ?? 256;
-    const cx = Math.min(gridSize - 1, Math.max(0, Math.floor(editorX / (terrain.cellSize ?? 64))));
-    const cz = Math.min(gridSize - 1, Math.max(0, Math.floor(editorY / (terrain.cellSize ?? 64))));
+    const cellSize = terrain.cellSize ?? 64;
+    const fx = Math.min(gridSize - 1, Math.max(0, editorX / cellSize));
+    const fz = Math.min(gridSize - 1, Math.max(0, editorY / cellSize));
+    const cx = Math.min(gridSize - 2, Math.floor(fx));
+    const cz = Math.min(gridSize - 2, Math.floor(fz));
+    const tx = fx - cx, tz = fz - cz;
 
-    let total = 0;
-    for (const [ox, oz] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
-      total += heightAtCell(terrain, raw, cx + ox, cz + oz);
-    }
-    return (total / 4) * this._heightScale;
+    const h00 = heightAtCell(terrain, raw, cx, cz);
+    const h10 = heightAtCell(terrain, raw, cx + 1, cz);
+    const h01 = heightAtCell(terrain, raw, cx, cz + 1);
+    const h11 = heightAtCell(terrain, raw, cx + 1, cz + 1);
+    const h = (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+    return h * this._heightScale;
   }
 
   /*
@@ -1193,9 +1793,25 @@ export class TrackScene {
   */
   _buildCheckpointMarkers(trackData) {
     const group = this._groups.checkpointMarkers;
+    /*
+      CPR checkpoints are labelled by what they are for (see cprCheckpointRole): the pit lane
+      gates by name and in blue, since a lap does not count them, the start/finish as S/F,
+      and the ordinary gates numbered in lap order after it. Every other game numbers all of
+      its checkpoints in pass order.
+    */
+    let gateNumber = 0;
     trackData.checkpoints.forEach((checkpoint, i) => {
       const base = this._markerGroundPosition(checkpoint.position, trackData);
-      this._addMapMarker(group, base, CHECKPOINT_MARKER_COLOR, `CP${i + 1}`);
+      const role = checkpoint.role;
+      if (!role) {
+        this._addMapMarker(group, base, CHECKPOINT_MARKER_COLOR, `CP${i + 1}`);
+      } else if (isCprPitCheckpoint(role)) {
+        this._addMapMarker(group, base, PIT_CHECKPOINT_MARKER_COLOR, CPR_CHECKPOINT_LABELS[role]);
+      } else if (role === "startFinish") {
+        this._addMapMarker(group, base, START_FINISH_MARKER_COLOR, CPR_CHECKPOINT_LABELS[role]);
+      } else {
+        this._addMapMarker(group, base, CHECKPOINT_MARKER_COLOR, `CP${++gateNumber}`);
+      }
     });
   }
 
@@ -1248,17 +1864,38 @@ export class TrackScene {
   /*
     Loose powerup pickups from the level's .PUP.
 
-    Labelled PUP1..PUPn with the record's type index appended as "t<n>". The index is not
-    expanded into a name: STARTUP.POD carries thirteen POWER*.BIN pickup models, but nothing
-    in any level file maps a .PUP type index onto one of them, and the F!Zone manual describes
-    the powerup list only as an editor enumeration. Reporting the number the level stores is
-    the honest option; inventing a name for it is not.
+    Labelled PUP1..PUPn with the pickup's name ("PUP3 Shield Restore"). The type index is named
+    from the table both period editors carry (tv-tables.js); a type outside it, or any
+    Hellbender pickup, keeps the bare index as "t<n>".
+
+    The pickup model is drawn at the record's own position when the open archive carries it.
+    The stock POWER*.BIN models live in STARTUP.POD, so on a stock level archive the marker is
+    all there is.
+
+    Loose pickups are the exception, though. Most powerups in a TV/F3 level are hidden inside
+    objects: a .DEF definition names a drop type and a drop chance, and authors put the real
+    supply in bunkers that always drop. ARTIC has an empty .PUP but 52 such bunkers. Those are
+    places on the map where a powerup is, so objects with a guaranteed (100%) drop are marked
+    too, labelled with what they hold and what holds it ("Shield Restore in BUNKER"). Chance
+    drops from enemies (4-20% in ARTIC) are not a place on the map and are left out.
   */
   _buildPowerups(trackData) {
     const group = this._groups.powerups;
-    trackData.powerups.forEach((powerup, i) => {
+    for (const box of trackData.boxes ?? []) {
+      if (!(box.dropChance >= 100) || !box.dropName) continue;
+      const base = this._markerGroundPosition(box.position, trackData);
+      const holder = (box.modelName ?? "").replace(/\.BIN$/i, "");
+      this._addMapMarker(group, base, POWERUP_COLOR, holder ? `${box.dropName} in ${holder}` : box.dropName);
+    }
+    (trackData.powerups ?? []).forEach((powerup, i) => {
       const base = this._markerGroundPosition(powerup.position, trackData);
-      this._addMapMarker(group, base, POWERUP_COLOR, `PUP${i + 1} t${powerup.type}`);
+      this._addMapMarker(group, base, POWERUP_COLOR, `PUP${i + 1} ${powerup.name || `t${powerup.type}`}`);
+      const model = powerup.modelName ? trackData.models?.[powerup.modelName] : null;
+      if (model?.meshes?.length) {
+        const box = { position: powerup.position, psi: 0, theta: 0, phi: 0 };
+        this._buildBinModel(model, box, this._heightScale, this._worldSize(trackData), trackData,
+          { targetGroup: group });
+      }
     });
   }
 
@@ -1318,7 +1955,7 @@ export class TrackScene {
       if (animation.kind === "model") {
         animation.target.set(source);
         // An animated cutout can change its shadow silhouette with the frame.
-        if (this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+        this._shadows.invalidateDynamic();
       } else {
         // Blit one square tile into the atlas, row by row.
         const { atlasWidth, x, y, size } = animation;
@@ -1552,6 +2189,155 @@ export class TrackScene {
 
     addMeshes(roadBuckets);
     addMeshes(wallBuckets);
+    this._buildRoadMask(roadBuckets);
+  }
+
+  /*
+    CPR draws its road over the terrain, never the other way round.
+
+    The terrain is a 32 ft grid and the road is not, so on a banked turn or a road cut into a
+    slope the interpolated ground rises through the road surface between grid points, and a
+    depth tested draw lets it cover the tarmac. The game gives the road layer precedence.
+
+    A heightfield cannot pass over the road it is under, so any terrain inside the road's
+    footprint is either below the road (hidden by it anyway) or poking through it. The road
+    quads are rendered once from straight above into a coverage mask, and the terrain
+    material pushes its fragments inside it to the back of the depth range. The road then
+    always wins, whichever is drawn first. Pushing rather than discarding matters at the
+    mask's soft edge: a discarded fragment there leaves a hole to the sky, where a pushed one
+    still fills the pixel when nothing else does. Objects, trucks and walls are untouched and
+    still depth test normally, so a hill in front of the road keeps hiding it.
+
+    The mask covers only the road's bounding box, at about a foot per texel.
+  */
+  _buildRoadMask(roadBuckets) {
+    const positions = [];
+    const indices = [];
+    for (const bucket of roadBuckets.values()) {
+      const base = positions.length / 3;
+      positions.push(...bucket.positions);
+      for (const index of bucket.indices) indices.push(base + index);
+    }
+    if (!indices.length) return;
+
+    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < positions.length; i += 3) {
+      minX = Math.min(minX, positions[i]); maxX = Math.max(maxX, positions[i]);
+      minZ = Math.min(minZ, positions[i + 2]); maxZ = Math.max(maxZ, positions[i + 2]);
+    }
+    const spanX = Math.max(1, maxX - minX);
+    const spanZ = Math.max(1, maxZ - minZ);
+    const maxSize = Math.min(ROAD_MASK_MAX_SIZE, this._renderer.capabilities.maxTextureSize);
+    const width = Math.max(1, Math.min(maxSize, Math.ceil(spanX / ROAD_MASK_UNITS_PER_TEXEL)));
+    const height = Math.max(1, Math.min(maxSize, Math.ceil(spanZ / ROAD_MASK_UNITS_PER_TEXEL)));
+
+    const target = new THREE.WebGLRenderTarget(width, height, {
+      format: THREE.RedFormat, type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      depthBuffer: false, stencilBuffer: false, generateMipmaps: false,
+    });
+
+    // Placed straight into the mask's own [minX, maxX] x [minZ, maxZ] square, so the terrain
+    // shader reads it back with the same bounds and no camera is involved.
+    const bounds = new THREE.Vector4(minX, minZ, spanX, spanZ);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { bounds: { value: bounds } },
+      vertexShader: `
+        uniform vec4 bounds;
+        void main() {
+          vec2 uv = (position.xz - bounds.xy) / bounds.zw;
+          gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+        }`,
+      fragmentShader: "void main() { gl_FragColor = vec4(1.0); }",
+      side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+    });
+    const maskScene = new THREE.Scene();
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    maskScene.add(mesh);
+
+    const previousTarget = this._renderer.getRenderTarget();
+    const previousClear = this._renderer.getClearColor(new THREE.Color());
+    const previousAlpha = this._renderer.getClearAlpha();
+    this._renderer.setRenderTarget(target);
+    this._renderer.setClearColor(0x000000, 0);
+    this._renderer.clear(true, false, false);
+    this._renderer.render(maskScene, this._camera);
+    this._renderer.setRenderTarget(previousTarget);
+    this._renderer.setClearColor(previousClear, previousAlpha);
+    geo.dispose();
+    mat.dispose();
+
+    this._roadMaskTarget = target;
+    this._roadMaskUniforms.roadMask.value = target.texture;
+    this._roadMaskUniforms.roadMaskBounds.value.copy(bounds);
+  }
+
+  /** Lets a terrain material drop the fragments the road covers; see _buildRoadMask. */
+  /*
+    The terrain's two shader additions.
+
+    The CPR road mask, see _buildRoadMask.
+
+    And the MTM family's baked light (USE_LTE, when the terrain carries an lteLight attribute;
+    see terrain-builder.js). The ground is drawn at the brightness the LTE bakes in, the way
+    MTM2 draws it, instead of being shaded again by the scene's sun, which would darken every
+    slope twice. The scene's lights still decide two things: shadows, and how much darker the
+    weather makes everything. So the lighting runs with the normal pointing straight up (no
+    slope term) and its result is scaled by lteGain, which maps an unshadowed clear-day
+    ground to exactly its LTE brightness.
+  */
+  _installTerrainShader(material, baked) {
+    const uniforms = this._roadMaskUniforms;
+    if (baked) material.defines = { ...(material.defines ?? {}), USE_LTE: "" };
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", `#include <common>
+          varying vec2 vRoadMaskXZ;
+          #ifdef USE_LTE
+            attribute float lteLight;
+            varying float vLteLight;
+          #endif`)
+        .replace("#include <begin_vertex>", `#include <begin_vertex>
+          vRoadMaskXZ = (modelMatrix * vec4(transformed, 1.0)).xz;
+          #ifdef USE_LTE
+            vLteLight = lteLight;
+          #endif`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>
+          varying vec2 vRoadMaskXZ;
+          uniform sampler2D roadMask;
+          uniform vec4 roadMaskBounds;
+          uniform float roadMaskEnabled;
+          #ifdef USE_LTE
+            varying float vLteLight;
+            uniform float lteGain;
+          #endif`)
+        .replace("#include <lights_fragment_begin>", `
+          #ifdef USE_LTE
+            normal = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+          #endif
+          #include <lights_fragment_begin>`)
+        .replace("#include <lights_fragment_end>", `#include <lights_fragment_end>
+          #ifdef USE_LTE
+            // The LTE byte is a display brightness; the lighting runs in linear space.
+            float lteLinear = lteGain * pow(vLteLight, 2.2);
+            reflectedLight.directDiffuse *= lteLinear;
+            reflectedLight.indirectDiffuse *= lteLinear;
+          #endif`)
+        .replace("#include <clipping_planes_fragment>", `#include <clipping_planes_fragment>
+          gl_FragDepth = gl_FragCoord.z;
+          if (roadMaskEnabled > 0.5) {
+            vec2 roadUv = (vRoadMaskXZ - roadMaskBounds.xy) / roadMaskBounds.zw;
+            if (all(greaterThanEqual(roadUv, vec2(0.0))) && all(lessThanEqual(roadUv, vec2(1.0)))
+                && texture2D(roadMask, roadUv).r > 0.5) gl_FragDepth = ROAD_MASK_DEPTH;
+          }`)
+        .replace("#include <common>", "#include <common>\n#define ROAD_MASK_DEPTH 0.999999");
+    };
   }
 
   _makeRaceTrackMaterial(texture, index) {
@@ -1611,9 +2397,21 @@ export class TrackScene {
       const modelName = box.modelName;
       const model = modelName ? trackData.models?.[modelName] : null;
       const renderModel = model?.meshes?.length;
-      // Evo 2 names the camera-facing class outright (CNonCollideFacing); MTM uses a type id.
-      const isBillboard = box.type === BOXTYPE_NO_COLLIDE_FACING || box.billboard === true;
-      const isCheckpoint = box.type === BOXTYPE_CHECKPOINT;
+      /*
+        Evo 2 names the camera-facing class outright (CNonCollideFacing); MTM uses a type id,
+        and both of MTM2's facing types turn: TrackPOD.cpp treats 8 and 9 alike ("Facing
+        object? Allow all directions."). They differ only in whether the trunk is solid.
+      */
+      const isBillboard = box.type === BOXTYPE_NO_COLLIDE_FACING || box.type === BOXTYPE_COLLIDE_FACING
+        || box.billboard === true;
+      /*
+        MTM1 draws its checkpoint banners (CKBAN1.BIN and on) as ordinary scenery; only the
+        closing checkpoint, a CKBOX.BIN, is the invisible trigger box MTM2 uses for every
+        checkpoint. So on MTM1 the banners stay visible with the objects and only a CKBOX
+        waits behind the Checkpoints toggle.
+      */
+      const isCheckpoint = box.type === BOXTYPE_CHECKPOINT
+        && !(trackData.origin === "MTM1" && modelName && !/^CKBOX\.BIN$/i.test(modelName));
       const isRamp = box.type === BOXTYPE_RAMP;
 
       if (renderModel) {
@@ -1827,9 +2625,16 @@ export class TrackScene {
     // SIT angles are in RADIANS: psi=yaw (around Traxx Z height), theta=pitch (X), phi=roll (Y depth).
     // Model vertices are in raw Traxx local space; the 0.75 height stretch lives in the matrix,
     // because Traxx applies it after the rotation and it does not commute with one.
+    /*
+      TV/F3 models turn about their own origin too, which is the attach point the placement
+      names: on 113 of 193 shipped models the origin is the model's base, and the rest are
+      flyers centred on it. The bounding-box centre the decoder recentres on is off that
+      origin by more than 10% of the model's size on 30 of them (CANN.BIN by 30%).
+    */
+    const zStretch = modelZStretch(trackData.origin);
     const modelMatrix = evo
       ? evoModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ)
-      : traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ);
+      : traxxModelMatrix(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0, posX, posY, posZ, zStretch);
     // Put the decoder's recentred mesh back on the model's own origin before it is turned.
     if (anchored) modelMatrix.multiply(new THREE.Matrix4().makeTranslation(model.anchor?.x ?? 0, model.anchor?.y ?? 0, model.anchor?.z ?? 0));
 
@@ -1870,7 +2675,7 @@ export class TrackScene {
       // (1, 0.75, 1) commutes with the pure Y-axis rotation `lookAt` produces, so putting it
       // on the group's scale is equivalent to Traxx applying it after the rotation.
       // Evo has no vertical world stretch to preserve while the prop yaws to face the camera.
-      group.scale.set(1, evo ? 1 : TRAXX_Z_STRETCH, 1);
+      group.scale.set(1, evo ? 1 : zStretch, 1);
       wireGroup.scale.copy(group.scale);
 
       // The authored orientation, kept so that turning the billboard toggle off restores what
@@ -1912,10 +2717,11 @@ export class TrackScene {
 
     // A Hellbender object in the cavern belongs to the cavern layer, so it appears and hides
     // with the room it is in rather than with the objects on the surface above it.
-    const targetGroup = underground ? this._groups.underground
+    // A caller-owned layer (the powerup pickups) takes the solid model and has no wireframe.
+    const targetGroup = options.targetGroup ?? (underground ? this._groups.underground
       : billboard ? this._groups.billboards
-      : (checkpoint ? this._groups.checkpoints : this._groups.objects);
-    const targetWireGroup = underground ? this._groups.undergroundWire
+      : (checkpoint ? this._groups.checkpoints : this._groups.objects));
+    const targetWireGroup = options.targetGroup ? null : underground ? this._groups.undergroundWire
       : billboard ? this._groups.billboardsWire
       : (checkpoint ? this._groups.checkpointsWire : this._groups.objectsWire);
     /*
@@ -1936,7 +2742,7 @@ export class TrackScene {
 
     if (billboard || underground) group.traverse((child) => { if (child.isMesh) child.castShadow = false; });
     targetGroup.add(group);
-    targetWireGroup.add(wireGroup);
+    targetWireGroup?.add(wireGroup);
   }
 
   /*
@@ -2004,6 +2810,13 @@ export class TrackScene {
         // culling has to work from; the merged bounds would span the map and never cull.
         instanced.computeBoundingSphere();
         wire.computeBoundingSphere();
+        // Trees cast like any other scenery, alpha-tested leaves included; the shadow pass
+        // uses the same face as the draw, as for the BIN objects.
+        const treeMaterial = instanced.material;
+        if (!treeMaterial.transparent && treeMaterial.depthWrite && treeMaterial.blending === THREE.NormalBlending) {
+          instanced.castShadow = true;
+          treeMaterial.shadowSide = treeMaterial.side;
+        }
         this._groups.vegetation.add(instanced);
         this._groups.vegetationWire.add(wire);
       }
@@ -2063,13 +2876,16 @@ export class TrackScene {
     named for the truck, and the cost of a collision is a wrong texture rather than a failure.
   */
   setDriveTruck(assembly) {
+    this._shadowMaterialsDirty = true;
     this.stopDrive();
+    this._truckLights?.dispose();
+    this._truckLights = null;
     this._driveTruck?.dispose();
     this._driveTruck = null;
     const group = this._groups.driveTruck;
     while (group.children.length) group.remove(group.children[0]);
     if (!assembly) {
-      this._renderer.shadowMap.needsUpdate = true;
+      this._shadows.invalidate();
       return null;
     }
 
@@ -2085,6 +2901,8 @@ export class TrackScene {
     );
     this._driveTruck.root.traverse((child) => {
       if (!child.isMesh) return;
+      // The truck drives through the shade of trees and buildings, so it takes shadows too.
+      child.receiveShadow = true;
       const material = child.material;
       if (!material?.transparent && material?.depthWrite && material.blending === THREE.NormalBlending) {
         child.castShadow = true;
@@ -2092,7 +2910,12 @@ export class TrackScene {
       }
     });
     group.add(this._driveTruck.root);
-    this._renderer.shadowMap.needsUpdate = true;
+    // Lamps ride on the chassis, so they tilt and bounce with the body. See truck-lights.js.
+    if (assembly.lights?.length) {
+      this._truckLights = new TruckLightRig(assembly.lights, assembly.lightTextures);
+      this._driveTruck.chassis.add(this._truckLights.group);
+    }
+    this._shadows.invalidate();
     return this._driveTruck;
   }
 
@@ -2129,7 +2952,7 @@ export class TrackScene {
     against the track's own start grid every time instead of against wherever the truck
     happened to be when driving began.
   */
-  async startDrive(trackData, assembly, onStatus) {
+  async startDrive(trackData, assembly, onStatus, onPose) {
     if (!this._driveTruck || !trackData || trackData !== this._trackData) return null;
     const generation = ++this._driveGeneration;
     const { createDriveMode } = await import("./drive/drive-mode.js");
@@ -2154,7 +2977,12 @@ export class TrackScene {
       },
       spawn: () => trackSpawnPoint(trackData, frame, assembly, this._drive?.colliders),
       onStatus,
+      onPose,
+      lights: this._truckLights,
     });
+    // Dusk and night start with the lights on, as a driver would; L switches them.
+    const dark = this.weatherApplies() && (this._weather === "dusk" || this._weather === "night");
+    this._truckLights?.setOn(dark);
 
     // Keep collider markers ready for the Test Drive checkbox, but hidden until requested.
     this._renderFlags.hitboxes = false;
@@ -2197,7 +3025,7 @@ export class TrackScene {
         node.matrixWorldNeedsUpdate = true;
       }
     }
-    if (moved && this._sun.castShadow) this._renderer.shadowMap.needsUpdate = true;
+    if (moved) this._shadows.invalidateDynamic();
   }
 
   /*
@@ -2277,6 +3105,12 @@ export class TrackScene {
     this._drive?.dispose();
     this._drive = null;
     this._nav.enabled = true;
+    // Drive cameras set their own field of view; flying goes back to the game's.
+    if (this._camera.fov !== NAV_FOV) {
+      this._camera.fov = NAV_FOV;
+      this._camera.updateProjectionMatrix();
+      this._shadows.refit();
+    }
     // The markers are drive mode's, so they go when it does.
     this._renderFlags.hitboxes = false;
     this.setColliderMarkers(null);
@@ -2318,6 +3152,7 @@ export class TrackScene {
     @returns the spawn position in feet, or null when there is nothing to spawn on.
   */
   spawnDriveTruck(trackData, assembly) {
+    this._shadowMaterialsDirty = true;
     const truck = this._driveTruck;
     if (!truck || !trackData) return null;
 
@@ -2334,7 +3169,7 @@ export class TrackScene {
       frame.toSceneTruckPosition(position, ground),
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -psi)
     );
-    this._renderer.shadowMap.needsUpdate = true;
+    this._shadows.invalidate();
     return position;
   }
 
@@ -2576,7 +3411,10 @@ export class TrackScene {
     const d = this._sunDirection;
     if (!d || !this._sun) return;
     this._sun.position.copy(this._sun.target.position).addScaledVector(d, -SUN_DISTANCE);
-    this._renderer.shadowMap.needsUpdate = true;
+    this._shadows.setDirection(d);
+    // The baked terrain light is normalised against the sun's height; see _applyLighting.
+    this._applyLighting();
+    this._shadows.invalidate();
     if (notify) this._onSunChange?.(this.sunAngles());
   }
 
@@ -2639,4 +3477,67 @@ function resetBillboardGroup(group) {
 function normalizeRaceTextureIndex(index, textureCount) {
   if (textureCount <= 0) return 0;
   return index >= 0 && index < textureCount ? index : 0;
+}
+
+/*
+  The path of an Evo course, with the corners it does not store put back.
+
+  An Evo course is a list of straight runs, and the corners between them are not stored:
+  each run ends before its corner and the next starts after it. Joining the two points
+  straight is fine for a gentle bend, but cuts across a sharp corner, and across a hairpin
+  it skips a whole leg: DEJAVUD0 climbs one dirt road to CP8 and comes down the parallel one,
+  and the course holds only the two straights. So each gap gets the corner the road takes:
+
+    runs that turn        the point where the two runs' lines meet, when it lies ahead of
+                          the first run and behind the second (a missing corner)
+    runs that double back carry on along the first run until level with the next start,
+                          then cross over (a hairpin, whose far leg is the missing part)
+    runs side by side     nothing: the lane change is the straight join
+
+  Then every vertex is rounded off, so the line turns the way a truck does.
+*/
+const EVO_FILLET = 48;
+const EVO_FILLET_STEPS = 6;
+function evoCoursePath(segments, loop) {
+  const corners = [];
+  const flat = (v) => new THREE.Vector2(v.x, v.z);
+  segments.forEach(([start, end], i) => {
+    corners.push(start, end);
+    const next = segments[i + 1] ?? (loop ? segments[0] : null);
+    if (!next) return;
+    const [nextStart, nextEnd] = next;
+    const d0 = flat(end).sub(flat(start));
+    const d1 = flat(nextEnd).sub(flat(nextStart));
+    const gap = flat(nextStart).sub(flat(end));
+    if (d0.lengthSq() < 1e-6 || d1.lengthSq() < 1e-6 || gap.length() < 1) return;
+    d0.normalize(); d1.normalize();
+    const cross = d0.x * d1.y - d0.y * d1.x;
+    const at = (x, z, f) => new THREE.Vector3(x, end.y + (nextStart.y - end.y) * f, z);
+    // A real turn (over 30 degrees); a slight change of heading is a bend the straight join
+    // already draws, and its lines would only meet far from either run.
+    if (Math.abs(cross) > 0.5) {
+      const s = (gap.x * d1.y - gap.y * d1.x) / cross;
+      const t = (d0.x * gap.y - d0.y * gap.x) / cross;
+      if (s > 0 && t > 0) corners.push(at(end.x + d0.x * s, end.z + d0.y * s, s / (s + t)));
+    } else if (d0.dot(d1) < 0) {
+      const ahead = gap.dot(d0);
+      if (ahead > 0) corners.push(at(end.x + d0.x * ahead, end.z + d0.y * ahead, 0.5));
+      else corners.push(at(nextStart.x - d0.x * ahead, nextStart.z - d0.y * ahead, 0.5));
+    }
+  });
+  if (loop && segments.length) corners.push(segments[0][0]);
+
+  // Round each interior vertex with a short curve between points on its two legs.
+  const out = [corners[0]];
+  for (let i = 1; i < corners.length - 1; i++) {
+    const prev = corners[i - 1], v = corners[i], next = corners[i + 1];
+    const inLen = v.distanceTo(prev), outLen = v.distanceTo(next);
+    const r = Math.min(EVO_FILLET, inLen / 2, outLen / 2);
+    if (r < 1) { out.push(v); continue; }
+    const a = v.clone().addScaledVector(prev.clone().sub(v).normalize(), r);
+    const b = v.clone().addScaledVector(next.clone().sub(v).normalize(), r);
+    out.push(...new THREE.QuadraticBezierCurve3(a, v, b).getPoints(EVO_FILLET_STEPS));
+  }
+  if (corners.length > 1) out.push(corners[corners.length - 1]);
+  return out;
 }

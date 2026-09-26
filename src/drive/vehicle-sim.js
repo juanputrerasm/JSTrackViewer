@@ -209,6 +209,9 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     // Where the wheel hangs from, in body axes, and how big it is.
     mount: anchorToBody(wheel.position),
     radius: wheel.radius || 3.0,
+    // Tread width, for the tire's side faces meeting walls; a monster tire is about as wide
+    // as it is tall when the model does not say.
+    halfWidth: (wheel.width || (wheel.radius || 3.0) * 0.9) / 2,
     // Per-wheel running state.
     compression: 0,
     lastCompression: 0,
@@ -549,33 +552,51 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     state.invertedFor = up.y < 0 ? state.invertedFor + dt : 0;
 
     /*
-      The wheels are solid too.
+      The tires as solids, against walls and objects only.
 
-      Only the body's twelve scrape points met objects before, so a tire could pass straight
-      through a fence post that the bodywork never reached. The test point is the LEADING edge
-      of the tire, a radius ahead of its centre along the direction of travel, because that is
-      what touches a wall first.
+      A tire is a downward ray to the suspension, so on its own it has no sides: a wall or
+      fence could pass between the tires, or through one, while the body stayed clear of it,
+      and a truck could straddle a 4.5 ft CPR pit wall. Each tire is therefore sampled at
+      its front and back, both side faces, and low front and back points near the contact
+      patch, all at the tire's current height, and each is tested the way a hull point is:
+      does a surface separate it from the centre of gravity.
 
-      Only walls count: anything whose normal points mostly upward is a floor, and floors are
-      already handled by the wheel's own downward ray. Without that filter a compressed tire
-      standing on a ramp finds its own ground and shoves the truck backwards.
+      Only steep surfaces count. The ground, a ramp or the CPR road deck under a tire is the
+      suspension's to answer; testing those here as well is what used to shove a compressed
+      tire on a ramp backwards off its own ground.
     */
+    const tireForward = rotate(q, v3(0, 0, -1));
+    const tireLateral = rotate(q, v3(1, 0, 0));
     for (const wheel of wheels) {
       if (!colliders) break;
       const mountWorld = add(state.ipos, rotate(q, sub(wheel.mount, cg)));
       const centre = add(mountWorld, scale(up, wheel.compression));
-      const heading = horizontalSpeed > 1
-        ? normalize(v3(state.vel.x, 0, state.vel.z))
-        : rotate(q, v3(0, 0, -1));
-      const leading = add(centre, scale(heading, wheel.radius));
-      const hit = colliders.contactAt(leading, state.ipos);
-      if (hit && Math.abs(hit.normal.y) < 0.7) {
+      const r = wheel.radius;
+      const low = r * 0.7;
+      const samples = [
+        add(centre, scale(tireForward, r)),
+        add(centre, scale(tireForward, -r)),
+        add(centre, scale(tireLateral, wheel.halfWidth)),
+        add(centre, scale(tireLateral, -wheel.halfWidth)),
+        add(add(centre, scale(tireForward, low)), scale(up, -low)),
+        add(add(centre, scale(tireForward, -low)), scale(up, -low)),
+      ];
+      let deepest = null;
+      let deepestPoint = null;
+      for (const point of samples) {
+        const hit = colliders.contactAt(point, state.ipos);
+        if (!hit || Math.abs(hit.normal.y) >= 0.7) continue;
+        if (!deepest || hit.depth > deepest.depth) { deepest = hit; deepestPoint = point; }
+      }
+      // One contact per tire, its deepest, so a tire pressed flat against a wall is not
+      // counted six times over.
+      if (deepest) {
         bodyContacts.push({
           object: true,
-          normal: hit.normal,
-          arm: sub(leading, state.ipos),
-          depth: hit.depth,
-          solid: hit.solid ?? null,
+          normal: deepest.normal,
+          arm: sub(deepestPoint, state.ipos),
+          depth: deepest.depth,
+          solid: deepest.solid ?? null,
         });
       }
     }

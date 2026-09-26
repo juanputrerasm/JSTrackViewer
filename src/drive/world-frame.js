@@ -30,6 +30,10 @@
 */
 
 import { heightAtCell } from "../shared/terrain-height.js";
+import { createRaceTrackSupport } from "./racetrack-collider.js";
+
+/** How far under a CPR road surface the ground is held where it would poke through. */
+const ROAD_GROUND_CLEARANCE_FT = 0.5;
 
 /** Scene units per foot, across the map. */
 export const UNITS_PER_FOOT_H = 2;
@@ -98,7 +102,7 @@ export function createWorldFrame(trackData) {
     which is scene -z, because the builder lays row cz at (gridSize - cz) * cellSize. The
     first triangle covers u >= w and the second covers w >= u.
   */
-  function heightAtFeet(xFt, zFt) {
+  function terrainHeightAtFeet(xFt, zFt) {
     if (!raw) return 0;
     const sceneX = xFt * UNITS_PER_FOOT_H;
     const sceneZ = zFt * UNITS_PER_FOOT_H;
@@ -138,7 +142,7 @@ export function createWorldFrame(trackData) {
     with the surface the wheel ray hit, or a truck parked on a slope drifts against geometry
     that is not there.
   */
-  function normalAtFeet(xFt, zFt) {
+  function terrainNormalAtFeet(xFt, zFt) {
     if (!raw) return { x: 0, y: 1, z: 0 };
     const cellFt = cellSize / UNITS_PER_FOOT_H;
     const sceneX = xFt * UNITS_PER_FOOT_H;
@@ -180,6 +184,30 @@ export function createWorldFrame(trackData) {
     const nz = dhdw;
     const len = Math.hypot(nx, ny, nz) || 1;
     return { x: nx / len, y: ny / len, z: nz / len };
+  }
+
+  /*
+    CPR's road has precedence over the ground, in the sim as it does on screen.
+
+    The scene discards any terrain inside the road's footprint (see _buildRoadMask in
+    scene.js), because on a banked turn the 32 ft grid rises through the tarmac between its
+    points. A heightfield cannot pass over the road, so terrain above the road there is
+    terrain poking through it. Holding the ground just under the road keeps the wheels and
+    the hull from meeting ground that is not drawn; the road collider carries them instead.
+  */
+  const road = (trackData?.raceTrackSurfaces?.length ?? 0) >= 2 ? createRaceTrackSupport(trackData) : null;
+  const roadTopAt = (xFt, zFt) => (road ? road.supportAt(xFt, zFt, Infinity) : null);
+
+  function heightAtFeet(xFt, zFt) {
+    const ground = terrainHeightAtFeet(xFt, zFt);
+    const top = roadTopAt(xFt, zFt);
+    return top !== null && ground > top - ROAD_GROUND_CLEARANCE_FT ? top - ROAD_GROUND_CLEARANCE_FT : ground;
+  }
+
+  function normalAtFeet(xFt, zFt) {
+    const top = roadTopAt(xFt, zFt);
+    if (top !== null && terrainHeightAtFeet(xFt, zFt) > top - ROAD_GROUND_CLEARANCE_FT) return { x: 0, y: 1, z: 0 };
+    return terrainNormalAtFeet(xFt, zFt);
   }
 
   return {

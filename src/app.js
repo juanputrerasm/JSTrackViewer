@@ -2,9 +2,10 @@ import { TrackScene } from "./scene.js";
 import { WorkerClient } from "./worker-client.js";
 import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes } from "./zip-utils.js";
+import { UNITS_PER_FOOT_H } from "./drive/world-frame.js";
 
 const APP_TITLE = "JSTrackViewer";
-const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · V Camera · R Reset";
+const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · L Lights · V Camera · R Reset";
 const OPFS_PATH = "track-viewer/current.pod";
 // Track and truck archives have separate OPFS paths and separate indexes in the worker.
 const TRUCK_OPFS_PATH = "track-viewer/truck.pod";
@@ -27,11 +28,12 @@ export class TrackViewerApp {
     this._heightScale = 3;
     this._renderFlags = {
       terrain: true, textures: true, grid: false,
-      courses: false, objects: true, gboxes: true,
+      objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
-      racetrack: true, underground: true, terrainOverlap: true,
+      racetrack: true, underground: true, terrainOverlap: true, lensflare: true,
+      sky: true, fog: true,
     };
   }
 
@@ -52,6 +54,9 @@ export class TrackViewerApp {
     this._scene.setTextureSmoothingEnabled(smoothTexturesToggle.checked);
     this._minimap = new Minimap(doc.getElementById("minimap"), doc.getElementById("minimap-panel"), (x, z) => {
       this._scene.nav?.moveToWorldPosition(x, z);
+    }, (x, z) => {
+      // Double-click while driving: put the truck there. The map is in scene units.
+      if (this._scene.drive?.isActive) this._scene.drive.teleport(x / UNITS_PER_FOOT_H, z / UNITS_PER_FOOT_H);
     });
     this._scene.setNavigationChangeCallback((nav) => this._minimap.updateCamera(nav));
 
@@ -115,7 +120,6 @@ export class TrackViewerApp {
       "tog-textures":  "textures",
       "tog-terrain-overlap": "terrainOverlap",
       "tog-grid":      "grid",
-      "tog-courses":   "courses",
       "tog-objects":   "objects",
       "tog-billboards": "billboards",
       "tog-checkpoints":"checkpoints",
@@ -125,8 +129,11 @@ export class TrackViewerApp {
       "tog-underground": "underground",
       "tog-water":     "water",
       "tog-backdrop":  "backdrop",
+      "tog-sky":       "sky",
+      "tog-fog":       "fog",
       "tog-sunlight":  "sunlight",
       "tog-shadows":   "shadows",
+      "tog-lensflare": "lensflare",
       "tog-wireframe": "wireframe",
       "tog-trucks":    "trucks",
       "tog-navpoints": "navpoints",
@@ -200,6 +207,20 @@ export class TrackViewerApp {
     });
     // Apply initial value
     this._scene.setViewDistance(parseInt(gridSlider.value, 10));
+
+    /*
+      Weather, for the games that have it (see TrackScene.weatherApplies). The choice is kept
+      across track loads and visits.
+    */
+    const weatherSelect = doc.getElementById("weather-select");
+    try {
+      const saved = localStorage.getItem("jstv.weather");
+      if (saved && [...weatherSelect.options].some((o) => o.value === saved)) weatherSelect.value = saved;
+    } catch { /* ignore */ }
+    weatherSelect.addEventListener("change", () => {
+      this._applyWeather();
+      try { localStorage.setItem("jstv.weather", weatherSelect.value); } catch { /* ignore */ }
+    });
 
     const sunSlider = doc.getElementById("sun-intensity-slider");
     const sunLabel  = doc.getElementById("sun-intensity-value");
@@ -381,6 +402,8 @@ export class TrackViewerApp {
       this._minimap.updateCamera(this._scene.nav);
       this._updateTrackInfo(result);
       this._applyLayerAvailability(this._scene.layerPresence());
+      this._buildCourseToggles();
+      this._applyWeather();
       this._setStatus(result.trackName || choice.name);
       this._setDocumentTitle(result.trackName || choice.name, result.origin);
       // Focus viewport after load
@@ -405,6 +428,9 @@ export class TrackViewerApp {
   }
 
   _setDrivingUi(driving) {
+    if (!driving) this._minimap?.updateTruck(null);
+    // A different truck POD needs a stop first; the trucks in the open one switch in place.
+    this._doc.getElementById("open-truck-btn").disabled = driving;
     this._doc.getElementById("drive-btn").textContent = driving ? "Stop test drive" : "Drive";
     this._doc.getElementById("nav-hint").textContent = driving ? DRIVE_CONTROLS : this._viewerControls;
     const hitboxes = this._doc.getElementById("tog-hitboxes");
@@ -470,7 +496,10 @@ export class TrackViewerApp {
     const choice = this._truckChoices[index];
     if (!choice) return;
 
-    this._stopDrivingForChange();
+    if (this._scene.drive?.isActive) {
+      if (choice.normalizedName !== this._truckAssemblyName) this._swapTruckWhileDriving(choice);
+      return;
+    }
     if (choice.normalizedName !== this._truckAssemblyName) {
       this._truckAssembly = null;
       this._truckAssemblyName = null;
@@ -478,6 +507,52 @@ export class TrackViewerApp {
     }
     this._setTruckInfo("Status", `${choice.name}. Click Drive to start.`);
     this._updateTruckButtons();
+  }
+
+  /*
+    Picking another truck mid-drive swaps it in where the old one was.
+
+    The new truck is a different body, so drive mode restarts with it, but it starts from the
+    old truck's position, heading and velocity, keeps the gearbox mode and the camera view,
+    and the driver never has to press Drive. The old truck keeps driving while the new one
+    loads. A lap in progress restarts, since a different truck is not the same attempt.
+  */
+  async _swapTruckWhileDriving(choice) {
+    const trackData = this._scene._trackData;
+    const old = this._scene.drive;
+    if (!trackData || !old) return;
+    const state = old.sim.readState();
+    const velocity = { ...old.sim.state.vel };
+    const manual = old.sim.manual;
+    const lightsOn = old.lightsOn;
+    const viewId = old.cameras.view?.id;
+
+    const requestId = ++this._driveRequestId;
+    try {
+      const assembly = await this._ensureSelectedTruck(requestId, trackData);
+      if (!assembly || requestId !== this._driveRequestId || trackData !== this._scene._trackData) return;
+      const drive = await this._scene.startDrive(trackData, assembly,
+        (status) => this._showDriveStatus(status),
+        (pose) => this._minimap.updateTruck(pose));
+      if (!drive || requestId !== this._driveRequestId) return;
+      drive.placeAt(state.ipos.x, state.ipos.z, state.psi ?? 0);
+      drive.sim.state.vel = velocity;
+      drive.setManual(manual);
+      drive.setLights(lightsOn);
+      if (viewId) drive.cameras.select(viewId);
+      this._setDrivingUi(true);
+      this._doc.getElementById("viewport")?.focus();
+    } catch (err) {
+      if (requestId === this._driveRequestId) {
+        this._showError(`Error switching truck: ${err.message}`);
+        console.error(err);
+      }
+    } finally {
+      if (requestId === this._driveRequestId) {
+        this._hideLoading();
+        this._updateTruckButtons();
+      }
+    }
   }
 
   async _ensureSelectedTruck(requestId, trackData) {
@@ -517,7 +592,9 @@ export class TrackViewerApp {
     try {
       const assembly = await this._ensureSelectedTruck(requestId, trackData);
       if (!assembly || requestId !== this._driveRequestId || trackData !== this._scene._trackData) return;
-      const drive = await this._scene.startDrive(trackData, assembly, (status) => this._showDriveStatus(status));
+      const drive = await this._scene.startDrive(trackData, assembly,
+        (status) => this._showDriveStatus(status),
+        (pose) => this._minimap.updateTruck(pose));
       if (!drive || requestId !== this._driveRequestId) return;
       this._setDrivingUi(true);
       this._doc.getElementById("viewport")?.focus();
@@ -551,6 +628,7 @@ export class TrackViewerApp {
       rows.push(["Gear", status.airborne ? `${gear} (airborne)` : gear]);
     }
     if (status.manual !== undefined) rows.push(["Gearbox", status.manual ? "Manual (A/Z shift)" : "Automatic"]);
+    if (status.lights !== undefined && status.lights !== null) rows.push(["Lights", status.lights ? "On (L)" : "Off (L)"]);
     if (status.rpm !== undefined) rows.push(["Engine", `${status.rpm.toFixed(0)} rpm`]);
     if (status.view) rows.push(["View", status.view]);
 
@@ -778,6 +856,40 @@ export class TrackViewerApp {
     }
   }
 
+  /*
+    One checkbox per course, since what a track's courses are depends on the game: CPR's five
+    each have a purpose (three AI lines, pit road, pit row), and a SIT track has its main
+    course and the AI lines. Each is labelled and coloured as it is drawn. All start off, as
+    the single course toggle they replace did.
+  */
+  _buildCourseToggles() {
+    const box = this._doc.getElementById("course-toggles");
+    const list = this._doc.getElementById("course-toggle-list");
+    if (!box || !list) return;
+    list.replaceChildren();
+    const courses = this._scene?.courseList() ?? [];
+    for (const course of courses) {
+      const label = this._doc.createElement("label");
+      const input = this._doc.createElement("input");
+      input.type = "checkbox";
+      input.checked = course.visible;
+      input.addEventListener("change", () => this._scene.setCourseVisible(course.index, input.checked));
+      const swatch = this._doc.createElement("span");
+      swatch.className = "course-swatch";
+      swatch.style.background = `#${course.color.toString(16).padStart(6, "0")}`;
+      label.append(input, swatch, this._doc.createTextNode(course.label));
+      list.append(label);
+    }
+    box.hidden = courses.length === 0;
+  }
+
+  _applyWeather() {
+    const select = this._doc.getElementById("weather-select");
+    this._scene.setWeather(select.value);
+    const applies = this._scene.weatherApplies();
+    this._doc.getElementById("weather-row").hidden = !applies;
+  }
+
   _clearTrackInfo() {
     const dl = this._doc.getElementById("track-info");
     dl.innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
@@ -785,6 +897,10 @@ export class TrackViewerApp {
     if (statsPanel) statsPanel.hidden = true;
     this._doc.getElementById("track-stats").innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
     this._applyLayerAvailability(null);
+    this._doc.getElementById("weather-row").hidden = true;
+    this._doc.getElementById("course-toggle-list")?.replaceChildren();
+    const courseToggles = this._doc.getElementById("course-toggles");
+    if (courseToggles) courseToggles.hidden = true;
     this._doc.title = APP_TITLE;
     this._minimap?.clear();
   }
@@ -932,14 +1048,40 @@ function displayWeather(mask) {
 }
 
 class Minimap {
-  constructor(canvas, panel, onNavigate) {
+  constructor(canvas, panel, onNavigate, onTeleport) {
     this.canvas = canvas;
     this.panel = panel;
     this.onNavigate = onNavigate;
+    this.onTeleport = onTeleport;
     this.track = null;
     this.mapBitmap = null;
     this.mapCanvas = null;
+    // The driven truck's pose while Test Drive is on; null means show the fly camera.
+    this.truck = null;
     this.canvas?.addEventListener("click", (e) => this._onClick(e));
+    this.canvas?.addEventListener("dblclick", (e) => {
+      const point = this._worldPointOf(e);
+      if (point && this.truck) this.onTeleport?.(point.x, point.z);
+    });
+  }
+
+  /** Follow the truck instead of the camera, or stop following it with null. */
+  updateTruck(pose) {
+    this.truck = pose;
+    this.draw();
+  }
+
+  /** Scene-unit (x, z) under a mouse event, or null off the map. */
+  _worldPointOf(e) {
+    const terrain = this.track?.terrain;
+    if (!this.canvas || !terrain) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const worldSize = (terrain.gridSize ?? 256) * (terrain.cellSize ?? 64);
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * worldSize,
+      z: ((e.clientY - rect.top) / rect.height) * worldSize,
+    };
   }
 
   setTrack(track) {
@@ -964,14 +1106,10 @@ class Minimap {
   }
 
   _onClick(e) {
-    const terrain = this.track?.terrain;
-    if (!this.canvas || !terrain || !this.onNavigate) return;
-    const rect = this.canvas.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const worldSize = (terrain.gridSize ?? 256) * (terrain.cellSize ?? 64);
-    const x = ((e.clientX - rect.left) / rect.width) * worldSize;
-    const z = ((e.clientY - rect.top) / rect.height) * worldSize;
-    this.onNavigate(x, z);
+    // While driving, the fly camera is not in use, so a single click moves nothing.
+    if (this.truck || !this.onNavigate) return;
+    const point = this._worldPointOf(e);
+    if (point) this.onNavigate(point.x, point.z);
   }
 
   _buildHeightMap() {
@@ -1021,7 +1159,8 @@ class Minimap {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.mapCanvas, 0, 0, w, h);
 
-    const nav = this.nav;
+    // Test Drive shows the truck, in green; otherwise the fly camera, in yellow.
+    const nav = this.truck ? { position: { x: this.truck.x, z: this.truck.z }, yaw: this.truck.yaw } : this.nav;
     const terrain = this.track?.terrain;
     if (!nav || !terrain) return;
     const worldSize = (terrain.gridSize ?? 256) * (terrain.cellSize ?? 64);
@@ -1039,7 +1178,7 @@ class Minimap {
     ctx.lineTo(x - fx * size * 0.65 - rx * size * 0.55, y - fy * size * 0.65 - ry * size * 0.55);
     ctx.lineTo(x - fx * size * 0.65 + rx * size * 0.55, y - fy * size * 0.65 + ry * size * 0.55);
     ctx.closePath();
-    ctx.fillStyle = "#ffdd40";
+    ctx.fillStyle = this.truck ? "#3ddc6a" : "#ffdd40";
     ctx.strokeStyle = "#171717";
     ctx.lineWidth = 2;
     ctx.stroke();

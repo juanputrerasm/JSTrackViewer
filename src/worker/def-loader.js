@@ -1,6 +1,7 @@
 import { resolveAsset } from "./pod-format.js";
 import { decodeBinModel } from "./bin-decoder.js";
-import { TV_UNITS_PER_HEIGHT_STEP } from "./tv-coords.js";
+import { TV_UNITS_PER_HEIGHT_STEP, tvPlacementToEditor } from "./tv-coords.js";
+import { tvLogicName, tvPowerup, tvWeaponName } from "./tv-tables.js";
 
 const TR_ANGLE_TO_RAD = Math.PI * 2.0 / 65536.0;
 
@@ -97,38 +98,22 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       py = Math.round(gz * 64);
       pz = Math.round((pl.y / 65536.0) * 2.0);
     } else {
-      // TV/F3: 2^20 units per cell
-      const cell = 64;
-      const half = 32;
-      const gx = Math.floor(pl.x / (1 << 20));
-      const gz = Math.floor(pl.z / (1 << 20));
-      const wrappedX = ((gx % g) + g) % g;
-      const wrappedZ = ((gz % g) + g) % g;
-      px = wrappedX * cell + half;
-      py = wrappedZ * cell + half;
+      // TV/F3: 2^20 units per cell, 2^15 per altitude step, kept exact (see tv-coords.js).
+      [px, py, pz] = tvPlacementToEditor(pl.x, pl.y, pl.z, g);
       /*
         The definition's own Y offset is the ONLY thing that lifts a TV/F3 object.
 
-        Placements are authored flush with the ground: across ATMOS.DEF every placement's
-        (y >> 15) equals the heightfield sample at its own cell, with zero error. So an
+        Ground placements are authored on the terrain surface at their exact position, so an
         object that hovers in the game hovers because of Enemy Editor field C, "Ground
-        Position from Centroid (X, Y, Z)", which the manual describes as the way "to move an
-        object in any direction from where it would normally be placed into the world" and
-        notes is only ever used on Y.
+        Position from Centroid (X, Y, Z)" (TVCAD calls it the centre of rotation), which the
+        manual notes is only ever used on Y.
 
-        The data agrees. Over 1532 definitions in FURY3.POD, FURYSE.POD and TV.pod the X slot
-        is never non-zero and the Z slot is non-zero only in three copies of one line whose
-        intended 51200 was typed "51,200". The 72 definitions that do set Y are the ones that
-        should float: hovercft, octoani, mother, forcegen, bionmssl, radar, roofgun. Without
-        this, every one of them is drawn resting on the terrain.
-
-        The base term keeps its truncating shift rather than becoming a division. More than
-        half of all placement Y values are not multiples of 2^15 (8052 of 15046), so dividing
-        would raise every existing object by a fraction of a step. That is arguably the more
-        faithful reading of a world-unit height, but it is a separate question from this fix,
-        and changing both at once would hide which one moved an object.
+        Over 1532 definitions in FURY3.POD, FURYSE.POD and TV.pod the X slot is never non-zero
+        and the Z slot is non-zero only in three copies of one line whose intended 51200 was
+        typed "51,200". The 72 definitions that do set Y are the ones that should float:
+        hovercft, octoani, mother, forcegen, bionmssl, radar, roofgun.
       */
-      pz = Math.max(0, (pl.y >> 15) + def.groundOffsetY / TV_UNITS_PER_HEIGHT_STEP);
+      pz = Math.max(0, pz + def.groundOffsetY / TV_UNITS_PER_HEIGHT_STEP);
     }
 
     boxes.push({
@@ -147,6 +132,7 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       placementIndex,
       strength: pl.strength,
       description: def.description ?? "",
+      ...(origin === "HB" ? {} : tvDefinitionInfo(def)),
       /*
         A Hellbender placement below zero stands in the cavern under the level, not on the
         ground: 2,862 of the 2,950 such placements in the shipped game land between the cavern
@@ -174,7 +160,9 @@ function parseDefStructure(lines) {
     const description = isFixedDefinitionRecord(lines, headerIdx)
       ? lines[headerIdx + DEF_DESCRIPTION_OFFSET].trim()
       : scanDefinitionDescription(lines, headerIdx);
-    definitions.push(parseEnemyDefinition(lines[headerIdx], description));
+    const def = parseEnemyDefinition(lines[headerIdx], description);
+    readDefinitionBody(def, lines, headerIdx);
+    definitions.push(def);
     /*
       Skip past the shared prefix when the separators confirm it, then let the scan find the
       real end of the record. The jump keeps the scan from mistaking a body line for the next
@@ -227,9 +215,16 @@ function findNextEnemyDefinitionHeaderLine(lines, start) {
 /*
   Parses a definition header: N leading integers, then the complex and simple asset names.
 
-  Every definition in the three shipped archives has exactly six leading integers. Slot 2 is
-  field B (Size) and slots 3, 4, 5 are field C, the (X, Y, Z) ground offset. Slots 0 and 1 are
-  not identified; they are kept so a later reading of them costs nothing.
+  Every definition in the three shipped archives has exactly six leading integers. TVCAD's
+  reader (LoadObjectDefinitionsAndPlacements) and its Object Properties form name them:
+
+    0  logic (index into TVCAD.INI [Logic])
+    1  not exposed by TVCAD
+    2  hit radius, world units (tbHitRad; the manual's field B "Size")
+    3..5  centre of rotation / ground offset (X, Y, Z), the manual's field C
+
+  The hit radius doubles as a model-scale ruler: it equals the model's vertex radius times
+  65536 / magnify to within 1.00..1.4 across 193 definitions (see bin-decoder.js).
 */
 function parseEnemyDefinition(line, description) {
   const p = line.split(",");
@@ -246,14 +241,56 @@ function parseEnemyDefinition(line, description) {
     prefix.push(Number.isFinite(v) ? v : 0);
   }
   // Only the canonical six-integer shape is trusted to carry the offset in a known slot.
-  const groundOffsetY = prefix.length === 6 ? prefix[4] : 0;
-  const size = prefix.length === 6 ? prefix[2] : 0;
+  const canonical = prefix.length === 6;
+  const groundOffsetY = canonical ? prefix[4] : 0;
+  const hitRadius = canonical ? prefix[2] : 0;
+  const logic = canonical ? prefix[0] : -1;
 
   return {
     complexAsset, simpleAsset, binForHydration,
-    prefix, size, groundOffsetY,
+    prefix, hitRadius, logic, groundOffsetY,
     description: description ?? "",
   };
+}
+
+/*
+  Body lines 1 and 2, which TVCAD reads unconditionally after the header:
+
+    1  thrust, rotation speed, fire speed, fire strength, weapon
+    2  briefing flag, random flag, powerup drop chance (0-100), powerup drop type
+
+  The drop type indexes the same 12-entry table as .PUP types, with -1 meaning random. Only
+  lines of exactly the expected shape are trusted, so a short or unusual record keeps no
+  values rather than wrong ones.
+*/
+function readDefinitionBody(def, lines, headerIdx) {
+  const row = (i, n) => {
+    const t = (lines[headerIdx + i] ?? "").trim();
+    if (!/^-?\d+(\s*,\s*-?\d+)*$/.test(t)) return null;
+    const v = t.split(",").map((x) => parseInt(x.trim(), 10));
+    return v.length === n ? v : null;
+  };
+  const motion = row(1, 5);
+  if (motion) def.weapon = motion[4];
+  const drop = row(2, 4);
+  if (drop) {
+    def.dropChance = drop[2];
+    def.dropType = drop[3];
+  }
+}
+
+/*
+  What an object is, in words, for a TV/F3 placement: its behaviour, weapon and what it drops.
+*/
+function tvDefinitionInfo(def) {
+  const info = { logic: def.logic, logicName: tvLogicName(def.logic), hitRadius: def.hitRadius };
+  if (def.weapon !== undefined) info.weaponName = tvWeaponName(def.weapon);
+  if (def.dropChance > 0) {
+    info.dropChance = def.dropChance;
+    info.dropType = def.dropType;
+    info.dropName = def.dropType === -1 ? "Random" : (tvPowerup(def.dropType)?.name ?? "");
+  }
+  return info;
 }
 
 /*

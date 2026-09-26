@@ -315,3 +315,47 @@ export function cprVisibleSlots(surface) {
   }
   return { first, last };
 }
+
+/*
+  What each of a CPR track's five courses is for (docs/CPREDIT_GUIDE.md, "E, course editor").
+  Courses are the AI's paths, chains of straight segments the game joins with constant radius
+  curves. `lap` says whether the course closes into a full lap; course 4 is only pit row.
+*/
+export const CPR_COURSE_PURPOSES = [
+  { name: "AI line 1", detail: "racing line, full lap", lap: true },
+  { name: "AI line 2", detail: "racing line, full lap", lap: true },
+  { name: "AI line 3", detail: "racing line, full lap", lap: true },
+  { name: "Pit road", detail: "full lap through pit entry and exit, right of pit row", lap: true },
+  { name: "Pit row", detail: "pit stalls only, not a lap, left of pit row", lap: false },
+];
+
+/*
+  The role of each CPR checkpoint, from its place in the file.
+
+  CPREDIT's guide lists what a track's 4 to 7 checkpoints are: start and finish, pit speed
+  limit start, pit lane start, pit speed limit end, and the rest ordinary. All 17 stock
+  tracks put them in the same order. The first three sit in the pit lane: 0 on the pit entry
+  road, 1 where pit row begins and 2 where it ends, between 61 and 248 ft off the racing line
+  on every track. 3 is the start and finish, on the circuit beside pit row and the grid.
+  4 and up are ordinary gates out on the circuit, 486 ft or more from pit row. A lap runs
+  from 3 through the ordinary gates back to 3; the pit gates are not part of it.
+
+  A track with fewer than the four the guide requires is read as plain gates.
+*/
+export const CPR_CHECKPOINT_ROLES = ["pitEntry", "pitSpeedLimit", "pitSpeedLimitEnd", "startFinish"];
+
+export const CPR_CHECKPOINT_LABELS = {
+  pitEntry: "PIT ENTRY",
+  pitSpeedLimit: "PIT LIMIT",
+  pitSpeedLimitEnd: "PIT LIMIT END",
+  startFinish: "S/F",
+};
+
+export function cprCheckpointRole(sequence, count) {
+  if (count < CPR_CHECKPOINT_ROLES.length) return "gate";
+  return CPR_CHECKPOINT_ROLES[sequence] ?? "gate";
+}
+
+export function isCprPitCheckpoint(role) {
+  return role === "pitEntry" || role === "pitSpeedLimit" || role === "pitSpeedLimitEnd";
+}
