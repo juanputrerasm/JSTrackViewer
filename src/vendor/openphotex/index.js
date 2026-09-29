@@ -24,6 +24,26 @@ export { isCprCarLines, parseCprCarLines, CPR_WHEEL_KEYS_IN_FILE_ORDER } from ".
 export { detectTruckManifest, parseTruckManifest } from "./truck/manifest.js";
 export { parseCprCmd, cmdWingPackages, cmdFaceTriangles, CMD_POSITION_SCALE, CMD_NORMAL_SCALE, CMD_UV_SCALE, CMD_FACE_TYPE, } from "./cpr/cmd.js";
 export { parseBin, MRGL, MRGLMAT, MRGLMAT2, BIN_GEOMETRY_DIVISOR, BIN_TRANSPARENT_FACE_TYPES, BIN_SOLID_FACE_TYPE, BIN_TEXTURE_NAME_MAX, } from "./model/bin.js";
+export { TV_UNITS_PER_CELL, TV_UNITS_PER_HEIGHT_STEP, tvPlacementToEditor, tvHeightToAltitude, parseIntTriple, toDataLines, hbPlacementToEditor, placementToEditor, } from "./tv/coords.js";
+export { TV_POWERUPS, tvPowerup, TV_LOGIC_NAMES, TV_WEAPON_NAMES, tvLogicName, tvWeaponName } from "./tv/tables.js";
+export { NAV_TARGET_LIST, NAV_TUNNEL_ENTRANCE, NAV_CHECKPOINT, NAV_JUMP_ZONE, NAV_TUNNEL_EXIT, NAV_BOSS, NAV_START_POINT, NAV_TYPE_NAMES, parseNavPoints, findStartPoint, } from "./tv/nav.js";
+export { HBNAV_TARGET_LIST, HBNAV_TUNNEL_ENTRANCE, HBNAV_CHECKPOINT, HBNAV_JUMP_ZONE, HBNAV_TUNNEL_EXIT, HBNAV_BOSS, HBNAV_START_POINT, HBNAV_SYNC_POINT, HBNAV_RESCUE_BEACON, HBNAV_END_OF_NAVS, HBNAV_ESCORT, HBNAV_RETRIEVE, HBNAV_PURSUE, HBNAV_TYPE_NAMES, parseHbNavPoints, } from "./tv/hb-nav.js";
+export { parsePowerups } from "./tv/pup.js";
+export { TUNNEL_LOGIC_NAMES, parseTunnelDefs } from "./tv/tdf.js";
+export { ANIMATION_BASE_FPS, parseAnimations } from "./tv/ani.js";
+export { parseHbBriefing } from "./tv/hb-briefing.js";
+export { CPR_HEIGHT_DIVISOR, CPR_ALTITUDE_DIVISOR, CPR_HEIGHT_UNIT_SCALE, LEGACY_ALTITUDE_DIVISOR, decodeHeightSample, legacyWholeHeight16, heightAtCell, } from "./terrain/height.js";
+export { parseMtmSit, parseMtmLvl, parseTexList, parseTty, detectSitOrigin, sitTrackTypeName, sitWorldTriplet, } from "./mtm/sit.js";
+export { parseTvLvl, detectTvLvlOrigin, isNullAssetName, tvLvlFallbackName } from "./tv/lvl.js";
+export { parseDef, defPlacementToEditor, TR_ANGLE_TO_RAD } from "./tv/def.js";
+export { SKY_PALETTE_FIRST_SLOT, SKY_ACT_FIRST_COLOUR, SKY_GRADIENT_COLOURS, skyGradient, skyHorizon } from "./texture/sky.js";
+export { decodeClrWord, decodeGroundBoxes } from "./terrain/ground-boxes.js";
+export { HB_UNDERGROUND_BIAS, decodeHbUnderground } from "./terrain/hb-underground.js";
+export { CPR_POINT_NAMES, CPR_SLOT_OFF_TRACK, CPR_SLOT_CURB, CPR_SLOT_ROAD, CPR_SLOT_NAMES, CPR_CROSS_SECTION_MIDPOINT, CPR_SURFACE_TYPES, CPR_WALL_TYPE_NAMES, CPR_TEXTURE_INDEX_MASK, CPR_TEXTURE_SLICE_COUNT, cprTextureIndex, cprTextureSlice, cprTextureU, CPR_WALL_LAYERS, CPR_CATCH_FENCE_NAMES, parseCprTrk, parseCprTtx, isDegenerateSlot, cprTrackIsClosed, cprSegmentPairs, cprVisibleSlots, CPR_COURSE_PURPOSES, CPR_CHECKPOINT_ROLES, cprCheckpointRole, isCprPitCheckpoint, } from "./cpr/track.js";
+export { BUNDLED_PALETTE_IDS, bundledPalette } from "./texture/bundled-palettes.js";
+export { BUNDLED_PALETTE_BY_ORIGIN, TEXTURE_SIBLING_DIRS, findTextureSibling, paletteCandidates, textureStem, } from "./texture/palette-rank.js";
+export { EVO_CELL_SIZE, EVO_HEIGHT_DIVISOR, EVO_WATER_HEIGHT_DIVISOR, EVO_GRID_SIZE, EVO_WORLD_SIZE, evoHeightAtCell, evoHeightAt, } from "./evo/coords.js";
+export { parseEvoAiLine, matchEvoAiLineName, lapRuns } from "./evo/ai-line.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
 export const VERSION = "0.1.0";

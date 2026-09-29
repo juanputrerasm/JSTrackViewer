@@ -1,60 +1,10 @@
-import { placementToEditor, toDataLines } from "./tv-coords.js";
-import { tvPowerup } from "./tv-tables.js";
-
 /*
-  .PUP powerup placements (Terminal Velocity / Fury3 / F!Zone).
+  .PUP powerup placements (Terminal Velocity / Fury3 / Hellbender).
 
-  Referenced from LVL header line 7. Plain ASCII, CRLF, count-prefixed, one line per pickup:
-
-    <count>
-      <x>,<y>,<z>,<type>
-
-  Coordinates share the .DEF space (see tv-coords.js), which means they are on that game's
-  placement scale: Hellbender reuses this record but not the TV units, so the caller's origin
-  picks the conversion. Measured across FURY3.POD, FURYSE.POD and TV.pod: 206 files, 548
-  placements, four fields on every line, type values 0..11. Hellbender ships one placement
-  in one level, MORBOS3.
-
-  Type names are not recorded anywhere in the level data, but both period editors carry the
-  table: TVCAD.INI lists the twelve names in type order, and FuryEdit.exe holds the matching
-  POWER*.BIN pickup models and Fury3 names in two parallel pointer tables (see tv-tables.js).
-  They are attached for Terminal Velocity and Fury3 only; Hellbender ships the same pickup
-  models, but nothing yet confirms that its type indices mean the same thing.
-
-  Most levels place few loose powerups: the manual says authors preferred to hide them inside
-  destructible bunkers, which are ordinary .DEF objects with a spawn probability, so a sparse
-  .PUP is normal for a surface level and tunnels carry proportionally more.
+  Parsing is OpenPhotex's (src/vendor/openphotex, the canonical Terminal Reality format
+  library), which carries this module's former implementation and its evidence. Do not add
+  format knowledge here; change OpenPhotex and re-vendor it.
 */
-
-/**
- * Parses a .PUP file into powerup placements.
- *
- * Returns [] rather than throwing on malformed input.
- */
-export function parsePowerups(bytes, gridSize, origin) {
-  if (!bytes || !bytes.length) return [];
-  const lines = toDataLines(bytes);
-  let i = 0;
-  while (i < lines.length && lines[i] === "") i++;
-  const count = parseInt(lines[i], 10);
-  if (!Number.isFinite(count) || count < 0 || count > 8192) return [];
-  i++;
-
-  const powerups = [];
-  for (let n = 0; n < count && i < lines.length; n++, i++) {
-    const parts = lines[i].split(",");
-    if (parts.length < 4) break;
-    const values = parts.slice(0, 4).map((v) => parseInt(v.trim(), 10));
-    if (values.some((v) => !Number.isFinite(v))) break;
-    const known = origin === "HB" ? null : tvPowerup(values[3]);
-    powerups.push({
-      index: n,
-      position: placementToEditor(values[0], values[1], values[2], gridSize, origin),
-      type: values[3],
-      name: known?.name ?? "",
-      furyName: known?.furyName ?? "",
-      modelName: known?.model ?? "",
-    });
-  }
-  return powerups;
-}
+export {
+  parsePowerups,
+} from "../vendor/openphotex/index.js";

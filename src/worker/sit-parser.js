@@ -5,30 +5,36 @@ import { decodeBinModel } from "./bin-decoder.js";
 import { loadRaceTrackLayer } from "./racetrack-loader.js";
 import { podRawSide } from "./texture-decoder.js";
 import { cprCheckpointRole } from "../shared/cpr-track-schema.js";
-import {
-  CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE, LEGACY_ALTITUDE_DIVISOR,
-} from "../shared/terrain-height.js";
+import { CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE } from "../shared/terrain-height.js";
+import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, sitTrackTypeName } from "../vendor/openphotex/index.js";
+
+/*
+  MTM1, MTM2 and CPR tracks, from a .SIT entry in a POD archive.
+
+  Reading the .SIT, its .LVL, the .TEX texture list and the .TTY type table is OpenPhotex's
+  (parseMtmSit, parseMtmLvl and friends). This file resolves the assets they name against the
+  archive and assembles the viewer's TrackDoc, with the viewer's own CPR choices on top.
+*/
 
 /**
  * Parses MTM2/MTM1/CPR tracks from a SIT entry in a POD archive.
  * Returns a partial TrackDoc (terrain data, courses, boxes, metadata).
  */
 export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
-  const sitText = new TextDecoder("latin1").decode(getBytes(sitEntry));
-  const sitLines = toLines(sitText);
-  if (!sitLines.length) throw new Error("SIT entry is empty");
+  const sit = parseMtmSit(getBytes(sitEntry), sitEntry.title ?? "");
+  if (!sit.lineCount) throw new Error("SIT entry is empty");
 
-  const lvlName = normalizeArchiveName(sitLines[0]);
+  const lvlName = sit.lvlName;
   const doc = createDoc(podComment);
-  doc.origin = detectSitOrigin(sitLines, sitEntry.title ?? "");
+  doc.origin = sit.origin;
   doc.prefix = prefixFromName(lvlName);
 
   // Parse LVL (embedded terrain references)
   const lvlEntry = findEntryFlexible(podIndex, lvlName);
   if (lvlEntry) parseLvlSection(podIndex, getBytes, lvlEntry, doc);
 
-  // Parse SIT metadata (after LVL)
-  parseSitMetadata(sitLines, doc);
+  // SIT metadata (after LVL)
+  applySitMetadata(sit, doc);
 
   if (doc.origin === "CPR") {
     applyCprStandInMasses(doc.boxes);
@@ -49,12 +55,11 @@ const SKY_GRADIENT_START = 192 * 3;
 const SKY_GRADIENT_END = SKY_GRADIENT_START + 16 * 3;
 
 function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
-  const lvlText = new TextDecoder("latin1").decode(getBytes(lvlEntry));
-  const lines = toLines(lvlText);
-  if (lines.length < 6) return;
+  const lvl = parseMtmLvl(getBytes(lvlEntry));
+  if (!lvl) return;
 
   // Line 2: RAW
-  const rawName = normalizeArchiveName(lines[2]);
+  const rawName = lvl.rawName;
   const rawEntry = resolveTrackDataAsset(podIndex, rawName);
   if (rawEntry) {
     doc.terrain.rawName = rawName;
@@ -62,7 +67,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   }
 
   // Line 3: CLR
-  const clrName = normalizeArchiveName(lines[3]);
+  const clrName = lvl.clrName;
   const clrEntry = resolveTrackDataAsset(podIndex, clrName);
   if (clrEntry) {
     doc.terrain.clrName = clrName;
@@ -70,7 +75,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   }
 
   // Line 4: ACT palette
-  const actName = normalizeArchiveName(lines[4]);
+  const actName = lvl.actName;
   const actEntry = resolveAsset(podIndex, actName);
   if (actEntry) {
     doc.palette = getBytes(actEntry).slice(0, 768);
@@ -81,7 +86,7 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   }
 
   // Line 5: TEX texture list
-  const texName = normalizeArchiveName(lines[5]);
+  const texName = lvl.texName;
   const texEntry = resolveTrackDataAsset(podIndex, texName);
   if (texEntry) {
     loadTexList(podIndex, getBytes, texEntry, doc, false);
@@ -102,29 +107,27 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
     does for TV, and the last of them is the horizon colour. `classicSky` records that, and
     the scene offers it as MTM1's Classic sky.
   */
-  if (lines.length > 10) {
-    const skyRawName = normalizeArchiveName(lines[10]);
-    if (skyRawName && !skyRawName.startsWith("NULL") && skyRawName.endsWith(".RAW")) {
-      const skyEntry = resolveArtAsset(podIndex, skyRawName);
-      if (skyEntry) {
-        const skyActName = lines.length > 11 ? normalizeArchiveName(lines[11]) : null;
-        const skyActEntry = skyActName ? resolveAsset(podIndex, skyActName) : null;
-        const skyActData = skyActEntry ? getBytes(skyActEntry) : null;
-        const skyData = getBytes(skyEntry);
-        // Only a sky drawn entirely in the gradient slots is recoloured; any other RAW keeps its ACT.
-        const gradientSky = skyData.length > 0 && skyData.every((index) => index >= SKY_PALETTE_FIRST_SLOT);
-        const gradient = gradientSky && skyActData?.length >= SKY_GRADIENT_END
-          ? new Uint8Array(skyActData.subarray(SKY_GRADIENT_START, SKY_GRADIENT_END))
-          : null;
-        let actData = skyActData ?? doc.palette;
-        if (gradient) {
-          actData = new Uint8Array(768);
-          if (doc.palette) actData.set(doc.palette.subarray(0, 768));
-          actData.set(gradient, SKY_PALETTE_FIRST_SLOT * 3);
-          doc.classicSky = { gradient: [...gradient], horizon: [...gradient.subarray(45, 48)] };
-        }
-        doc.skyTexture = { name: skyRawName, data: skyData, actData };
+  if (lvl.skyRawName) {
+    const skyRawName = lvl.skyRawName;
+    const skyEntry = resolveArtAsset(podIndex, skyRawName);
+    if (skyEntry) {
+      const skyActName = lvl.skyActName;
+      const skyActEntry = skyActName ? resolveAsset(podIndex, skyActName) : null;
+      const skyActData = skyActEntry ? getBytes(skyActEntry) : null;
+      const skyData = getBytes(skyEntry);
+      // Only a sky drawn entirely in the gradient slots is recoloured; any other RAW keeps its ACT.
+      const gradientSky = skyData.length > 0 && skyData.every((index) => index >= SKY_PALETTE_FIRST_SLOT);
+      const gradient = gradientSky && skyActData?.length >= SKY_GRADIENT_END
+        ? new Uint8Array(skyActData.subarray(SKY_GRADIENT_START, SKY_GRADIENT_END))
+        : null;
+      let actData = skyActData ?? doc.palette;
+      if (gradient) {
+        actData = new Uint8Array(768);
+        if (doc.palette) actData.set(doc.palette.subarray(0, 768));
+        actData.set(gradient, SKY_PALETTE_FIRST_SLOT * 3);
+        doc.classicSky = { gradient: [...gradient], horizon: [...gradient.subarray(45, 48)] };
       }
+      doc.skyTexture = { name: skyRawName, data: skyData, actData };
     }
   }
 
@@ -138,27 +141,24 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
     and CPR name a .MOD that does sit in the same archive, which is why this only ever showed
     up on MTM 2.
   */
-  if (lines.length > 14) {
-    const musicName = normalizeArchiveName(lines[14]);
-    if (musicName && !musicName.startsWith("NULL.")) doc.musicName = archiveTitle(lines[14]);
+  if (lvl.musicName !== null) {
+    const musicName = normalizeArchiveName(lvl.musicName);
+    if (musicName && !musicName.startsWith("NULL.")) doc.musicName = archiveTitle(lvl.musicName);
   }
-  if (lines.length > 16) {
-    const lteEntry = resolveAsset(podIndex, normalizeArchiveName(lines[16]));
-    if (lteEntry) { doc.terrain.lteName = normalizeArchiveName(lines[16]); doc.terrain.lteData = getBytes(lteEntry); }
+  if (lvl.lteName !== null) {
+    const lteEntry = resolveAsset(podIndex, lvl.lteName);
+    if (lteEntry) { doc.terrain.lteName = lvl.lteName; doc.terrain.lteData = getBytes(lteEntry); }
   }
 
   // Lighting
-  if (lines.length > 17) doc.sunVector = parseIntTriplet(lines[17]) ?? doc.sunVector;
-  if (lines.length > 18) doc.shadowIntensity = parseLeadingInt(lines[18]);
-  if (lines.length > 19) doc.sunPosition = parseIntTriplet(lines[19]) ?? doc.sunPosition;
-  if (lines.length > 20) doc.sunIntensity = parseLeadingInt(lines[20]);
-  if (lines.length > 21) doc.levelValue = parseLeadingInt(lines[21]);
+  if (lvl.lineCount > 17) doc.sunVector = lvl.sunVector ?? doc.sunVector;
+  if (lvl.shadowIntensity !== null) doc.shadowIntensity = lvl.shadowIntensity;
+  if (lvl.lineCount > 19) doc.sunPosition = lvl.sunPosition ?? doc.sunPosition;
+  if (lvl.sunIntensity !== null) doc.sunIntensity = lvl.sunIntensity;
+  if (lvl.levelValue !== null) doc.levelValue = lvl.levelValue;
 
-  // Water level
-  const waterIdx = indexOfLine(lines, "!waterHeight");
-  if (waterIdx >= 0 && waterIdx + 1 < lines.length) {
-    doc.waterLevel = Math.round(parseLeadingInt(lines[waterIdx + 1]) / 4);
-  }
+  // Water level, in legacy height steps.
+  if (lvl.waterHeight !== null) doc.waterLevel = Math.round(lvl.waterHeight / 4);
 
   // Infer terrain grid
   inferTerrain(doc);
@@ -219,353 +219,33 @@ function applyCprStandInMasses(boxes) {
   }
 }
 
-function parseSitMetadata(sitLines, doc) {
-  // !Race Track Name
-  const nameIdx = indexOfLine(sitLines, "!Race Track Name");
-  if (nameIdx >= 0 && nameIdx + 1 < sitLines.length) doc.trackName = sitLines[nameIdx + 1].trim();
-
-  // Race Track Locale
-  const localeIdx = indexOfLine(sitLines, "Race Track Locale");
-  if (localeIdx >= 0 && localeIdx + 1 < sitLines.length) doc.localeName = sitLines[localeIdx + 1].trim();
-
-  // Track Race Type
-  const typeIdx = indexOfLine(sitLines, "Track Race Type");
-  if (typeIdx >= 0 && typeIdx + 1 < sitLines.length) {
-    doc.trackType = trackTypeFromValue(parseLeadingInt(sitLines[typeIdx + 1]), doc.origin);
+function applySitMetadata(sit, doc) {
+  if (sit.trackName !== null) doc.trackName = sit.trackName;
+  if (sit.localeName !== null) doc.localeName = sit.localeName;
+  if (sit.trackTypeCode !== null) doc.trackType = sitTrackTypeName(sit.trackTypeCode, doc.origin);
+  if (sit.redbookTrack !== null) doc.redbookTrack = sit.redbookTrack;
+  if (sit.ambientSound !== null) {
+    doc.ambientSound = sit.ambientSound;
+    doc.weatherMask = sit.weatherMask;
   }
-
-  /*
-    @Redbook Audio Track: the CD audio track the game plays on this course.
-
-    MTM 1 and CPR have no ambient-sound field at all - the line below is one of the two
-    markers that identify an MTM 2 .SIT in the first place - and this is what they carry
-    instead. Reading it means those two games report the audio they actually name rather than
-    an empty row.
-  */
-  const redbookIdx = indexOfLine(sitLines, "@Redbook Audio Track");
-  if (redbookIdx >= 0 && redbookIdx + 1 < sitLines.length) {
-    doc.redbookTrack = parseLeadingInt(sitLines[redbookIdx + 1]);
+  // Ramps, boxes, then the top-crush parts (see BOXTYPE_CRUSH in OpenPhotex).
+  doc.boxes.push(...sit.boxes);
+  if (sit.primaryCourse) doc.primaryCourse.segments.push(...sit.primaryCourse.segments);
+  doc.extendedCourses.push(...sit.extendedCourses);
+  // Stadium (arena) then Backdrop; the two are alternatives, and which one wins is settled
+  // where the model is actually loaded.
+  if (sit.arena) doc.arena = sit.arena;
+  if (sit.backdropModelNames) {
+    doc.backdropModelNames = sit.backdropModelNames;
+    doc.backdropModelName = doc.backdropModelNames[0] ?? null;
   }
-
-  // ambient sound, length, weather mask
-  const ambientIdx = indexOfLine(sitLines, "!ambient sound,track length,weather mask");
-  if (ambientIdx >= 0 && ambientIdx + 1 < sitLines.length) {
-    const parts = sitLines[ambientIdx + 1].split(",");
-    if (parts.length >= 3) {
-      doc.ambientSound = parseLeadingInt(parts[0]);
-      doc.weatherMask = parseLeadingInt(parts[2]);
-    }
-  }
-
-  // Boxes (*** Ramps *** and *** Boxes ***)
-  parseBoxSection(sitLines, "*** Ramps ***", doc, true);
-  parseBoxSection(sitLines, "*** Boxes ***", doc, false);
-  parseTopCrushSection(sitLines, doc);
-
-  // Courses
-  parseCourses(sitLines, doc);
-
-  // Stadium (arena) then Backdrop. Order matches the SIT itself; the two are alternatives,
-  // and which one wins is settled where the model is actually loaded.
-  parseArena(sitLines, doc);
-  parseBackdrop(sitLines, doc);
-
-  // Trucks
-  parseTrucks(sitLines, doc);
-}
-
-function parseBoxSection(lines, sectionHeader, doc, isRamp) {
-  const section = indexOfLine(lines, sectionHeader);
-  if (section < 0 || section + 1 >= lines.length) return;
-  const count = parseLeadingInt(lines[section + 1]);
-  let cursor = section + 2;
-  let checkpointSequence = 0;
-  for (let i = 0; i < count; i++) {
-    cursor = nextBlockStart(lines, cursor);
-    if (cursor < 0) return;
-    const box = parseBoxBlock(lines, cursor, isRamp, doc);
-    if (box && !isRamp && box.type === 6) box.checkpointSequence = checkpointSequence++;
-    if (box) doc.boxes.push(box);
-    cursor++;
-  }
-}
-
-function parseBoxBlock(lines, blockStart, isRamp, doc) {
-  // BOXTYPE_RAMP is 99 (Include/TrackPODBox.h:37). It used to be tagged 8, which is
-  // TYPE_NO_COLLIDE_FACING, so every ramp was routed into the camera-facing billboard group
-  // and drawn as a billboarded collision prism instead of a wedge.
-  const box = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, length: 64, width: 64, height: 64, modelName: "", mass: 0, type: isRamp ? 99 : 0, flags: 0, checkpointSequence: -1 };
-  const blockEnd = nextBlockStart(lines, blockStart + 1);
-  const endIndex = blockEnd >= 0 ? blockEnd : lines.length;
-
-  const iposIdx = indexOfLinePrefix(lines, "ipos", blockStart, endIndex);
-  if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
-    box.position = parseLegacyWorldTriplet(lines[iposIdx + 1]);
-  }
-
-  const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", blockStart, endIndex);
-  if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
-    const a = parseFloatTriplet(lines[anglesIdx + 1]);
-    box.theta = a[0]; box.phi = a[1]; box.psi = a[2];
-  }
-
-  const modelIdx = indexOfLinePrefix(lines, "model", blockStart, endIndex);
-  if (modelIdx >= 0 && modelIdx + 1 < lines.length) {
-    box.modelName = normalizeArchiveName(lines[modelIdx + 1]);
-  }
-  const dimIdx = indexOfLinePrefix(lines, "length,width,height", blockStart, endIndex);
-  if (dimIdx >= 0 && dimIdx + 1 < lines.length) {
-    const sz = parseFloatTriplet(lines[dimIdx + 1]);
-    box.length = Math.round(sz[0]); box.width = Math.round(sz[1]); box.height = Math.round(sz[2]);
-  }
-
-  if (!isRamp) {
-    const typeFlagsIdx = indexOfLinePrefix(lines, "!type,flags", blockStart, endIndex);
-    if (typeFlagsIdx >= 0 && typeFlagsIdx + 1 < lines.length) {
-      const parts = lines[typeFlagsIdx + 1].split(",");
-      box.type = parseLeadingInt(parts[0] ?? "0");
-      box.flags = parseLeadingInt(parts[1] ?? "0");
-    }
-  }
-
-  const massIdx = indexOfLinePrefix(lines, "mass", blockStart, endIndex);
-  if (massIdx >= 0 && massIdx + 1 < lines.length) box.mass = parseFloat(lines[massIdx + 1]) || 0;
-
-  // Velocity in feet per second, as written. Type 10 objects ("moving - use bvel" in Traxx's
-  // notes) travel along it, which is TPARK's train; every other box carries zeros.
-  const bvelIdx = indexOfLinePrefix(lines, "bvel", blockStart, endIndex);
-  if (bvelIdx >= 0 && bvelIdx + 1 < lines.length) box.bvel = parseFloatTriplet(lines[bvelIdx + 1]);
-
-  return box;
-}
-
-/*
-  *** Top Crush *** - the cars a truck flattens by driving over them.
-
-  Traxx writes these as their own section rather than as boxes (TrackPODFile.cpp:2594-2680),
-  and each record is two objects:
-
-    ipos / modelName          the part that never changes (MTM1's WREC2.BIN, the chassis)
-    ipos2 / cabModelName      an animated BIN with two frames, before and after crushing,
-                              which the game morphs between the further the object is crushed
-
-  ipos2 is ipos plus the editor's crush offset, so the cab sits where the author put it on the
-  body. Both are ordinary world triplets. The rest (mass, bvel, p,q,r) is the usual physics
-  state and carries zeros in every stock record, so it is not kept.
-
-  Each part becomes a box of type BOXTYPE_CRUSH (98, Include/TrackPODBox.h). The cab carries
-  `crushRole: "cab"`, which is what tells the scene to drive its frames from the crush amount
-  instead of playing them as a loop, and drive mode to make it a collider that gives way.
-*/
-const BOXTYPE_CRUSH = 98;
-
-function parseTopCrushSection(lines, doc) {
-  const section = indexOfLine(lines, "*** Top Crush ***");
-  if (section < 0 || section + 1 >= lines.length) return;
-  const count = parseLeadingInt(lines[section + 1]);
-  const sectionEnd = indexOfLine(lines, "*** Course ***");
-  const limit = sectionEnd > section ? sectionEnd : lines.length;
-  let cursor = section + 2;
-  for (let i = 0; i < count; i++) {
-    cursor = nextBlockStart(lines, cursor);
-    if (cursor < 0 || cursor >= limit) return;
-    const blockEnd = Math.min(limit, nextBlockStart(lines, cursor + 1) >= 0 ? nextBlockStart(lines, cursor + 1) : limit);
-    const valueAfter = (label) => {
-      for (let k = cursor + 1; k < blockEnd - 1; k++) if (lines[k].trim() === label) return lines[k + 1].trim();
-      return null;
-    };
-    const ipos = valueAfter("ipos");
-    const ipos2 = valueAfter("ipos2") ?? ipos;
-    const angles = parseFloatTriplet(valueAfter("theta,phi,psi") ?? "0,0,0");
-    const modelOf = (value) => {
-      const name = value ? normalizeArchiveName(value) : "";
-      return name && !name.startsWith("NULL") ? name : "";
-    };
-    const common = {
-      theta: angles[0], phi: angles[1], psi: angles[2],
-      length: 64, width: 64, height: 64, mass: 0, type: BOXTYPE_CRUSH, flags: 0,
-      checkpointSequence: -1, crushGroup: i,
-    };
-    if (ipos) {
-      doc.boxes.push({ ...common, position: parseLegacyWorldTriplet(ipos), modelName: modelOf(valueAfter("modelName")), crushRole: "body" });
-      doc.boxes.push({ ...common, position: parseLegacyWorldTriplet(ipos2), modelName: modelOf(valueAfter("cabModelName")), crushRole: "cab" });
-    }
-    cursor = blockEnd;
-  }
-}
-
-function parseCourses(lines, doc) {
-  const courseSection = indexOfLine(lines, "*** Course ***");
-  if (courseSection >= 0 && courseSection + 2 < lines.length) {
-    const count = parseLeadingInt(lines[courseSection + 2]);
-    const { cursor } = parseCourseBlocks(lines, courseSection + 3, count, doc.primaryCourse, doc);
-    // Extended courses
-    const extSection = indexOfLine(lines, "@*********** Extended Course Definitions *************");
-    if (extSection >= 0 && extSection + 1 < lines.length) {
-      const extCount = Math.min(4, parseLeadingInt(lines[extSection + 1]));
-      let c = extSection + 2;
-      for (let i = 0; i < extCount && c < lines.length; i++) {
-        const course = { segments: [] };
-        const segCount = c + 1 < lines.length ? parseLeadingInt(lines[c + 1]) : 0;
-        const result = parseCourseBlocks(lines, c + 2, segCount, course, doc);
-        c = result.cursor;
-        if (course.segments.length) doc.extendedCourses.push(course);
-      }
-    }
-  }
-}
-
-function parseCourseBlocks(lines, startCursor, count, course, doc) {
-  let cursor = startCursor;
-  for (let i = 0; i < count; i++) {
-    cursor = nextBlockStart(lines, cursor);
-    if (cursor < 0) return { cursor: lines.length };
-    const segment = { start: [0, 0, 0], end: [0, 0, 0], speedLimit: 0, trackWidth: 64 };
-
-    const cstartIdx = indexOfLinePrefix(lines, "cstart", cursor);
-    if (cstartIdx >= 0 && cstartIdx + 1 < lines.length) {
-      segment.start = parseLegacyWorldTriplet(lines[cstartIdx + 1]);
-    }
-    const cendIdx = indexOfLinePrefix(lines, "cend", cursor);
-    if (cendIdx >= 0 && cendIdx + 1 < lines.length) {
-      segment.end = parseLegacyWorldTriplet(lines[cendIdx + 1]);
-    }
-    const swIdx = indexOfLinePrefix(lines, "&cSpeedLimit,cTrackWidth", cursor);
-    if (swIdx >= 0 && swIdx + 1 < lines.length) {
-      const parts = lines[swIdx + 1].split(",");
-      segment.speedLimit = parseLeadingFloat(parts[0] ?? "0");
-      segment.trackWidth = parseLeadingFloat(parts[1] ?? "64");
-    }
-    course.segments.push(segment);
-    cursor++;
-  }
-  // Extended-course callers need the next [Course N] header, not a position inside the
-  // final segment body. Returning immediately after its delimiter made every course after
-  // the first read `1,0` (ctype) as its segment count and appear to contain one segment.
-  while (cursor < lines.length && !lines[cursor].startsWith("[Course ")) cursor++;
-  return { cursor };
-}
-
-/*
-  *** Stadium *** - the arena.
-
-  An arena track carries its model here rather than in the Backdrop block, and the writer
-  then emits backdropCount 0 (TrackPODFile.cpp:5288-5318), so a parser that reads only the
-  Backdrop block sees an arena track as having no model at all. That is why arena tracks
-  currently render with nothing where the stadium should be.
-
-  Two line formats, discriminated by the leading '!' (TrackPODFile.cpp:2686-2737):
-
-    !stadiumFlag,x,z,sx,sz,stadiumModelName      MTM2: placed, with a grid footprint
-    1,120,100,14,14,arena.bin
-
-    stadiumFlag,stadiumModelName                 older form: model only, placed at 0,0
-    1,arena.bin
-
-  A leading flag of 0 means the block is present but the track is not an arena.
-
-  sx/sz are the footprint in grid cells. NEITHER renderer reads them - they exist for the
-  editor's placement UI and for the game's own terrain flattening - so they are carried
-  here for reporting and nothing else. Placement comes from x/z plus the model's own
-  anchor vertex; see placeArena in track-worker.js.
-*/
-function parseArena(sitLines, doc) {
-  const section = indexOfLine(sitLines, "*** Stadium ***");
-  if (section < 0 || section + 2 >= sitLines.length) return;
-
-  const header = (sitLines[section + 1] ?? "").trim();
-  const fields = (sitLines[section + 2] ?? "").split(",");
-  if (!parseLeadingInt(fields[0])) return;
-
-  if (header.startsWith("!stadiumFlag")) {
-    if (fields.length < 6) return;
-    const modelName = normalizeArchiveName(fields[5]);
-    if (!modelName) return;
-    doc.arena = {
-      modelName,
-      x: parseLeadingInt(fields[1]),
-      y: parseLeadingInt(fields[2]),
-      sx: parseLeadingInt(fields[3]),
-      sy: parseLeadingInt(fields[4]),
-    };
-  } else if (header.startsWith("stadiumFlag")) {
-    if (fields.length < 2) return;
-    const modelName = normalizeArchiveName(fields[1]);
-    if (!modelName) return;
-    doc.arena = { modelName, x: 0, y: 0, sx: 0, sy: 0 };
-  }
-}
-
-
-function parseBackdrop(sitLines, doc) {
-  const section = indexOfLine(sitLines, "*** Backdrop ***");
-  if (section < 0 || section + 4 >= sitLines.length) return;
-  const countLine = sitLines[section + 2];
-  const comma = countLine.indexOf(",");
-  const backdropCount = comma >= 0 ? parseLeadingInt(countLine.slice(comma + 1)) : 0;
-  doc.backdropModelNames = [];
-  for (let i = 0; i < Math.min(backdropCount, 64); i++) {
-    const line = sitLines[section + 4 + i];
-    if (!line || line.startsWith("***")) break;
-    const modelName = normalizeArchiveName(line);
-    if (modelName) doc.backdropModelNames.push(modelName);
-  }
-  doc.backdropModelName = doc.backdropModelNames[0] ?? null;
-}
-
-function parseTrucks(sitLines, doc) {
-
-  /*
-    Slot 0: the player's own truck, under "*** Your Truck (Not used anymore) ***" with no block
-    delimiter. The section header says what it is worth: it is a saved player slot rather than
-    a vehicle standing on the grid, so it is flagged and the scene does not draw a marker for
-    it. The flag, rather than the index, is what says so - Evo has no such slot, and all eight
-    of its vehicles are real grid positions.
-  */
-  const playerSection = indexOfLine(sitLines, "*** Your Truck (Not used anymore) ***");
-  if (playerSection >= 0) {
-    doc.trucks.push({ ...parseTruckBlock(sitLines, playerSection + 1), playerSlot: true });
-  }
-
-  // Slots 1+: NPC vehicles under "*** Vehicles ***"
-  const vehicleSection = indexOfLine(sitLines, "*** Vehicles ***");
-  if (vehicleSection < 0 || vehicleSection + 1 >= sitLines.length) return;
-  const count = parseLeadingInt(sitLines[vehicleSection + 1]);
-  let cursor = vehicleSection + 2;
-  for (let i = 0; i < count; i++) {
-    cursor = nextBlockStart(sitLines, cursor);
-    if (cursor < 0) return;
-    doc.trucks.push(parseTruckBlock(sitLines, cursor + 1));
-    cursor++;
-  }
-}
-
-function parseTruckBlock(lines, startIdx) {
-  const truck = { position: [0, 0, 0], theta: 0, phi: 0, psi: 0, name: "" };
-  const nameIdx = indexOfLinePrefix(lines, "truckFile", startIdx);
-  if (nameIdx >= 0 && nameIdx + 1 < lines.length) {
-    truck.name = lines[nameIdx + 1].trim();
-  }
-  const iposIdx = indexOfLinePrefix(lines, "ipos", startIdx);
-  if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
-    truck.position = parseLegacyWorldTriplet(lines[iposIdx + 1]);
-  }
-  const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", startIdx);
-  if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
-    const a = parseFloatTriplet(lines[anglesIdx + 1]);
-    truck.theta = a[0]; truck.phi = a[1]; truck.psi = a[2];
-  }
-  return truck;
+  doc.trucks.push(...sit.trucks);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
 
 function loadTexList(podIndex, getBytes, texEntry, doc, preserveSlots) {
-  const text = new TextDecoder("latin1").decode(getBytes(texEntry));
-  const lines = toNonEmptyLines(text);
-  const count = parseInt(lines[0] ?? "0", 10);
-  for (let i = 0; i < count && i + 1 < lines.length; i++) {
-    const name = normalizeArchiveName(lines[i + 1]);
+  for (const name of parseTexList(getBytes(texEntry))) {
     const dataEntry = resolveArtAsset(podIndex, name);
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
@@ -599,16 +279,9 @@ function resolveArtAsset(podIndex, name) {
 }
 
 function parseTty(bytes, doc) {
-  const lines = toNonEmptyLines(new TextDecoder("latin1").decode(bytes));
-  const count = parseInt(lines[0] ?? "0", 10);
-  for (let i = 0; i < count && i + 1 < lines.length; i++) {
-    const line = lines[i + 1].toUpperCase();
-    const comma = line.indexOf(",");
-    if (comma < 0) continue;
-    const name = line.slice(0, comma);
-    const value = parseInt(line.slice(comma + 1), 10) || 0;
+  for (const { name, type, depth } of parseTtyEntries(bytes)) {
     const tex = doc.textures.find((t) => archiveTitle(t.name) === archiveTitle(name));
-    if (tex) { tex.type = Math.floor(value / 100); tex.depth = value % 100; }
+    if (tex) { tex.type = type; tex.depth = depth; }
   }
 }
 
@@ -649,125 +322,6 @@ function inferTerrain(doc) {
   }
 }
 
-// .SIT positions are feet; Traxx stores them as ipos = 2*feet horizontally and feet/2
-// vertically, wrapping negatives into the 16384-unit world (TrackPODFile.cpp Pod1SitToIpos).
-//
-// That holds for CPR too. CPR's own reading, altitude / 4, gives 4 ft CPR steps, which the
-// viewer carries as 2 ft legacy steps like the terrain, so the divisor is 2 for all three
-// games. This used to be `/ 4` for CPR, which drew every CPR object at half its height above
-// the ground against a model drawn at full size, and buried it.
-//
-// Traxx itself has to quantise, because ipos is an int: the original truncated with
-// `2*(int)atof(..)`, which lost half-steps and made positions walk downward on every
-// load/save round trip, and the Community Patch 3 fork fixed that by carrying a separate
-// 1/256-of-a-step fraction per axis (xfraction/yfraction/zfraction). A viewer never writes
-// the file back, so it needs neither the split nor the quantisation: keeping the value as a
-// float is strictly more precise than either.
-function parseLegacyWorldTriplet(value) {
-  const parts = value.split(",");
-  if (parts.length < 3) return [0, 0, 0];
-  const vDiv = LEGACY_ALTITUDE_DIVISOR;
-  let x = 2 * parseFloat(parts[0].trim());
-  let y = 2 * parseFloat(parts[2].trim());
-  const z = parseFloat(parts[1].trim()) / vDiv;
-  if (!Number.isFinite(x)) x = 0;
-  if (!Number.isFinite(y)) y = 0;
-  if (x < 0) x += 16384;
-  if (y < 0) y += 16384;
-  return [x, y, Number.isFinite(z) ? z : 0];
-}
-
-/*
-  Which game a SIT came from.
-
-  A SIT carries no version field and never names its game. The previous check searched the
-  whole file for "MTM1" and "CPR", and neither string occurs in any of the 47 stock SIT files
-  across the three families (MTM1 14, MTM2 15, CPR 18), so both branches were dead and every
-  track was reported as MTM2.
-
-  The families are told apart by their record schema instead, which is stable because MTM2
-  added records to the MTM1 format and CPR forked that format for open wheel racing:
-
-    CPR   adds a pit stop and driver aid block
-    MTM2  adds weather and stadium records
-    MTM1  has neither
-
-  Every marker below appears in all of its own family's stock SITs and in none of the other
-  two families'. MTM1 is the residual and has no marker of its own, because its schema is a
-  strict subset of MTM2's: "no weather mask and no stadium record" is what being an MTM1
-  track consists of. The cost of that is that a SIT too damaged to carry either record reads
-  as MTM1 rather than MTM2, which loses the terrain overlap in buildAtlas.
-*/
-const CPR_SIT_MARKERS = [
-  "^currentPitStop",
-  "@ap.guy2follow,ap.lineOffset,ap.place,ap.pit",
-  "*** VARLOW ***",
-];
-const MTM2_SIT_MARKERS = [
-  "!ambient sound,track length,weather mask",
-  "!stadiumFlag,x,z,sx,sz,stadiumModelName",
-];
-
-function detectSitOrigin(sitLines, sitTitle = "") {
-  // Community Patch 3 writes .SI2 only for MTM2, so the extension settles it on its own and
-  // covers any fork-specific SIT body this build has not seen.
-  if (sitTitle.toUpperCase().endsWith(".SI2")) return "MTM2";
-  const lines = new Set(sitLines.map((line) => line.trim()));
-  if (CPR_SIT_MARKERS.some((marker) => lines.has(marker))) return "CPR";
-  if (MTM2_SIT_MARKERS.some((marker) => lines.has(marker))) return "MTM2";
-  return "MTM1";
-}
-
-/*
-  "Track Race Type" means different things in the two games that write it.
-
-    MTM1 / MTM2   0 = unset, 1 = drag, 2 = circuit, 3 = rally, 4 = rumble
-    CPR           4 = road, 5 = speedway, 6 = short oval, 7 = street
-
-  The CPR names are CPREDIT's own, from the "D. Autoset track type" prompt
-  ("4 = road, 5 = speedway, 6 = short oval, 7 = street :"), and the 17 stock tracks bear them
-  out: Laguna Seca, Mid-Ohio, Road America, Portland and Detroit are 4; California and
-  Michigan are 5; Gateway, Homestead, Milwaukee, Nazareth and Rio are 6; Surfers Paradise,
-  Long Beach, Cleveland, Toronto and Vancouver are 7. Read through the MTM table, every CPR
-  road course came out as RUMBLE.
-*/
-const MTM_TRACK_TYPES = { 1: "DRAG", 2: "CIRCUIT", 3: "RALLY", 4: "RUMBLE" };
-const CPR_TRACK_TYPES = { 4: "ROAD", 5: "SPEEDWAY", 6: "SHORT OVAL", 7: "STREET" };
-
-function trackTypeFromValue(v, origin) {
-  const table = origin === "CPR" ? CPR_TRACK_TYPES : MTM_TRACK_TYPES;
-  return table[v] ?? "UNKNOWN";
-}
-
-function indexOfLine(lines, value) {
-  for (let i = 0; i < lines.length; i++) { if (lines[i] === value) return i; }
-  return -1;
-}
-
-function indexOfLinePrefix(lines, prefix, startIndex = 0, endIndex = lines.length) {
-  for (let i = startIndex; i < endIndex && i < lines.length; i++) { if (lines[i].startsWith(prefix)) return i; }
-  return -1;
-}
-
-function nextBlockStart(lines, startIndex) {
-  for (let i = Math.max(0, startIndex); i < lines.length; i++) { if (lines[i].startsWith("********")) return i; }
-  return -1;
-}
-
-function parseIntTriplet(value) {
-  const parts = value.split(",");
-  if (parts.length < 3) return null;
-  return [parseInt(parts[0].trim(), 10), parseInt(parts[1].trim(), 10), parseInt(parts[2].trim(), 10)];
-}
-
-function parseFloatTriplet(value) {
-  const parts = value.split(",");
-  return [parseLeadingFloat(parts[0] ?? "0"), parseLeadingFloat(parts[1] ?? "0"), parseLeadingFloat(parts[2] ?? "0")];
-}
-
-function parseLeadingInt(value) { return parseInt((value ?? "").trim(), 10) || 0; }
-function parseLeadingFloat(value) { return parseFloat((value ?? "").trim()) || 0; }
-
 function prefixFromName(name) {
   const title = archiveTitle(name);
   const dot = title.lastIndexOf(".");
@@ -778,14 +332,6 @@ function prefixFromName(name) {
 function findEntryFlexible(podIndex, name) {
   const upper = normalizeArchiveName(name);
   return podIndex.entries.find((e) => e.normalizedName === upper) ?? podIndex.entries.find((e) => e.title === archiveTitle(upper)) ?? null;
-}
-
-function toLines(text) {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-}
-
-function toNonEmptyLines(text) {
-  return toLines(text).map((l) => l.trim()).filter(Boolean);
 }
 
 function createDoc(podComment) {

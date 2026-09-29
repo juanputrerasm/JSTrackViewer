@@ -11,25 +11,36 @@ import { parseHbBriefing } from "./hb-briefing.js";
 import { parseTunnelDefs } from "./tdf-parser.js";
 import { parsePowerups } from "./pup-parser.js";
 import { parseAnimations } from "./ani-parser.js";
+import {
+  SKY_PALETTE_FIRST_SLOT, isNullAssetName, parseTexList, parseTty as parseTtyEntries, parseTvLvl, skyGradient, skyHorizon,
+  tvLvlFallbackName,
+} from "../vendor/openphotex/index.js";
+
+/*
+  Terminal Velocity, Fury3 and Hellbender levels, from a .LVL entry in a POD archive.
+
+  Reading the .LVL and its side files is OpenPhotex's (parseTvLvl, parseDef, the .NAV/.PUP/
+  .TDF/.ANI readers and friends). This file resolves the names they give against the archive
+  and assembles the viewer's TrackDoc.
+*/
 
 /**
  * Parses TV-family/HB tracks from a primary LVL entry in a POD archive.
  * Returns a partial TrackDoc.
  */
 export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
-  const lvlText = new TextDecoder("latin1").decode(getBytes(lvlEntry));
-  const lines = toLines(lvlText);
-  const doc = createDoc(podComment, inferLvlOrigin(lines));
+  const lvl = parseTvLvl(getBytes(lvlEntry));
+  const doc = createDoc(podComment, lvl.origin);
   doc.prefix = prefixFromName(lvlEntry.name);
 
-  if (lines.length < 22) {
-    doc.trackName = prettyLvlName(lvlEntry.name);
+  if (!lvl.complete) {
+    doc.trackName = tvLvlFallbackName(lvlEntry.name);
     return doc;
   }
 
   doc.terrain.gridSize = 256;
   doc.terrain.rawBytesPerCell = 1;
-  doc.trackName = displayNameForLvl(lines, lvlEntry.name);
+  doc.trackName = lvl.displayName ?? tvLvlFallbackName(lvlEntry.name);
 
   /*
     Line 2: the RAW heightfield, or a .TNL spine when this is a tunnel level.
@@ -38,8 +49,8 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     inside. A surface level's tunnels are surfaced instead as entrance and exit markers, from
     the .TDF on line 9, which is the complete list including the ones the .NAV leaves out.
   */
-  const rawOrTnl = normalizeArchiveName(lines[2]);
-  if (rawOrTnl && !rawOrTnl.startsWith("NULL.") && !rawOrTnl.endsWith(".TNL")) {
+  const rawOrTnl = lvl.rawOrTnlName;
+  if (!isNullAssetName(rawOrTnl) && !rawOrTnl.endsWith(".TNL")) {
     const rawEntry = resolveLvlDataAsset(podIndex, rawOrTnl);
     if (rawEntry) {
       doc.terrain.rawName = rawOrTnl;
@@ -48,8 +59,8 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   }
 
   // Line 3: CLR
-  const clrName = normalizeArchiveName(lines[3]);
-  if (clrName && !clrName.startsWith("NULL.")) {
+  const clrName = lvl.clrName;
+  if (!isNullAssetName(clrName)) {
     const clrEntry = resolveLvlDataAsset(podIndex, clrName);
     if (clrEntry) {
       doc.terrain.clrName = clrName;
@@ -58,8 +69,8 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   }
 
   // Line 4: ACT palette
-  const actName = normalizeArchiveName(lines[4]);
-  if (actName && !actName.startsWith("NULL.")) {
+  const actName = lvl.actName;
+  if (!isNullAssetName(actName)) {
     const actEntry = resolveAsset(podIndex, actName);
     if (actEntry) {
       doc.palette = getBytes(actEntry).slice(0, 768);
@@ -71,8 +82,8 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   }
 
   // Line 5: TEX
-  const texName = normalizeArchiveName(lines[5]);
-  if (texName && !texName.startsWith("NULL.")) {
+  const texName = lvl.texName;
+  if (!isNullAssetName(texName)) {
     const texEntry = resolveLvlDataAsset(podIndex, texName);
     if (texEntry) {
       loadTexList(podIndex, getBytes, texEntry, doc);
@@ -92,9 +103,9 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     colour, slot 255, is the horizon: the engine clears the screen to it before drawing the
     sky, and the last row of the .FOG table maps every colour onto it.
   */
-  if (lines.length > 10) {
-    const skyName = normalizeArchiveName(lines[10]);
-    const gradient = lines.length > 11 ? readSkyGradient(podIndex, getBytes, lines[11]) : null;
+  if (lvl.skyName !== null) {
+    const skyName = lvl.skyName;
+    const gradient = lvl.skyActName !== null ? readSkyGradient(podIndex, getBytes, lvl.skyActName) : null;
     if (skyName.endsWith(".VOX")) {
       doc.tvSky = { stars: true, gradient: gradient ?? new Uint8Array(48), horizon: [0, 0, 0] };
     } else if (skyName.endsWith(".RAW") && !skyName.startsWith("NULL.")) {
@@ -106,7 +117,7 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
         if (gradient) {
           skyAct = new Uint8Array(768);
           skyAct.set(gradient, SKY_PALETTE_FIRST_SLOT * 3);
-          doc.tvSky = { stars: false, gradient, horizon: [...gradient.subarray(45, 48)] };
+          doc.tvSky = { stars: false, gradient, horizon: skyHorizon(gradient) };
         } else {
           const skyActEntry = resolveAsset(podIndex, replaceExtension(skyName, ".ACT"));
           skyAct = skyActEntry ? getBytes(skyActEntry) : doc.palette;
@@ -117,9 +128,9 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   }
 
   // Line 12: DEF objects
-  if (lines.length > 12) {
-    const defTitle = normalizeArchiveName(lines[12]);
-    if (defTitle && !defTitle.startsWith("NULL.")) {
+  if (lvl.defName !== null) {
+    const defTitle = lvl.defName;
+    if (!isNullAssetName(defTitle)) {
       inferTerrain(doc);  // need gridSize before DEF
       const { boxes, models } = loadDefObjects(podIndex, getBytes, defTitle, doc.terrain.gridSize, doc.origin);
       doc.boxes.push(...boxes);
@@ -142,17 +153,17 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     Its .NAV is a different record shape and gets its own reader; see hb-nav-parser.js. Line 1
     is a Hellbender-only briefing file, `null.txt` in every TV and Fury3 level.
   */
-  if (doc.origin === "HB" && lines.length > 1) {
-    const txtName = normalizeArchiveName(lines[1]);
-    if (txtName && !txtName.startsWith("NULL.")) {
+  if (doc.origin === "HB" && lvl.briefingName !== null) {
+    const txtName = lvl.briefingName;
+    if (!isNullAssetName(txtName)) {
       const txtEntry = resolveLvlDataAsset(podIndex, txtName);
       if (txtEntry) doc.briefing = parseHbBriefing(getBytes(txtEntry));
     }
   }
 
-  if (lines.length > 7) {
-    const pupName = normalizeArchiveName(lines[7]);
-    if (pupName && !pupName.startsWith("NULL.")) {
+  if (lvl.pupName !== null) {
+    const pupName = lvl.pupName;
+    if (!isNullAssetName(pupName)) {
       const pupEntry = resolveLvlDataAsset(podIndex, pupName);
       if (pupEntry) {
         doc.powerups = parsePowerups(getBytes(pupEntry), doc.terrain.gridSize, doc.origin);
@@ -160,23 +171,23 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
       }
     }
   }
-  if (lines.length > 8) {
-    const aniName = normalizeArchiveName(lines[8]);
-    if (aniName && !aniName.startsWith("NULL.")) {
+  if (lvl.aniName !== null) {
+    const aniName = lvl.aniName;
+    if (!isNullAssetName(aniName)) {
       const aniEntry = resolveLvlDataAsset(podIndex, aniName);
       if (aniEntry) doc.animations = parseAnimations(getBytes(aniEntry));
     }
   }
-  if (lines.length > 9) {
-    const tdfName = normalizeArchiveName(lines[9]);
-    if (tdfName && !tdfName.startsWith("NULL.")) {
+  if (lvl.tdfName !== null) {
+    const tdfName = lvl.tdfName;
+    if (!isNullAssetName(tdfName)) {
       const tdfEntry = resolveLvlDataAsset(podIndex, tdfName);
       if (tdfEntry) doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize, doc.origin);
     }
   }
-  if (lines.length > 13) {
-    const navName = normalizeArchiveName(lines[13]);
-    if (navName && !navName.startsWith("NULL.")) {
+  if (lvl.navName !== null) {
+    const navName = lvl.navName;
+    if (!isNullAssetName(navName)) {
       const navEntry = resolveLvlDataAsset(podIndex, navName);
       if (navEntry) {
         const navBytes = getBytes(navEntry);
@@ -189,24 +200,24 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
 
   // Line 14: music, 15: fog, 16: LTE. Named from the line rather than from whether the file
   // resolves here; see sit-parser.js for the archive that made that distinction matter.
-  if (lines.length > 14) {
-    const musicName = normalizeArchiveName(lines[14]);
-    if (musicName && !musicName.startsWith("NULL.")) doc.musicName = archiveTitle(lines[14]);
+  if (lvl.musicLine !== null) {
+    const musicName = normalizeArchiveName(lvl.musicLine);
+    if (!isNullAssetName(musicName)) doc.musicName = archiveTitle(lvl.musicLine);
   }
-  if (lines.length > 16) {
-    const lteEntry = resolveAsset(podIndex, normalizeArchiveName(lines[16]));
+  if (lvl.lteName !== null) {
+    const lteEntry = resolveAsset(podIndex, lvl.lteName);
     if (lteEntry) {
-      doc.terrain.lteName = normalizeArchiveName(lines[16]);
+      doc.terrain.lteName = lvl.lteName;
       doc.terrain.lteData = getBytes(lteEntry);
     }
   }
 
   // Lighting
-  if (lines.length > 17) doc.sunVector = parseIntTriplet(lines[17]) ?? doc.sunVector;
-  if (lines.length > 18) doc.shadowIntensity = parseLeadingInt(lines[18]);
-  if (lines.length > 19) doc.sunPosition = parseIntTriplet(lines[19]) ?? doc.sunPosition;
-  if (lines.length > 20) doc.sunIntensity = parseLeadingInt(lines[20]);
-  if (lines.length > 21) doc.levelValue = parseLeadingInt(lines[21]);
+  if (lvl.lineCount > 17) doc.sunVector = lvl.sunVector ?? doc.sunVector;
+  if (lvl.shadowIntensity !== null) doc.shadowIntensity = lvl.shadowIntensity;
+  if (lvl.lineCount > 19) doc.sunPosition = lvl.sunPosition ?? doc.sunPosition;
+  if (lvl.sunIntensity !== null) doc.sunIntensity = lvl.sunIntensity;
+  if (lvl.levelValue !== null) doc.levelValue = lvl.levelValue;
 
   inferTerrain(doc);
 
@@ -232,24 +243,15 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-/** Palette slot the engine copies the sky gradient into, and the ACT colour it reads from. */
-const SKY_PALETTE_FIRST_SLOT = 240;
-const SKY_ACT_FIRST_COLOUR = 192;
-const SKY_GRADIENT_COLOURS = 16;
-
 /*
-  The 16-colour sky gradient from a level's line 11 ACT: colours 192-207, exactly the 0x30
-  bytes the engine reads after seeking 0x240 into the file. Null when the ACT is missing.
+  The 16-colour sky gradient from a level's line 11 ACT (see skyGradient in OpenPhotex). Null
+  when the ACT is missing.
 */
 function readSkyGradient(podIndex, getBytes, actLine) {
   const actName = normalizeArchiveName(actLine);
-  if (!actName || actName.startsWith("NULL.")) return null;
+  if (isNullAssetName(actName)) return null;
   const entry = resolveAsset(podIndex, actName);
-  if (!entry) return null;
-  const bytes = getBytes(entry);
-  const start = SKY_ACT_FIRST_COLOUR * 3;
-  const end = start + SKY_GRADIENT_COLOURS * 3;
-  return bytes.length >= end ? new Uint8Array(bytes.subarray(start, end)) : null;
+  return entry ? skyGradient(getBytes(entry)) : null;
 }
 
 /*
@@ -270,11 +272,7 @@ function loadPowerupModels(podIndex, getBytes, doc) {
 }
 
 function loadTexList(podIndex, getBytes, texEntry, doc) {
-  const text = new TextDecoder("latin1").decode(getBytes(texEntry));
-  const lines = toNonEmptyLines(text);
-  const count = parseInt(lines[0] ?? "0", 10);
-  for (let i = 0; i < count && i + 1 < lines.length; i++) {
-    const name = normalizeArchiveName(lines[i + 1]);
+  for (const name of parseTexList(getBytes(texEntry))) {
     const dataEntry = resolveTerrainTextureAsset(podIndex, name);
     const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
@@ -306,16 +304,9 @@ function resolveLvlDataAsset(podIndex, name) {
 }
 
 function parseTty(bytes, doc) {
-  const lines = toNonEmptyLines(new TextDecoder("latin1").decode(bytes));
-  const count = parseInt(lines[0] ?? "0", 10);
-  for (let i = 0; i < count && i + 1 < lines.length; i++) {
-    const line = lines[i + 1].toUpperCase();
-    const comma = line.indexOf(",");
-    if (comma < 0) continue;
-    const name = line.slice(0, comma);
-    const value = parseInt(line.slice(comma + 1), 10) || 0;
+  for (const { name, type, depth } of parseTtyEntries(bytes)) {
     const tex = doc.textures.find((t) => archiveTitle(t.name) === archiveTitle(name));
-    if (tex) { tex.type = Math.floor(value / 100); tex.depth = value % 100; }
+    if (tex) { tex.type = type; tex.depth = depth; }
   }
 }
 
@@ -340,44 +331,11 @@ function inferTerrain(doc) {
   }
 }
 
-function parseIntTriplet(value) {
-  const parts = value.split(",");
-  if (parts.length < 3) return null;
-  return [parseInt(parts[0].trim(), 10), parseInt(parts[1].trim(), 10), parseInt(parts[2].trim(), 10)];
-}
-
-function parseLeadingInt(value) { return parseInt((value ?? "").trim(), 10) || 0; }
-
 function prefixFromName(name) {
   const title = archiveTitle(name).toUpperCase();
   const dot = title.lastIndexOf(".");
   const base = dot >= 0 ? title.slice(0, dot) : title;
   return base.slice(0, Math.min(8, base.length));
-}
-
-function displayNameForLvl(lines, entryName) {
-  if (lines.length > 22) {
-    const candidate = lines[22].trim();
-    if (candidate && !candidate.startsWith("!") && !candidate.startsWith(";") && candidate.toLowerCase() !== "null") return candidate;
-  }
-  return prettyLvlName(entryName);
-}
-
-function inferLvlOrigin(lines) {
-  return lines.some((line) => line.trim() === "!New ground additions") ? "HB" : "TV/F3";
-}
-
-function prettyLvlName(name) {
-  const title = archiveTitle(name);
-  return title.endsWith(".LVL") ? title.slice(0, -4) : title;
-}
-
-function toLines(text) {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-}
-
-function toNonEmptyLines(text) {
-  return toLines(text).map((l) => l.trim()).filter(Boolean);
 }
 
 function createDoc(podComment, origin) {
