@@ -173,8 +173,18 @@ export function createPaletteResolver(podIndex, getBytes, origin, trackPalette) 
       }
     }
 
-    // 3+. Class-dependent, per the note above.
-    const sharedFirst = kind === "model" && SHARED_MODEL_PALETTE.has(origin);
+    /*
+      3+. Class-dependent, per the note above.
+
+      MTM2 terrain joins the model ranking. Every tile a track paints for itself ships its own
+      same-stem .ACT and never gets this far; one that has none is stock art shared between
+      tracks and drawn in METALCR2's grey ramp (slots 0-39), which the level's own palette
+      fills with unrelated colours. CRAZY98's BSTART0/1 start line and the RUNWAY5 sides of
+      its bridge came out blue and pale-blue speckle instead of white and grey asphalt.
+      MTM1's levels name their palette on purpose (Arizona's DEMO.ACT), so they keep theirs.
+    */
+    const sharedFirst = (kind === "model" && SHARED_MODEL_PALETTE.has(origin))
+      || (kind === "terrain" && origin === "MTM2");
     if (sharedFirst) {
       if (archiveMetal) take("archive:METALCR2.ACT", archiveMetal);
       else if (archiveVga) take("archive:VGA.ACT", archiveVga);

@@ -79,6 +79,21 @@ export function createWorldFrame(trackData) {
 
   const stepsToFeet = (steps) => steps * heightScale / UNITS_PER_FOOT_V;
 
+  // The .TTY value per cell (100 * ground type + depth), when the track assigns any.
+  const surface = terrain?.surface
+    ? (terrain.surface instanceof Uint16Array ? terrain.surface : new Uint16Array(terrain.surface))
+    : null;
+
+  /** The ground type under a point, as its .TTY value; 0 (Default) off the grid or untyped. */
+  function surfaceAtFeet(xFt, zFt) {
+    if (!surface) return 0;
+    const cx = Math.floor(xFt * UNITS_PER_FOOT_H / cellSize);
+    // The same cell convention as terrainHeightAtFeet: row cz is laid at (gridSize - cz).
+    const cz = Math.floor(gridSize - zFt * UNITS_PER_FOOT_H / cellSize);
+    if (cx < 0 || cz < 0 || cx >= gridSize || cz >= gridSize) return 0;
+    return surface[cx + cz * gridSize];
+  }
+
   /*
     Whether a cell is split along its other diagonal, (cx+1,cz) to (cx,cz+1). Only on a
     checkerboard terrain (CPR), and only where cx + cz is odd; see cellSplit in
@@ -223,6 +238,7 @@ export function createWorldFrame(trackData) {
 
     heightAtFeet,
     normalAtFeet,
+    surfaceAtFeet,
 
     /*
       Where a truck is DRAWN, which is not its position scaled.
@@ -252,6 +268,72 @@ export function createWorldFrame(trackData) {
         x: posFeet.x * UNITS_PER_FOOT_H,
         y: ground * UNITS_PER_FOOT_V + (posFeet.y - ground) * UNITS_PER_FOOT_H,
         z: posFeet.z * UNITS_PER_FOOT_H,
+      };
+    },
+
+    /*
+      Where a truck is drawn, as a whole pose, from where its wheel mounts are.
+
+      toSceneTruckPosition places the body origin from the ground under that one point, which
+      holds on the flat and fails on a slope and in the air:
+
+        - On a slope the ground under each wheel differs from the ground under the middle.
+          That difference is drawn at the terrain's 1.5 units per foot while the truck's own
+          tilt is drawn true at 2, so half of it is lost: climbing a steep hill, the rear
+          wheels were drawn feet into the hillside and the front ones above it.
+        - In the air every foot above the ground was drawn at 2 units instead of 1.5, so a
+          truck high over a valley was drawn a third higher than it was, and the moment the
+          ground fell away beneath it (off a crest, a cliff or a bridge deck) the drawn truck
+          leapt upward by half the drop while the simulated one did nothing of the kind.
+
+      So each mount is placed on its own: the terrain's scale for the world, plus the true
+      scale for its height above the ground up to `reach` feet, which is the wheel hanging
+      below it (the one part of the truck that has to meet the drawn ground). Above that the
+      extra is constant, so height in the air is drawn at the terrain's scale and a change of
+      ground underneath moves nothing. The drawn truck is then the rigid pose that best fits
+      the placed mounts: axes from the front, rear, left and right pairs, position from their
+      centroid.
+
+      @param mounts [{ world: {x,y,z} feet, body: {x,y,z} feet from the body origin,
+                       ground: feet, reach: feet, isFront, isLeft }]
+      @returns { position, right, up, back } in scene units, or null for fewer than 4 mounts
+    */
+    toSceneTruckPose(mounts) {
+      if (!mounts || mounts.length < 4) return null;
+      const H = UNITS_PER_FOOT_H, V = UNITS_PER_FOOT_V;
+      const placed = mounts.map((m) => {
+        const above = Math.min(Math.max(m.world.y - m.ground, 0), m.reach);
+        return { m, x: m.world.x * H, y: m.world.y * V + (H - V) * above, z: m.world.z * H };
+      });
+      const mid = (list) => {
+        const out = { x: 0, y: 0, z: 0 };
+        for (const p of list) { out.x += p.x; out.y += p.y; out.z += p.z; }
+        return { x: out.x / list.length, y: out.y / list.length, z: out.z / list.length };
+      };
+      const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+      const norm = (a) => { const l = Math.hypot(a.x, a.y, a.z) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; };
+      const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+      const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+      const pick = (fn) => placed.filter((p) => fn(p.m));
+      const front = pick((m) => m.isFront), rear = pick((m) => !m.isFront);
+      const left = pick((m) => m.isLeft), right = pick((m) => !m.isLeft);
+      if (!front.length || !rear.length || !left.length || !right.length) return null;
+      // The truck faces -Z, so forward runs rear to front and "back" is its +Z axis.
+      const forward = norm(sub(mid(front), mid(rear)));
+      const across = sub(mid(right), mid(left));
+      const r = norm(sub(across, { x: forward.x * dot(across, forward), y: forward.y * dot(across, forward), z: forward.z * dot(across, forward) }));
+      const up = norm(cross(r, forward));
+      const back = { x: -forward.x, y: -forward.y, z: -forward.z };
+      // Body origin: the placed centroid, less the mounts' own centroid turned into the pose.
+      const c = mid(placed);
+      const b = mid(mounts.map((m) => ({ x: m.body.x * H, y: m.body.y * H, z: m.body.z * H })));
+      return {
+        position: {
+          x: c.x - (r.x * b.x + up.x * b.y + back.x * b.z),
+          y: c.y - (r.y * b.x + up.y * b.y + back.y * b.z),
+          z: c.z - (r.z * b.x + up.z * b.y + back.z * b.z),
+        },
+        right: r, up, back,
       };
     },
 

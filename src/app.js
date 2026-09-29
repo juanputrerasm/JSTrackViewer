@@ -1,12 +1,13 @@
 import { TrackScene } from "./scene.js";
 import { WorkerClient } from "./worker-client.js";
-import { resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
-import { extractFirstPodFromZipBytes } from "./zip-utils.js";
+import { removePath, resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
+import { extractFirstPodFromZipBytes, extractPodsFromZipBytes } from "./zip-utils.js";
 import { UNITS_PER_FOOT_H } from "./drive/world-frame.js";
 
 const APP_TITLE = "JSTrackViewer";
 const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · L Lights · V Camera · R Reset";
-const OPFS_PATH = "track-viewer/current.pod";
+// Every track POD of the open archive; a ZIP can carry several. See _storePodsAndIndex.
+const TRACK_OPFS_DIR = "track-viewer/tracks";
 // Track and truck archives have separate OPFS paths and separate indexes in the worker.
 const TRUCK_OPFS_PATH = "track-viewer/truck.pod";
 const WORKER_URL = new URL("./worker/track-worker.js", import.meta.url);
@@ -15,9 +16,11 @@ export class TrackViewerApp {
   constructor() {
     this._worker = null;
     this._scene = null;
+    // One entry per track across every open POD: { archive, index (within it), name, fileName }.
     this._choices = [];
-    this._currentPodPath = null;
-    this._podFilename = "";
+    // The open PODs: { filename, opfsPath, source }. The worker indexes one at a time.
+    this._archives = [];
+    this._indexedArchive = null;
     this._podSource = "—";
     this._truckChoices = [];
     this._truckAssembly = null;
@@ -33,7 +36,7 @@ export class TrackViewerApp {
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
       racetrack: true, underground: true, terrainOverlap: true, lensflare: true,
-      sky: true, fog: true,
+      sky: true, fog: true, movingObjects: true,
     };
   }
 
@@ -85,7 +88,10 @@ export class TrackViewerApp {
       this._scene.clearTrack();
       this._setStatus("Temp cleared.");
       this._choices = [];
+      this._archives = [];
+      this._indexedArchive = null;
       this._hideTrackPicker();
+      this._hideTrackModal();
       this._clearTrackInfo();
     });
 
@@ -93,6 +99,15 @@ export class TrackViewerApp {
     doc.getElementById("load-track-btn").addEventListener("click", () => {
       const idx = parseInt(doc.getElementById("track-select").value, 10);
       if (!isNaN(idx)) this._loadTrackChoice(idx);
+    });
+
+    // The track chooser over the viewport; the top bar picker stays for switching later.
+    doc.getElementById("track-modal-close").addEventListener("click", () => this._hideTrackModal());
+    doc.getElementById("track-modal").addEventListener("click", (e) => {
+      if (e.target.id === "track-modal") this._hideTrackModal();
+    });
+    doc.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !doc.getElementById("track-modal").hidden) this._hideTrackModal();
     });
 
     // Test Drive: a truck comes from its own POD, so it has its own file input.
@@ -105,6 +120,21 @@ export class TrackViewerApp {
     });
     doc.getElementById("truck-select").addEventListener("change", () => this._selectTruck());
     doc.getElementById("drive-btn").addEventListener("click", () => this._toggleDrive());
+
+    /*
+      How courses are drawn: Smooth (the corners rounded off as a truck drives them), Joined
+      (the runs as stored, joined straight) or Traxx (each segment on its own and numbered, as
+      the track editor shows it). Remembered per browser.
+    */
+    const courseStyle = doc.getElementById("course-style-select");
+    try {
+      const saved = localStorage.getItem("jstv.courseStyle");
+      if (saved && [...courseStyle.options].some((o) => o.value === saved)) courseStyle.value = saved;
+    } catch { /* ignore */ }
+    courseStyle.addEventListener("change", () => {
+      this._scene.setCourseStyle(courseStyle.value);
+      try { localStorage.setItem("jstv.courseStyle", courseStyle.value); } catch { /* ignore */ }
+    });
 
     // Camera reset
     doc.getElementById("reset-cam-btn").addEventListener("click", () => {
@@ -141,6 +171,7 @@ export class TrackViewerApp {
       "tog-tunnels":   "tunnels",
       "tog-powerups":  "powerups",
       "tog-animate":   "animate",
+      "tog-moving":    "movingObjects",
       // Lives in the Test Drive panel rather than View Options: it shows what the simulation
       // collides with, which only means anything while driving.
       "tog-hitboxes":  "hitboxes",
@@ -222,6 +253,24 @@ export class TrackViewerApp {
       try { localStorage.setItem("jstv.weather", weatherSelect.value); } catch { /* ignore */ }
     });
 
+    /*
+      Sky style, beside the weather: the weather's sky photograph, the plain gradient MTM1 and
+      MTM2 draw with their textured sky off, or MTM1's own flat sky. Remembered like the
+      weather; Classic is only offered on an MTM1 track and reads as Textured elsewhere.
+    */
+    const skyStyleSelect = doc.getElementById("sky-style-select");
+    try {
+      const saved = localStorage.getItem("jstv.skyStyle");
+      if (saved && [...skyStyleSelect.options].some((o) => o.value === saved)) this._skyStyle = saved;
+    } catch { /* ignore */ }
+    this._skyStyle ??= "textured";
+    skyStyleSelect.value = this._skyStyle;
+    skyStyleSelect.addEventListener("change", () => {
+      this._skyStyle = skyStyleSelect.value;
+      this._applyWeather();
+      try { localStorage.setItem("jstv.skyStyle", this._skyStyle); } catch { /* ignore */ }
+    });
+
     const sunSlider = doc.getElementById("sun-intensity-slider");
     const sunLabel  = doc.getElementById("sun-intensity-value");
     sunSlider.addEventListener("input", () => {
@@ -300,8 +349,8 @@ export class TrackViewerApp {
     this._showLoading(`Reading ${file.name}…`);
     try {
       const buffer = await file.arrayBuffer();
-      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), file.name, source);
-      await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
+      const staged = await this._podsFromContainer(new Uint8Array(buffer), file.name, source);
+      await this._storePodsAndIndex(staged);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
       this._updateTruckButtons();
@@ -319,8 +368,8 @@ export class TrackViewerApp {
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const buffer = await resp.arrayBuffer();
       const name = nameFromUrl(url);
-      const staged = await this._podBytesFromContainer(new Uint8Array(buffer), name, "URL");
-      await this._storePodAndIndex(staged.bytes, staged.filename, staged.source);
+      const staged = await this._podsFromContainer(new Uint8Array(buffer), name, "URL");
+      await this._storePodsAndIndex(staged);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
       this._updateTruckButtons();
@@ -343,35 +392,79 @@ export class TrackViewerApp {
     };
   }
 
-  async _storePodAndIndex(bytes, filename, source) {
-    this._podFilename = filename;
-    this._podSource = source ?? "—";
+  /*
+    Every POD an opened file holds: the file itself, or each .POD inside a ZIP.
+
+    @returns {{ pods: {bytes, filename}[], source: string, container: string }}
+  */
+  async _podsFromContainer(bytes, filename, sourcePrefix = "Local file") {
+    if (!isZipName(filename)) {
+      return { pods: [{ bytes, filename }], source: sourcePrefix, container: filename };
+    }
+    this._setStatus("Extracting PODs from ZIP…");
+    this._showLoading("Extracting PODs from ZIP…");
+    const pods = await extractPodsFromZipBytes(bytes, filename);
+    return {
+      pods: pods.map(({ podBytes, podEntryName }) => ({
+        bytes: podBytes, filename: podNameFromZipEntry(filename, podEntryName),
+      })),
+      source: sourcePrefix === "URL" ? `URL ZIP: ${filename}` : `ZIP: ${filename}`,
+      container: filename,
+    };
+  }
+
+  /*
+    Store each POD, list the tracks in every one of them, and offer them all.
+
+    The worker holds one indexed POD at a time, so each is indexed in turn to list its tracks,
+    and indexed again when a track from it is loaded (see _loadTrackChoice). Indexing reads only
+    the directory, so switching between the PODs of a pack costs next to nothing. A POD with no
+    track in it, a truck or a sound pack riding along in the ZIP, is simply left out.
+  */
+  async _storePodsAndIndex({ pods, source, container }) {
     this._setStatus("Writing to temp storage…");
     await resetSessionFolder("track-viewer");
-    await writeBytesToFile(OPFS_PATH, bytes);
-    this._currentPodPath = OPFS_PATH;
-
-    this._setStatus("Indexing POD…");
-    const { comment, entryCount } = await this._worker.call("indexPod", { opfsPodPath: OPFS_PATH });
-    this._setStatus(`POD indexed: ${entryCount} entries.`);
+    await removePath(TRACK_OPFS_DIR);
     this._scene.clearTrack();
     this._clearTrackInfo();
     this._hideTrackPicker();
+    this._hideTrackModal();
+    this._archives = [];
+    this._choices = [];
+    this._indexedArchive = null;
 
-    const { choices } = await this._worker.call("listTrackChoices", {});
-    this._choices = choices;
-
-    if (choices.length === 0) {
-      this._setStatus("No tracks found in POD.");
-      return;
+    for (let i = 0; i < pods.length; i++) {
+      const { bytes, filename } = pods[i];
+      const opfsPath = `${TRACK_OPFS_DIR}/pod-${i}.pod`;
+      await writeBytesToFile(opfsPath, bytes);
+      this._setStatus(`Indexing ${filename}…`);
+      const archive = {
+        filename, opfsPath,
+        source: pods.length > 1 ? `${source} / ${filename}` : source,
+      };
+      const { entryCount } = await this._worker.call("indexPod", { opfsPodPath: opfsPath });
+      this._indexedArchive = archive;
+      const { choices } = await this._worker.call("listTrackChoices", {});
+      this._setStatus(`${filename}: ${entryCount} entries, ${choices.length} track(s).`);
+      if (!choices.length) continue;
+      this._archives.push(archive);
+      for (const choice of choices) {
+        this._choices.push({ archive, index: choice.index, name: choice.name, fileName: choice.fileName ?? "" });
+      }
     }
 
-    this._populateTrackPicker(choices, filename);
+    if (this._choices.length === 0) {
+      this._setStatus(`No tracks found in ${container}.`);
+      throw new Error(`No tracks found in ${container}.`);
+    }
 
-    if (choices.length === 1) {
+    this._populateTrackPicker();
+
+    if (this._choices.length === 1) {
       await this._loadTrackChoice(0);
     } else {
-      this._setStatus(`Found ${choices.length} tracks. Choose one and click Load Track.`);
+      this._setStatus(`Found ${this._choices.length} tracks. Choose one to load.`);
+      this._showTrackModal(container);
     }
   }
 
@@ -379,13 +472,20 @@ export class TrackViewerApp {
     this._lastChoiceIndex = choiceIndex;
     const choice = this._choices[choiceIndex];
     if (!choice) return;
+    this._hideTrackModal();
+    this._doc.getElementById("track-select").value = String(choiceIndex);
 
     this._stopDrivingForChange();
     this._setStatus(`Loading "${choice.name}"…`);
     this._showLoading(`Loading ${choice.name}…`);
     try {
+      if (this._indexedArchive !== choice.archive) {
+        await this._worker.call("indexPod", { opfsPodPath: choice.archive.opfsPath });
+        this._indexedArchive = choice.archive;
+      }
+      this._podSource = choice.archive.source ?? "—";
       const result = await this._worker.call("loadTrack", {
-        choiceIndex,
+        choiceIndex: choice.index,
         heightScale: this._heightScale,
       });
       this._renderFlags.checkpoints = !["MTM1", "MTM2", "EVO1", "EVO2", "CPR"].includes(result.origin);
@@ -395,6 +495,7 @@ export class TrackViewerApp {
       this._renderFlags.terrainOverlap = ["MTM2", "EVO1", "EVO2"].includes(result.origin);
       this._doc.getElementById("tog-terrain-overlap").checked = this._renderFlags.terrainOverlap;
       this._scene.setTrack(result, this._renderFlags, this._heightScale);
+      this._doc.getElementById("sidebar").classList.remove("no-track");
       if (this._truckAssembly) {
         this._scene.setDriveTruck(this._truckAssembly);
       }
@@ -630,6 +731,8 @@ export class TrackViewerApp {
     if (status.manual !== undefined) rows.push(["Gearbox", status.manual ? "Manual (A/Z shift)" : "Automatic"]);
     if (status.lights !== undefined && status.lights !== null) rows.push(["Lights", status.lights ? "On (L)" : "Off (L)"]);
     if (status.rpm !== undefined) rows.push(["Engine", `${status.rpm.toFixed(0)} rpm`]);
+    // The ground type under the tires (the track's .TTY); absent in the air.
+    if (status.surface !== undefined) rows.push(["Surface", status.surface ?? "Airborne"]);
     if (status.view) rows.push(["View", status.view]);
 
     /*
@@ -659,22 +762,70 @@ export class TrackViewerApp {
     dl.innerHTML = `<dt>${label}</dt><dd>${value}</dd>`;
   }
 
-  _populateTrackPicker(choices, filename) {
+  /** The top bar picker, grouped by POD when the archive held more than one. */
+  _populateTrackPicker() {
     const panel = this._doc.getElementById("track-picker-panel");
     const select = this._doc.getElementById("track-select");
-    select.innerHTML = "";
-    for (let i = 0; i < choices.length; i++) {
-      const opt = document.createElement("option");
+    select.replaceChildren();
+    const grouped = this._archives.length > 1;
+    let group = null;
+    this._choices.forEach((choice, i) => {
+      if (grouped && group?.label !== choice.archive.filename) {
+        group = this._doc.createElement("optgroup");
+        group.label = choice.archive.filename;
+        select.appendChild(group);
+      }
+      const opt = this._doc.createElement("option");
       opt.value = i;
-      opt.textContent = choices[i].name || `Track ${i + 1}`;
-      select.appendChild(opt);
-    }
-    panel.hidden = false;
+      opt.textContent = choice.name || `Track ${i + 1}`;
+      (group ?? select).appendChild(opt);
+    });
+    panel.hidden = this._choices.length < 2;
   }
 
   _hideTrackPicker() {
     this._doc.getElementById("track-picker-panel").hidden = true;
-    this._doc.getElementById("track-select").innerHTML = "";
+    this._doc.getElementById("track-select").replaceChildren();
+  }
+
+  /*
+    The track chooser over the viewport, for an archive with more than one track: every track
+    of every POD, under its POD's name when there are several, with the file it comes from.
+  */
+  _showTrackModal(container) {
+    const list = this._doc.getElementById("track-modal-list");
+    list.replaceChildren();
+    const grouped = this._archives.length > 1;
+    let heading = null;
+    this._doc.getElementById("track-modal-source").textContent = grouped
+      ? `${container} holds ${this._archives.length} PODs with ${this._choices.length} tracks.`
+      : `${container} holds ${this._choices.length} tracks.`;
+    this._choices.forEach((choice, i) => {
+      if (grouped && heading !== choice.archive.filename) {
+        heading = choice.archive.filename;
+        const h = this._doc.createElement("h3");
+        h.textContent = heading;
+        list.appendChild(h);
+      }
+      const button = this._doc.createElement("button");
+      button.type = "button";
+      const name = this._doc.createElement("span");
+      name.textContent = choice.name || `Track ${i + 1}`;
+      const file = this._doc.createElement("span");
+      file.textContent = choice.fileName;
+      button.append(name, file);
+      button.addEventListener("click", () => this._loadTrackChoice(i));
+      list.appendChild(button);
+    });
+    this._doc.getElementById("track-modal").hidden = false;
+    list.querySelector("button")?.focus();
+  }
+
+  _hideTrackModal() {
+    const modal = this._doc.getElementById("track-modal");
+    if (modal.hidden) return;
+    modal.hidden = true;
+    this._doc.getElementById("viewport")?.focus();
   }
 
   /*
@@ -881,13 +1032,25 @@ export class TrackViewerApp {
       list.append(label);
     }
     box.hidden = courses.length === 0;
+    this._scene.setCourseStyle(this._doc.getElementById("course-style-select").value);
   }
 
   _applyWeather() {
     const select = this._doc.getElementById("weather-select");
     this._scene.setWeather(select.value);
+    this._scene.setSkyStyle(this._skyStyle);
     const applies = this._scene.weatherApplies();
     this._doc.getElementById("weather-row").hidden = !applies;
+    this._doc.getElementById("sky-style-row").hidden = !applies;
+    const classic = this._doc.getElementById("sky-style-classic");
+    const classicApplies = this._scene.classicSkyApplies();
+    classic.hidden = !classicApplies;
+    classic.disabled = !classicApplies;
+    // Shown as Textured where Classic has nothing to draw, without forgetting the choice.
+    this._doc.getElementById("sky-style-select").value =
+      this._skyStyle === "classic" && !classicApplies ? "textured" : this._skyStyle;
+    // The Classic sky brings fog with it, so the Fog toggle comes and goes with it.
+    if (this._scene._trackData) this._applyLayerAvailability(this._scene.layerPresence());
   }
 
   _clearTrackInfo() {
@@ -898,6 +1061,8 @@ export class TrackViewerApp {
     this._doc.getElementById("track-stats").innerHTML = "<dt>Status</dt><dd>No track loaded.</dd>";
     this._applyLayerAvailability(null);
     this._doc.getElementById("weather-row").hidden = true;
+    this._doc.getElementById("sky-style-row").hidden = true;
+    this._doc.getElementById("sidebar").classList.add("no-track");
     this._doc.getElementById("course-toggle-list")?.replaceChildren();
     const courseToggles = this._doc.getElementById("course-toggles");
     if (courseToggles) courseToggles.hidden = true;

@@ -58,3 +58,41 @@ test("Laguna: the walkway's shadowed road quads decode as dark road, not tan dir
     assert.ok(Math.abs(luma - shadowed) < 10, `${name} ${luma.toFixed(0)} vs neighbour ${shadowed.toFixed(0)}`);
   }
 });
+
+/* ── Which palette a terrain tile without its own .ACT gets ─────────────── */
+
+import { createPaletteResolver } from "../src/worker/palette-resolver.js";
+import { PALETTES } from "../src/shared/bundled-palettes.js";
+
+const CRAZY98_POD = `${process.env.HOME}/games/mtm2/CRAZY98.POD`;
+
+test("an MTM2 terrain tile with no .ACT of its own takes the game palette, not the level's", () => {
+  const levelAct = new Uint8Array(768).fill(200);
+  const podIndex = { entries: [{ name: "ART\\TILE.RAW", normalizedName: "ART/TILE.RAW", title: "TILE.RAW" }] };
+  const bundled = new Uint8Array(PALETTES.metalcr2Mtm1);
+  const mtm2 = createPaletteResolver(podIndex, () => null, "MTM2", levelAct);
+  assert.deepEqual([...mtm2.paletteFor("TILE.RAW", null, "terrain")], [...bundled]);
+  // MTM1 levels name the palette their tiles were drawn in, so theirs still wins.
+  const mtm1 = createPaletteResolver(podIndex, () => null, "MTM1", levelAct);
+  assert.equal(mtm1.paletteFor("TILE.RAW", null, "terrain"), levelAct);
+});
+
+test("CRAZY98's start line and bridge sides decode white and grey, not blue", {
+  skip: hasStockPod(CRAZY98_POD) ? false : `no local MTM2 install at ${CRAZY98_POD}`,
+}, () => {
+  const pod = indexStockPod(CRAZY98_POD);
+  const find = (title) => pod.podIndex.entries.find((e) => e.title === title);
+  const level = pod.getBytes(find("CRAZY98.ACT"));
+  const palettes = createPaletteResolver(pod.podIndex, pod.getBytes, "MTM2", level);
+  const mean = (name) => {
+    const { rgba } = decodeRawTexture(pod.getBytes(find(name)), palettes.paletteFor(name, null, "terrain"), name);
+    const sum = [0, 0, 0];
+    for (let i = 0; i < rgba.length; i += 4) for (let c = 0; c < 3; c++) sum[c] += rgba[i + c];
+    return sum.map((v) => v / (rgba.length / 4));
+  };
+  // Grey: no channel more than a few steps from the others.
+  for (const name of ["BSTART0.RAW", "BSTART1.RAW", "RUNWAY5.RAW"]) {
+    const [r, g, b] = mean(name);
+    assert.ok(Math.max(r, g, b) - Math.min(r, g, b) < 8, `${name} mean ${[r, g, b].map(Math.round)}`);
+  }
+});

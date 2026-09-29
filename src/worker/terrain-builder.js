@@ -95,6 +95,13 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
   const uvs = new Float32Array(vertexCount * 2);
   const uvsOverlap = new Float32Array(vertexCount * 2);
   /*
+    What each cell is made of, for drive mode: the .TTY value of the texture painted on it,
+    100 * ground type + depth (Traxx's TrackPODFile.cpp ParseTTYFile, "Texture Types.txt").
+    Only built when the track assigns any type at all, which every stock MTM2 track does.
+  */
+  const textureSurfaces = (textures ?? []).map((tex) => (tex?.type ?? 0) * 100 + (tex?.depth ?? 0));
+  const surface = textureSurfaces.some((value) => value > 0) ? new Uint16Array(cellCount) : null;
+  /*
     Baked ground light, from the track's .LTE, for the MTM family.
 
     Traxx's Lighting dialog bakes the terrain's shading into the LTE rather than leaving it to
@@ -175,6 +182,7 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
 
       // UV from CLR texture index (with mirror + rotation support).
       const { texIdx, rot, mirror } = readCell(clrData, cell, clrBytesPerCell, textureCount);
+      if (surface) surface[cell] = textureSurfaces[texIdx] ?? 0;
       const rect = uvRects[texIdx] ?? uvRects[0];
       const u0 = rect.x / atlasWidth;
       const u1 = (rect.x + rect.w) / atlasWidth;
@@ -242,12 +250,17 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     normals: normals.buffer,
     uvs: uvs.buffer,
     uvsOverlap: uvsOverlap.buffer,
+    surface: surface ? surface.buffer : null,
+    textureSurfaces,
     lights: lights ? lights.buffer : null,
     indices: indices.buffer,
     // A reusing call must not hand back an atlas it does not own; see the note above.
     atlas: terrain.reusesAtlas === true ? null : {
       rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
       textureCount, tileCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
+      // The legacy tile each slot stands for, which sets its 2px overlap inset; ground boxes
+      // crop their faces by the same amount as the terrain.
+      slotLegacySides: (decodedSlots ?? []).map((slot) => slot?.legacySide ?? sourceTileSize),
       animations: atlasAnimations,
     },
   };

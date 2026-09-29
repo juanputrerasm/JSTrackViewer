@@ -29,6 +29,7 @@
   the SHAPE of the game's model with plausible numbers in it. See params/mtm2-feel.js.
 */
 import { GRAVITY, MTM2_FEEL, TRUCK_MASS_SLUGS } from "./params/mtm2-feel.js";
+import { surfaceOf } from "./surfaces.js";
 
 const WHEEL_ORDER = ["faxle.rtire", "faxle.ltire", "raxle.rtire", "raxle.ltire"];
 
@@ -201,6 +202,54 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     const support = colliders.supportAt(x, z, y);
     return support !== null && support > terrain ? support : terrain;
   };
+  /*
+    How far a wheel's mount is from the ground it would touch, along the axis its suspension
+    works on, and which way the ground pushes back.
+
+    Two measurements, and the nearer wins:
+
+      plane      the terrain triangle under the axle, measured along its normal where it is
+                 steep. Exact for a wheel on a uniform slope.
+      footprint  the ground across the tire's own diameter, fore and aft of the axle. A single
+                 ray under the axle cannot see a hill that steepens ahead, a crest or a step:
+                 the front of the tire went into the hillside for a few frames before the axle
+                 reached it, and the correction then shoved the truck out. Sampling the tire's
+                 length finds the point the rim actually meets: a sample d ahead touches the
+                 tire when the axle is h(d) + sqrt(r^2 - d^2) above ground, so the highest of
+                 those is the ground the wheel stands on. On a plane it agrees with the other
+                 measurement; it only wins where the ground curves up under the tire.
+
+    Objects keep the plane measurement against their filtered top (see the climb limit in
+    step), because their edges are the one place a wheel must not snap upward.
+  */
+  const FOOTPRINT_SAMPLES = [-0.95, -0.5, 0.5, 0.95];
+  function wheelContact(wheel, mountWorld, up, forward, groundY, terrainY) {
+    const terrainNormal = frame.normalAtFeet(mountWorld.x, mountWorld.z);
+    const onTerrain = groundY <= terrainY + 1e-6;
+    const steepTerrain = onTerrain && terrainNormal.y < 0.8;
+    const contactAxis = steepTerrain ? dot(up, terrainNormal) : up.y;
+    if (!(up.y > UPRIGHT_ENOUGH && contactAxis > UPRIGHT_ENOUGH)) {
+      return { distance: Infinity, normal: up, steep: false };
+    }
+    let distance = (mountWorld.y - groundY) * (steepTerrain ? terrainNormal.y : 1) / contactAxis;
+    if (onTerrain) {
+      const flat = Math.hypot(forward.x, forward.z);
+      if (flat > 1e-3) {
+        const fx = forward.x / flat, fz = forward.z / flat;
+        const r = wheel.radius;
+        let footprint = terrainY;
+        for (const k of FOOTPRINT_SAMPLES) {
+          const d = k * r;
+          const h = frame.heightAtFeet(mountWorld.x + fx * d, mountWorld.z + fz * d);
+          footprint = Math.max(footprint, h + Math.sqrt(r * r - d * d) - r);
+        }
+        const fromFootprint = (mountWorld.y - footprint) / up.y;
+        if (fromFootprint < distance) distance = fromFootprint;
+      }
+    }
+    return { distance, normal: steepTerrain ? terrainNormal : up, steep: steepTerrain, terrainNormal };
+  }
+
   const wheels = (assembly.wheels ?? []).map((wheel, index) => ({
     index,
     key: wheel.key,
@@ -216,6 +265,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     compression: 0,
     lastCompression: 0,
     onGround: false,
+    // What the tire is on; see surfaces.js.
+    surface: surfaceOf(0),
     spinAngle: 0,
     spinRate: 0,
     steerAngle: 0,
@@ -392,14 +443,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         Dividing by a clamped up.y on a rolled truck invents enormous compression out of a
         wheel that is in the air, and the suspension then fires the truck off the scenery.
       */
-      const restCentre = mountWorld;
-      const terrainNormal = frame.normalAtFeet(mountWorld.x, mountWorld.z);
-      const steepTerrain = groundY <= terrainY + 1e-6 && terrainNormal.y < 0.8;
-      const contactAxis = steepTerrain ? dot(up, terrainNormal) : up.y;
-      const contactDistance = up.y > UPRIGHT_ENOUGH && contactAxis > UPRIGHT_ENOUGH
-        ? (restCentre.y - groundY) * (steepTerrain ? terrainNormal.y : 1) / contactAxis
-        : Infinity;
-      const compression = wheel.radius - contactDistance;
+      const contact = wheelContact(wheel, mountWorld, up, forward, groundY, terrainY);
+      const compression = wheel.radius - contact.distance;
 
       wheel.lastCompression = wheel.compression;
       wheel.compression = Math.max(0, Math.min(params.suspension[wheel.isFront ? "front" : "rear"].maxcompr, compression));
@@ -411,6 +456,16 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         continue;
       }
       groundedCount++;
+
+      /*
+        The ground type under the tire (surfaces.js): the terrain cell's, or the top of the
+        ground box it stands on. Any other object top is firm, so it is Default.
+      */
+      const onObject = groundY > terrainY + 1e-6;
+      wheel.surface = surfaceOf(onObject
+        ? (colliders?.surfaceAt?.(mountWorld.x, mountWorld.z, mountWorld.y) ?? 0)
+        : (frame.surfaceAtFeet?.(mountWorld.x, mountWorld.z) ?? 0));
+      const ground = wheel.surface;
 
       const axle = params.suspension[wheel.isFront ? "front" : "rear"];
       const cornerMass = mass / wheels.length;
@@ -435,7 +490,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
       const springForce = axle.spring_rate * wheel.compression + damping * rate;
       // A suspension can push but not pull: past full droop the wheel simply hangs.
       const normalForce = Math.max(0, springForce);
-      const suspension = scale(steepTerrain ? terrainNormal : up, normalForce);
+      const suspension = scale(contact.normal, normalForce);
 
       // Velocity of this contact patch, world then in the wheel's own frame.
       const arm = sub(add(state.ipos, rotate(q, sub(wheel.mount, cg))), state.ipos);
@@ -477,20 +532,33 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
       const slipCompliance = dt * ((wheel.radius * wheel.radius) / wheelInertia + 1 / cornerMass);
       const nonOvershoot = Math.abs(slipVelocity) / Math.max(1e-9, slipCompliance);
 
-      const curveForce = saturate(slipRatio, params.tire.peakSlipRatio) * params.tire.CF_long * normalForce;
+      const cfLong = params.tire.CF_long * ground.grip;
+      const cfLat = params.tire.CF_lat * ground.grip;
+      const curveForce = saturate(slipRatio, params.tire.peakSlipRatio) * cfLong * normalForce;
       const longForce = Math.sign(curveForce) * Math.min(Math.abs(curveForce), nonOvershoot);
 
       // Lateral: the angle between where the wheel points and where it is going.
       const slipAngle = Math.atan2(-vLateral, Math.max(2, Math.abs(vForward)));
-      const latForce = saturate(slipAngle, params.tire.peakSlipAngle) * params.tire.CF_lat * normalForce;
+      const latForce = saturate(slipAngle, params.tire.peakSlipAngle) * cfLat * normalForce;
 
       // Both live inside one friction circle, or a spinning wheel would still corner.
-      const limit = Math.max(params.tire.CF_long, params.tire.CF_lat) * normalForce;
+      const limit = Math.max(cfLong, cfLat) * normalForce;
       const combined = Math.hypot(longForce, latForce);
       const trim = combined > limit && combined > 0 ? limit / combined : 1;
 
       const traction = add(scale(wheelForward, longForce * trim), scale(wheelRight, latForce * trim));
-      const rolling = scale(wheelForward, -Math.sign(vForward) * params.tire.rollingResistance * normalForce);
+      /*
+        Rolling resistance, and what the ground adds to it: soft ground in proportion to how
+        deep the tire digs in, water also in proportion to speed. Capped at what would stop
+        this corner of the truck within the step, so deep mud holds a parked truck still
+        rather than rocking it back and forth across zero.
+      */
+      const resistance = normalForce * (
+        params.tire.rollingResistance * ground.roll
+        + ground.sink * ground.depth
+        + ground.drag * ground.depth * Math.abs(vForward) / 1000);
+      const rollingForce = Math.min(resistance, Math.abs(vForward) * cornerMass / dt);
+      const rolling = scale(wheelForward, -Math.sign(vForward) * rollingForce);
 
       const total = add(add(suspension, traction), rolling);
       force = add(force, total);
@@ -910,17 +978,13 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         */
         const groundY = wheel.support ?? groundUnder(mountWorld.x, mountWorld.z, mountWorld.y);
         const terrainY = frame.heightAtFeet(mountWorld.x, mountWorld.z);
-        const terrainNormal = frame.normalAtFeet(mountWorld.x, mountWorld.z);
-        const steepTerrain = groundY <= terrainY + 1e-6 && terrainNormal.y < 0.8;
-        const axis = steepTerrain ? dot(up, terrainNormal) : up.y;
-        if (axis <= UPRIGHT_ENOUGH) continue;
-        const contactDistance = (mountWorld.y - groundY) *
-          (steepTerrain ? terrainNormal.y : 1) / axis;
+        const contact = wheelContact(wheel, mountWorld, up, rotate(q, v3(0, 0, -1)), groundY, terrainY);
+        if (!Number.isFinite(contact.distance)) continue;
         const axle = params.suspension[wheel.isFront ? "front" : "rear"];
-        const excess = (wheel.radius - contactDistance) - axle.maxcompr;
+        const excess = (wheel.radius - contact.distance) - axle.maxcompr;
         if (excess > deepest) {
           deepest = excess;
-          correctionNormal = steepTerrain ? terrainNormal : v3(0, 1, 0);
+          correctionNormal = contact.steep ? contact.terrainNormal : v3(0, 1, 0);
         }
       }
     }
@@ -1234,8 +1298,24 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         compression: w.compression,
         steering_angle: w.steerAngle,
         spinAngle: w.spinAngle,
+        surface: w.onGround ? w.surface.name : null,
       })),
     };
+  }
+
+  /**
+   * Each wheel mount in the world and on the body, both in feet, for the renderer to fit the
+   * drawn truck to; see world-frame's toSceneTruckPose.
+   */
+  function mountPoints() {
+    const q = state.orientation;
+    return wheels.map((w) => ({
+      world: add(state.ipos, rotate(q, sub(w.mount, cg))),
+      body: w.mount,
+      radius: w.radius,
+      isFront: w.isFront,
+      isLeft: w.isLeft,
+    }));
   }
 
   return {
@@ -1246,6 +1326,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     reset,
     step,
     readState,
+    mountPoints,
     /** Manual gearbox on or off; switching back to automatic lets it pick the gear again. */
     setManual(manual) { state.manual = manual === true; },
     get manual() { return state.manual; },

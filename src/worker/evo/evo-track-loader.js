@@ -157,6 +157,10 @@ export function loadEvoTrack(podIndex, getBytes, sitEntry) {
       castShadowOnMe: box.castShadowOnMe,
       timePerFrame: box.timePerFrame,
       parent: box.parent,
+      instanceId: box.instanceId,
+      // Evo 1 carries MTM's type number and bvel; a type 10 box moves. See moving-objects.js.
+      type: box.boxType === 10 ? 10 : undefined,
+      bvel: box.bvel,
       /*
         Evo 2's CNonCollideFacing is the class the engine yaws toward the camera. The viewer
         already has a billboard policy for MTM type-8 props, so the class maps onto it rather

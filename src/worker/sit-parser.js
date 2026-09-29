@@ -43,6 +43,11 @@ export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
   return doc;
 }
 
+/** Sky gradient: ACT colours 192-207 go into palette slots 240-255; see parseLvlSection. */
+const SKY_PALETTE_FIRST_SLOT = 240;
+const SKY_GRADIENT_START = 192 * 3;
+const SKY_GRADIENT_END = SKY_GRADIENT_START + 16 * 3;
+
 function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   const lvlText = new TextDecoder("latin1").decode(getBytes(lvlEntry));
   const lines = toLines(lvlText);
@@ -86,7 +91,17 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
     if (ttyEntry) parseTty(getBytes(ttyEntry), doc);
   }
 
-  // Sky texture (line 10 = RAW, line 11 = ACT)
+  /*
+    Sky texture (line 10 = RAW, line 11 = ACT).
+
+    MTM1 draws its sky the way Terminal Velocity does, as a flat textured ceiling recoloured
+    per level: ALIENSKY.RAW and NEWSKY.RAW only use palette slots 244-251, which are black in
+    every .ACT, and the level's line 11 ACT (EARTHSKY, SUNSET) supplies colours 192-207 for
+    slots 240-255. Decoding the RAW through that ACT directly gives a black square. So when
+    the ACT carries those sixteen colours they are copied into place, exactly as lvl-parser.js
+    does for TV, and the last of them is the horizon colour. `classicSky` records that, and
+    the scene offers it as MTM1's Classic sky.
+  */
   if (lines.length > 10) {
     const skyRawName = normalizeArchiveName(lines[10]);
     if (skyRawName && !skyRawName.startsWith("NULL") && skyRawName.endsWith(".RAW")) {
@@ -94,11 +109,21 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
       if (skyEntry) {
         const skyActName = lines.length > 11 ? normalizeArchiveName(lines[11]) : null;
         const skyActEntry = skyActName ? resolveAsset(podIndex, skyActName) : null;
-        doc.skyTexture = {
-          name: skyRawName,
-          data: getBytes(skyEntry),
-          actData: skyActEntry ? getBytes(skyActEntry) : doc.palette,
-        };
+        const skyActData = skyActEntry ? getBytes(skyActEntry) : null;
+        const skyData = getBytes(skyEntry);
+        // Only a sky drawn entirely in the gradient slots is recoloured; any other RAW keeps its ACT.
+        const gradientSky = skyData.length > 0 && skyData.every((index) => index >= SKY_PALETTE_FIRST_SLOT);
+        const gradient = gradientSky && skyActData?.length >= SKY_GRADIENT_END
+          ? new Uint8Array(skyActData.subarray(SKY_GRADIENT_START, SKY_GRADIENT_END))
+          : null;
+        let actData = skyActData ?? doc.palette;
+        if (gradient) {
+          actData = new Uint8Array(768);
+          if (doc.palette) actData.set(doc.palette.subarray(0, 768));
+          actData.set(gradient, SKY_PALETTE_FIRST_SLOT * 3);
+          doc.classicSky = { gradient: [...gradient], horizon: [...gradient.subarray(45, 48)] };
+        }
+        doc.skyTexture = { name: skyRawName, data: skyData, actData };
       }
     }
   }
@@ -235,6 +260,7 @@ function parseSitMetadata(sitLines, doc) {
   // Boxes (*** Ramps *** and *** Boxes ***)
   parseBoxSection(sitLines, "*** Ramps ***", doc, true);
   parseBoxSection(sitLines, "*** Boxes ***", doc, false);
+  parseTopCrushSection(sitLines, doc);
 
   // Courses
   parseCourses(sitLines, doc);
@@ -311,6 +337,61 @@ function parseBoxBlock(lines, blockStart, isRamp, doc) {
   if (bvelIdx >= 0 && bvelIdx + 1 < lines.length) box.bvel = parseFloatTriplet(lines[bvelIdx + 1]);
 
   return box;
+}
+
+/*
+  *** Top Crush *** - the cars a truck flattens by driving over them.
+
+  Traxx writes these as their own section rather than as boxes (TrackPODFile.cpp:2594-2680),
+  and each record is two objects:
+
+    ipos / modelName          the part that never changes (MTM1's WREC2.BIN, the chassis)
+    ipos2 / cabModelName      an animated BIN with two frames, before and after crushing,
+                              which the game morphs between the further the object is crushed
+
+  ipos2 is ipos plus the editor's crush offset, so the cab sits where the author put it on the
+  body. Both are ordinary world triplets. The rest (mass, bvel, p,q,r) is the usual physics
+  state and carries zeros in every stock record, so it is not kept.
+
+  Each part becomes a box of type BOXTYPE_CRUSH (98, Include/TrackPODBox.h). The cab carries
+  `crushRole: "cab"`, which is what tells the scene to drive its frames from the crush amount
+  instead of playing them as a loop, and drive mode to make it a collider that gives way.
+*/
+const BOXTYPE_CRUSH = 98;
+
+function parseTopCrushSection(lines, doc) {
+  const section = indexOfLine(lines, "*** Top Crush ***");
+  if (section < 0 || section + 1 >= lines.length) return;
+  const count = parseLeadingInt(lines[section + 1]);
+  const sectionEnd = indexOfLine(lines, "*** Course ***");
+  const limit = sectionEnd > section ? sectionEnd : lines.length;
+  let cursor = section + 2;
+  for (let i = 0; i < count; i++) {
+    cursor = nextBlockStart(lines, cursor);
+    if (cursor < 0 || cursor >= limit) return;
+    const blockEnd = Math.min(limit, nextBlockStart(lines, cursor + 1) >= 0 ? nextBlockStart(lines, cursor + 1) : limit);
+    const valueAfter = (label) => {
+      for (let k = cursor + 1; k < blockEnd - 1; k++) if (lines[k].trim() === label) return lines[k + 1].trim();
+      return null;
+    };
+    const ipos = valueAfter("ipos");
+    const ipos2 = valueAfter("ipos2") ?? ipos;
+    const angles = parseFloatTriplet(valueAfter("theta,phi,psi") ?? "0,0,0");
+    const modelOf = (value) => {
+      const name = value ? normalizeArchiveName(value) : "";
+      return name && !name.startsWith("NULL") ? name : "";
+    };
+    const common = {
+      theta: angles[0], phi: angles[1], psi: angles[2],
+      length: 64, width: 64, height: 64, mass: 0, type: BOXTYPE_CRUSH, flags: 0,
+      checkpointSequence: -1, crushGroup: i,
+    };
+    if (ipos) {
+      doc.boxes.push({ ...common, position: parseLegacyWorldTriplet(ipos), modelName: modelOf(valueAfter("modelName")), crushRole: "body" });
+      doc.boxes.push({ ...common, position: parseLegacyWorldTriplet(ipos2), modelName: modelOf(valueAfter("cabModelName")), crushRole: "cab" });
+    }
+    cursor = blockEnd;
+  }
 }
 
 function parseCourses(lines, doc) {

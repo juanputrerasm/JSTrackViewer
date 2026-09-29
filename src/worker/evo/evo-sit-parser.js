@@ -195,8 +195,9 @@ function parseBoxesV6(lines, start, sourceName) {
     const raw = lines[i];
     const trimmed = raw.trim();
     if (trimmed.startsWith("***")) break;
-    if (/^Box\s+\d+\s+of\s+\d+/i.test(trimmed)) {
-      current = { sourceClass: "Box", schemaVersion: 6, fields: {} };
+    const header = /^Box\s+(\d+)\s+of\s+\d+/i.exec(trimmed);
+    if (header) {
+      current = { sourceClass: "Box", schemaVersion: 6, instanceId: Number.parseInt(header[1], 10), fields: {} };
       boxes.push(current);
       continue;
     }
@@ -214,8 +215,10 @@ function parseBoxesV6(lines, start, sourceName) {
       case "timePerFrame":    current.fields.timePerFrame = value; i++; break;
       case "castShadowOnMe":  current.fields.castShadowOnMe = value; i++; break;
       case "priority":        current.fields.priority = value; i++; break;
+      // A type 10 box moves along its bvel, as MTM2's train does (THEHILL's are 70,0,0).
+      case "bvel":            current.fields.bvel = value; i++; break;
       // Physics and audio: consumed so the walk stays aligned, then dropped.
-      case "mass": case "bvel": case "p,q,r": i++; break;
+      case "mass": case "p,q,r": i++; break;
       case "sound effect entries": i += 2; break;
       default: break;
     }
@@ -320,6 +323,8 @@ function parseBoxesV7(lines, start, sourceName) {
         else if (field === "timePerFrame") box.fields.timePerFrame = value;
         else if (field === "castShadowOnMe") box.fields.castShadowOnMe = value;
         else if (field === "priority") box.fields.priority = value;
+        // CTrain's velocity, written in bvel's (x, height, z) order. Zero in every stock track.
+        else if (field === "trainVelocity") box.fields.bvel = value;
       }
       i++;
     }
@@ -349,9 +354,13 @@ function normalizeBox(box) {
   const orient = evoNumbers(box.fields.wOrient ?? "");
   const size = evoNumbers(box.fields.size ?? "");
   const [type, flags] = evoNumbers(box.fields.typeFlags ?? "");
+  const bvel = evoNumbers(box.fields.bvel ?? "");
   return {
     sourceClass: box.sourceClass,
     schemaVersion: box.schemaVersion,
+    // What a child's `parent` field refers to: the number in a v7 instance's opening brace.
+    instanceId: box.instanceId ?? null,
+    bvel: bvel.length === 3 ? bvel : null,
     name: box.fields.name ?? "",
     modelName: (box.fields.staticName ?? "").trim(),
     position: position.length === 3 ? position : [0, 0, 0],

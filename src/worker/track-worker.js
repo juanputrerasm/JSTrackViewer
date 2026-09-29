@@ -7,6 +7,7 @@ import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
 import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
 import { decodeHeightSample } from "../shared/terrain-height.js";
+import { resolveKeyframeModel } from "./keyframes.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -513,6 +514,10 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
         solid: m.solid === true, material: m.material ?? null, material2: m.material2 ?? null,
         positions: m.positions.buffer, normals: m.normals.buffer, uvs: m.uvs.buffer,
       })),
+      // Animated BINs only: every keyframe, first included, in the first frame's space.
+      keyframes: model.keyframes?.map((frame) => ({
+        meshes: frame.meshes.map((m) => ({ positions: m.positions.buffer, normals: m.normals.buffer })),
+      })) ?? null,
     };
   }
 
@@ -535,6 +540,8 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       cellSplit: doc.terrain.cellSplit ?? "fixed",
     } : null,
     skyTexture: skyTextureDecoded,
+    // MTM1's own sky, the same flat ceiling as TV/F3; see parseLvlSection in sit-parser.js.
+    classicSky: doc.classicSky && skyTextureDecoded ? { horizon: [...doc.classicSky.horizon] } : null,
     // TV/F3/HB flat sky ceiling and horizon colour; see lvl-parser.js (lines 10 and 11).
     tvSky: doc.tvSky
       ? { stars: doc.tvSky.stars, horizon: [...doc.tvSky.horizon], gradient: [...doc.tvSky.gradient] }
@@ -653,33 +660,6 @@ function serializeCourse(course) {
       trackWidth: s.trackWidth ?? 64,
     })),
   };
-}
-
-/**
- * A keyframe control model (ANIMATED_BIN) carries frame NAMES, not polygons. The frame models
- * are ordinary .BIN entries elsewhere in the pod, so frame 0 is what actually gets drawn.
- *
- * This mirrors what the Traxx fork had to add for the same reason: GetAniName(0) is only
- * useful if the frame it names has itself been loaded, and nothing was loading it, so
- * keyframed objects drew as empty wireframes.
- *
- * The frame's geometry is adopted under the CONTROL model's name, because that is the name
- * the .SIT refers to and everything downstream keys off it.
- */
-function resolveKeyframeModel(model, loadFrame) {
-  if (!model || model.format !== "ANIMATED_BIN") return model;
-  for (const frameName of model.frameNames ?? []) {
-    const frame = loadFrame(frameName);
-    if (!frame?.meshes?.length) continue;
-    return {
-      ...frame,
-      name: model.name,
-      format: model.format,
-      frameNames: model.frameNames,
-      resolvedFrame: frameName,
-    };
-  }
-  return model;
 }
 
 // Hellbender's terrain scale is pinned rather than requested. Traxx's ALTITUDESCALE is 3 for

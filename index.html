@@ -38,7 +38,11 @@
 
     <main class="main-layout">
 
-      <aside class="sidebar" id="sidebar">
+      <aside class="sidebar no-track" id="sidebar">
+
+        <div class="sidebar-empty" id="sidebar-empty">
+          JSTrackViewer is a Terminal Velocity, Fury3, Hellbender, Monster Truck Madness 1 &amp; 2 and 4x4 Evo 1 &amp; 2 Track viewer.
+        </div>
 
         <section class="panel" id="minimap-panel" hidden>
           <h2>Navigation</h2>
@@ -66,6 +70,14 @@
           <div id="course-toggles" hidden>
             <h3 class="subhead">Courses</h3>
             <div id="course-toggle-list" class="course-toggle-list"></div>
+            <div class="slider-row course-style-row">
+              <label for="course-style-select">Style</label>
+              <select id="course-style-select" class="full-select">
+                <option value="smooth">Smooth</option>
+                <option value="joined">Joined</option>
+                <option value="traxx">Traxx</option>
+              </select>
+            </div>
           </div>
         </section>
 
@@ -81,9 +93,10 @@
             <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
             <label><input type="checkbox" id="tog-cboxes"> Collision boxes</label>
             <label><input type="checkbox" id="tog-racetrack" checked> Racetrack</label>
-            <label><input type="checkbox" id="tog-animate" checked> Animated Tex</label>
+            <label><input type="checkbox" id="tog-animate" checked> Animations</label>
+            <label><input type="checkbox" id="tog-moving" checked> Moving objects</label>
             <label><input type="checkbox" id="tog-water" checked> Water</label>
-            <label><input type="checkbox" id="tog-backdrop" checked> Background</label>
+            <label><input type="checkbox" id="tog-backdrop" checked> Backdrop</label>
             <label><input type="checkbox" id="tog-sky" checked> Sky</label>
             <label><input type="checkbox" id="tog-fog" checked> Fog</label>
             <label><input type="checkbox" id="tog-sunlight" checked> Sun light</label>
@@ -102,6 +115,14 @@
               <option value="cloudy">Cloudy</option>
               <option value="dusk">Dusk</option>
               <option value="night">Night</option>
+            </select>
+          </div>
+          <div class="slider-row" id="sky-style-row" hidden>
+            <label for="sky-style-select">Sky</label>
+            <select id="sky-style-select" class="full-select">
+              <option value="textured">Textured</option>
+              <option value="gradient">Gradient</option>
+              <option value="classic" id="sky-style-classic">Classic (MTM1)</option>
             </select>
           </div>
           <button id="reset-cam-btn" type="button" class="full-btn">Reset Camera (Home)</button>
@@ -168,6 +189,16 @@
         <div id="viewport" class="viewport">
           <div id="nav-hint" class="nav-hint">
             ↑↓ Move · ←→ Turn · PgUp/Dn Pitch · A/Z Height · Scroll Zoom · Drag Look
+          </div>
+          <div id="track-modal" class="track-modal" hidden>
+            <div class="track-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="track-modal-title">
+              <div class="track-modal-head">
+                <h2 id="track-modal-title">Choose a track</h2>
+                <button id="track-modal-close" type="button" class="quiet" aria-label="Close">&times;</button>
+              </div>
+              <p id="track-modal-source" class="track-modal-source"></p>
+              <div id="track-modal-list" class="track-modal-list"></div>
+            </div>
           </div>
           <div id="loading-overlay" class="loading-overlay" hidden>
             <div class="spinner"></div>

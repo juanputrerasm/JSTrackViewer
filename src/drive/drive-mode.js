@@ -31,15 +31,16 @@ const STEP = 1 / 120;
 */
 const MAX_FRAME = 0.25;
 
-export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, onPose, trackData, onObjectsMoved, lights = null }) {
+export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, onPose, trackData, onObjectsMoved, lights = null, movers = null }) {
   /*
     The track's solid objects, if there are any.
 
     Built once here rather than per step: a stock track is a few hundred boxes and several
     thousand ground columns, sorted into a bucket grid so the sim's sixteen query points only
-    ever see the handful nearby.
+    ever see the handful nearby. The moving objects are the viewer's own, handed over so a
+    train carries on from where it was rather than jumping back to its start.
   */
-  const colliders = trackData ? createColliders(trackData, frame) : null;
+  const colliders = trackData ? createColliders(trackData, frame, { movers }) : null;
   // null on a track with no checkpoints, which is every drag strip and stadium.
   const checkpoints = trackData ? createCheckpoints(trackData) : null;
   const sim = createVehicleSim(assembly, frame, undefined, colliders);
@@ -48,6 +49,8 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
 
   const quaternion = new THREE.Quaternion();
   const scenePosition = new THREE.Vector3();
+  const basis = new THREE.Matrix4();
+  const axis = { x: new THREE.Vector3(), y: new THREE.Vector3(), z: new THREE.Vector3() };
   let accumulator = 0;
   let active = false;
   let lastStatus = 0;
@@ -177,14 +180,33 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
       The simulation was never wrong about any of this. It was standing on the deck the whole
       time; only the drawing was in the wrong place.
     */
-    const terrain = frame.heightAtFeet(state.ipos.x, state.ipos.z);
-    const support = colliders?.supportAt(state.ipos.x, state.ipos.z, state.ipos.y) ?? null;
-    const ground = support !== null && support > terrain && support <= state.ipos.y ? support : terrain;
-    const placed = frame.toSceneTruckPosition(state.ipos, ground);
-    scenePosition.set(placed.x, placed.y, placed.z);
+    const groundAt = (p) => {
+      const terrain = frame.heightAtFeet(p.x, p.z);
+      const support = colliders?.supportAt(p.x, p.z, p.y, { probe: true }) ?? null;
+      return support !== null && support > terrain && support <= p.y ? support : terrain;
+    };
 
-    const q = sim.orientation;
-    quaternion.set(q.x, q.y, q.z, q.w);
+    /*
+      Fitted to the wheel mounts, so the wheels meet the drawn ground on a slope and height in
+      the air is drawn at the terrain's own scale; see world-frame's toSceneTruckPose. A truck
+      without four wheels falls back to placing its body origin alone.
+    */
+    const pose = frame.toSceneTruckPose(sim.mountPoints().map((m) => ({
+      ...m, ground: groundAt(m.world), reach: m.radius,
+    })));
+    if (pose) {
+      scenePosition.set(pose.position.x, pose.position.y, pose.position.z);
+      basis.makeBasis(
+        axis.x.set(pose.right.x, pose.right.y, pose.right.z),
+        axis.y.set(pose.up.x, pose.up.y, pose.up.z),
+        axis.z.set(pose.back.x, pose.back.y, pose.back.z));
+      quaternion.setFromRotationMatrix(basis);
+    } else {
+      const placed = frame.toSceneTruckPosition(state.ipos, groundAt(state.ipos));
+      scenePosition.set(placed.x, placed.y, placed.z);
+      const q = sim.orientation;
+      quaternion.set(q.x, q.y, q.z, q.w);
+    }
 
     truckObject.setPose(scenePosition, quaternion);
     truckObject.setWheelState(sim.wheelCompression(), sim.wheelSteer(), sim.wheelSpin());
@@ -196,6 +218,18 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
       yaw: (state.psi ?? 0) * 180 / Math.PI,
     });
     return state;
+  }
+
+  /*
+    What the truck is driving on, for the readout: the ground type under most of its tires,
+    naming a Default tile only when nothing more specific is underneath. Null in the air.
+  */
+  function surfaceUnder(state) {
+    const counts = new Map();
+    for (const wheel of state.wheels) if (wheel.surface) counts.set(wheel.surface, (counts.get(wheel.surface) ?? 0) + 1);
+    if (!counts.size) return null;
+    const named = [...counts].filter(([name]) => name !== "Default");
+    return (named.length ? named : [...counts]).sort((a, b) => b[1] - a[1])[0][0];
   }
 
   /*
@@ -357,6 +391,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
           manual: sim.manual,
           lights: lights ? lights.on : null,
           rpm: state.rpm,
+          surface: surfaceUnder(state),
           airborne: state.airborne,
           view: cameras.viewLabel,
           race: checkpoints?.state ?? null,

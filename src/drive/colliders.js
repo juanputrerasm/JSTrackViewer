@@ -36,6 +36,7 @@ import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./world-frame.js";
 import { buildMeshShape, meshRay, meshSegmentContact, meshSupport, traxxRotationRows } from "./mesh-collider.js";
 import { isVegetationModel, trunkCollisionModel } from "./vegetation-collision.js";
 import { buildRaceTrackShapes } from "./racetrack-collider.js";
+import { createMovers, isFlyingObject, isLinearMover } from "./moving-objects.js";
 
 /*
   Which box types are solid.
@@ -53,8 +54,14 @@ import { buildRaceTrackShapes } from "./racetrack-collider.js";
 const TYPE_CHECKPOINT = 6;
 const TYPE_DRIVE_THROUGH = 7;
 const TYPE_NO_COLLIDE_FACING = 8;
-const TYPE_MOVING = 10;
 const TYPE_RAMP = 99;
+
+/*
+  How long a top-crush cab takes to go flat with a wheel on it, in seconds. Traxx's help says
+  only that the game changes from one frame to the other "gradually the more an object is
+  crushed"; the rate is this viewer's.
+*/
+const CRUSH_SECONDS = 0.6;
 
 const PASS_THROUGH = new Set([
   TYPE_CHECKPOINT,
@@ -106,6 +113,7 @@ function rotateByQuat(q, v) {
 }
 
 const conjugate = (q) => ({ x: -q.x, y: -q.y, z: -q.z, w: q.w });
+const asFloats = (p) => (ArrayBuffer.isView(p) ? p : new Float32Array(p));
 const isUpright = (q) => q.x === 0 && q.y === 0 && q.z === 0;
 
 /**
@@ -113,8 +121,11 @@ const isUpright = (q) => q.x === 0 && q.y === 0 && q.z === 0;
  *
  * @param {object} trackData as the worker returns it, including `models` for model collision
  * @param {object} frame     world-frame, for terrain height under a point
+ * @param {object} [options.movers] the track's moving objects (moving-objects.js), shared with
+ *   the viewer so a train carries on from where it was; built here when not given
  */
-export function createColliders(trackData, frame) {
+export function createColliders(trackData, frame, { movers = null } = {}) {
+  const trackMovers = movers ?? createMovers(trackData, frame);
   const heightScale = trackData?.terrain?.heightScale ?? 3;
   const worldSize = (trackData?.terrain?.gridSize ?? 256) * (trackData?.terrain?.cellSize ?? 64);
   const toFeetH = 1 / UNITS_PER_FOOT_H;
@@ -170,6 +181,9 @@ export function createColliders(trackData, frame) {
     // Evo checkpoint and non-colliding classes are triggers/visuals. Their records have no
     // Traxx `type`, so passing them through the MTM fallback made invisible 32-unit walls.
     if (evo && (box.boxType === TYPE_CHECKPOINT || box.sourceClass === "CCheckpoint" || box.sourceClass?.startsWith("CNonCollide"))) continue;
+    // An aircraft circling overhead is never in a truck's way, and it turns as it flies, which
+    // a collider that only translates could not follow.
+    if (isFlyingObject(box)) continue;
 
     /*
       Moving objects: TPARK's train, which Traxx's notes describe as "10 (moving - use bvel)"
@@ -177,14 +191,13 @@ export function createColliders(trackData, frame) {
 
       All ten of its cars carry mass 0 and bvel (0, 0, -70), and they are authored facing both
       ways within one train, so the velocity is read in WORLD axes: in body axes the cars would
-      drive apart. In world axes every locomotive leads. The .SIT's z runs opposite to the
-      scene's, hence the sign on z.
+      drive apart. In world axes every locomotive leads. Where they are is moving-objects.js's
+      business, shared with the viewer; see step().
 
-      A moving object is kinematic. It follows its velocity whatever it meets, and what it
-      meets is shoved out of the way; mass 0 still means nothing can push IT.
+      A moving object is kinematic. It follows its path whatever it meets, and what it meets
+      is shoved out of the way; mass 0 still means nothing can push IT.
     */
-    const [bvx = 0, bvy = 0, bvz = 0] = box.bvel ?? [];
-    const moving = type === TYPE_MOVING && (bvx !== 0 || bvy !== 0 || bvz !== 0);
+    const moving = isLinearMover(box);
 
     const common = {
       type,
@@ -211,11 +224,24 @@ export function createColliders(trackData, frame) {
       modelName: box.modelName ?? "",
     };
     if (moving) {
-      common.velocity = { x: bvx, y: bvy, z: -bvz };
+      const [bvx = 0, , bvz = 0] = box.bvel;
+      common.velocity = { x: bvx, y: 0, z: -bvz };
     }
 
     const model = box.modelName ? trackData?.models?.[box.modelName] : null;
     if (model?.meshes?.length && type !== TYPE_RAMP) {
+      /*
+        A top-crush cab collides as its current pose: it starts as the first frame of its
+        animated BIN and is rebuilt, a little flatter, each step a wheel is on it. See step().
+      */
+      const keyframes = box.crushRole === "cab" ? model.keyframes : null;
+      if (keyframes?.length >= 2) {
+        common.crush = {
+          amount: 0, loaded: false, box, anchor: model.anchor,
+          from: keyframes[0].meshes.map((mesh) => asFloats(mesh.positions)),
+          to: keyframes[keyframes.length - 1].meshes.map((mesh) => asFloats(mesh.positions)),
+        };
+      }
       addModelSolid(common, evo && isVegetationModel(box.modelName, box.sourceClass)
         ? trunkOf(box.modelName, model) : model, box);
       continue;
@@ -337,6 +363,8 @@ export function createColliders(trackData, frame) {
   */
   const columns = [];
   const CELL = 64;
+  // A column's top face texture, CL0 face 4, carries a ground type like any terrain tile.
+  const textureSurfaces = trackData?.terrain?.textureSurfaces ?? [];
   for (const gb of trackData?.groundBoxes ?? []) {
     const upper = gb.upper ?? 0;
     if (upper < 1) continue;
@@ -350,6 +378,7 @@ export function createColliders(trackData, frame) {
       maxZ: (worldSize - midY + CELL / 2) * toFeetH,
       bottom: lower * heightScale * toFeetV,
       top: upper * heightScale * toFeetV,
+      surface: textureSurfaces[gb.faceTexture?.[4] ?? -1] ?? 0,
     });
   }
 
@@ -389,6 +418,29 @@ export function createColliders(trackData, frame) {
 
   /** Everything that can change position, which is the only set worth stepping. */
   const dynamic = solids.filter((s) => s.movable || s.moving);
+  /** Top-crush cabs, which change shape rather than position. */
+  const crushables = solids.filter((s) => s.crush);
+
+  /*
+    Flatten a cab by `amount` (0 upright, 1 fully crushed): blend its two frames and rebuild its
+    triangles. A cab is a few dozen triangles, and this runs only while a wheel is on one.
+  */
+  function applyCrush(solid) {
+    const { crush } = solid;
+    const t = crush.amount;
+    const meshes = crush.from.map((from, m) => {
+      const to = crush.to[m];
+      const positions = new Float32Array(from.length);
+      for (let i = 0; i < from.length; i++) positions[i] = from[i] + (to[i] - from[i]) * t;
+      return { positions };
+    });
+    const shape = buildMeshShape({ meshes, anchor: crush.anchor }, crush.box, trackData);
+    if (shape) {
+      // Same placement, so the same centre; only the triangles and how high they reach change.
+      solid.shape = shape;
+      solid.bottom = Math.min(solid.bottom, shape.bounds.minY);
+    }
+  }
 
   /*
     What is near a point, including anything that has left where it started.
@@ -597,6 +649,12 @@ export function createColliders(trackData, frame) {
     /** Every solid that can change position, which is the only set worth stepping or redrawing. */
     get movables() { return dynamic; },
 
+    /** Top-crush cabs; each carries `crush.amount`, which the scene draws as the cab's pose. */
+    get crushables() { return crushables; },
+
+    /** The track's moving objects, which step() advances on the simulation clock. */
+    get movers() { return trackMovers; },
+
     /*
       Shove one object, at a point.
 
@@ -676,15 +734,24 @@ export function createColliders(trackData, frame) {
       Shoved objects fall, tip, land and skid to a stop.
     */
     step(dt) {
+      trackMovers.step(dt);
+      for (const solid of crushables) {
+        if (solid.crush.loaded && solid.crush.amount < 1) {
+          solid.crush.amount = Math.min(1, solid.crush.amount + dt / CRUSH_SECONDS);
+          applyCrush(solid);
+        }
+        solid.crush.loaded = false;
+      }
       for (const solid of dynamic) {
         if (solid.moving) {
-          solid.offset.x += solid.velocity.x * dt;
-          solid.offset.y += solid.velocity.y * dt;
-          solid.offset.z += solid.velocity.z * dt;
-          const x = solid.centre.x + solid.offset.x;
-          const z = solid.centre.z + solid.offset.z;
-          if (x < 0) solid.offset.x += worldFeet; else if (x >= worldFeet) solid.offset.x -= worldFeet;
-          if (z < 0) solid.offset.z += worldFeet; else if (z >= worldFeet) solid.offset.z -= worldFeet;
+          // Where the shared mover has got to; a disabled mover stands at the authored spot.
+          const mover = trackMovers.moverFor(solid.sourceIndex);
+          const offset = mover?.offset ?? { x: 0, y: 0, z: 0 };
+          solid.offset.x = offset.x;
+          solid.offset.y = offset.y;
+          solid.offset.z = offset.z;
+          solid.velocity.x = trackMovers.enabled && mover ? mover.velocity?.x ?? 0 : 0;
+          solid.velocity.z = trackMovers.enabled && mover ? mover.velocity?.z ?? 0 : 0;
           displaced.add(solid);
           continue;
         }
@@ -793,13 +860,14 @@ export function createColliders(trackData, frame) {
       Only surfaces at or below the wheel are considered: a roof overhead is not something to
       stand on, and one just above the wheel would otherwise snap the truck up into it.
     */
-    supportAt(x, z, y) {
+    supportAt(x, z, y, { probe = false } = {}) {
       let best = null;
+      let bestItem = null;
       for (const item of near(x, z)) {
         if (item.top !== undefined) {
           // A ground column.
           if (x < item.minX || x > item.maxX || z < item.minZ || z > item.maxZ) continue;
-          if (item.top <= y && (best === null || item.top > best)) best = item.top;
+          if (item.top <= y && (best === null || item.top > best)) { best = item.top; bestItem = null; }
           continue;
         }
         const c = currentCentre(item);
@@ -821,9 +889,29 @@ export function createColliders(trackData, frame) {
         } else {
           surface = surfaceHeightAt(item, x, z, y);
         }
-        if (surface !== null && surface <= y && (best === null || surface > best)) best = surface;
+        if (surface !== null && surface <= y && (best === null || surface > best)) {
+          best = surface;
+          bestItem = item;
+        }
       }
+      // A wheel standing on a top-crush cab is what flattens it; see step(). A probe (the
+      // renderer asking where the ground is) must not.
+      if (!probe && bestItem?.crush) bestItem.crush.loaded = true;
       return best;
+    },
+
+    /**
+     * The ground type (.TTY value) of the ground box top a wheel at (x, y, z) stands on, or
+     * null when it is not on one. Other objects have no ground type.
+     */
+    surfaceAt(x, z, y) {
+      let best = null;
+      for (const item of near(x, z)) {
+        if (item.top === undefined) continue;
+        if (x < item.minX || x > item.maxX || z < item.minZ || z > item.maxZ) continue;
+        if (item.top <= y && (best === null || item.top > best.top)) best = item;
+      }
+      return best ? best.surface : null;
     },
 
     /*
@@ -849,6 +937,8 @@ export function createColliders(trackData, frame) {
 
         if (item.kind === "mesh") {
           const hit = meshContact(item, point, reference);
+          // A monster truck straddles a car, so its body bears on the cab as often as a wheel.
+          if (hit && item.crush) item.crush.loaded = true;
           if (hit) return hit;
           continue;
         }
