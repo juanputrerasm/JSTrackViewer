@@ -23,7 +23,8 @@ export { parseMtmTrkLines, MTM_WHEEL_KEYS } from "./truck/mtm-trk.js";
 export { isCprCarLines, parseCprCarLines, CPR_WHEEL_KEYS_IN_FILE_ORDER } from "./truck/cpr-car.js";
 export { detectTruckManifest, parseTruckManifest } from "./truck/manifest.js";
 export { parseCprCmd, cmdWingPackages, cmdFaceTriangles, CMD_POSITION_SCALE, CMD_NORMAL_SCALE, CMD_UV_SCALE, CMD_FACE_TYPE, } from "./cpr/cmd.js";
-export { parseBin, MRGL, MRGLMAT, MRGLMAT2, BIN_GEOMETRY_DIVISOR, BIN_TRANSPARENT_FACE_TYPES, BIN_SOLID_FACE_TYPE, BIN_TEXTURE_NAME_MAX, } from "./model/bin.js";
+export { parseBin, MRGL, MRGLMAT, MRGLMAT2, BIN_GEOMETRY_DIVISOR, BIN_TRANSPARENT_FACE_TYPES, BIN_SOLID_FACE_TYPE, BIN_TEXTURE_NAME_MAX, BIN_MAPPED_FACETS, BIN_UNMAPPED_FACETS, } from "./model/bin.js";
+export { writeBin, binFaceNormal, binPlaneTerm } from "./model/bin-write.js";
 export { TV_UNITS_PER_CELL, TV_UNITS_PER_HEIGHT_STEP, tvPlacementToEditor, tvHeightToAltitude, parseIntTriple, toDataLines, hbPlacementToEditor, placementToEditor, } from "./tv/coords.js";
 export { TV_POWERUPS, tvPowerup, TV_LOGIC_NAMES, TV_WEAPON_NAMES, tvLogicName, tvWeaponName } from "./tv/tables.js";
 export { NAV_TARGET_LIST, NAV_TUNNEL_ENTRANCE, NAV_CHECKPOINT, NAV_JUMP_ZONE, NAV_TUNNEL_EXIT, NAV_BOSS, NAV_START_POINT, NAV_TYPE_NAMES, parseNavPoints, findStartPoint, } from "./tv/nav.js";
@@ -44,6 +45,9 @@ export { BUNDLED_PALETTE_IDS, bundledPalette } from "./texture/bundled-palettes.
 export { BUNDLED_PALETTE_BY_ORIGIN, TEXTURE_SIBLING_DIRS, findTextureSibling, paletteCandidates, textureStem, } from "./texture/palette-rank.js";
 export { EVO_CELL_SIZE, EVO_HEIGHT_DIVISOR, EVO_WATER_HEIGHT_DIVISOR, EVO_GRID_SIZE, EVO_WORLD_SIZE, evoHeightAtCell, evoHeightAt, } from "./evo/coords.js";
 export { parseEvoAiLine, matchEvoAiLineName, lapRuns } from "./evo/ai-line.js";
+export { sampleForPalette, medianCutPalette, colourCube, encodeRawTexture } from "./texture/encode.js";
+export { MTM2_PALETTE_WHITE_INDEX, MTM2_PALETTE_FIRST_AUTHORED, MTM2_PALETTE_AUTHORED_COUNT, mtm2LevelPalette, buildFogMap, } from "./mtm/level-palette.js";
+export { writeMtm2Sit, writeMtm2Lvl, writeTexList, writeEmptyList, emptyGroundBoxGrids, buildMtm2Lte, writeMtm2Trk, } from "./mtm/write.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
 export const VERSION = "0.1.0";

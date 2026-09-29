@@ -38,12 +38,14 @@ export const MRGL = {
     MATERIAL2: 66, NORMALMAP: 67,
 };
 /** Facets with per-corner texture coordinates. MATFACET also takes the current material. */
-const MAPPED_FACETS = new Set([
+export const BIN_MAPPED_FACETS = new Set([
     MRGL.FACETTTMAP, MRGL.ZFACETTMAP, MRGL.ZPFACETTMAP, MRGL.ZGFACETTMAP, MRGL.UZFACETTTMAP,
     MRGL.UZFACETTMAP, MRGL.FACETTMAP, MRGL.MATFACET,
 ]);
 /** Facets with vertex indices only. */
-const UNMAPPED_FACETS = new Set([MRGL.FACET, MRGL.ZFACET, MRGL.GFACET, MRGL.TTFACET]);
+export const BIN_UNMAPPED_FACETS = new Set([MRGL.FACET, MRGL.ZFACET, MRGL.GFACET, MRGL.TTFACET]);
+const MAPPED_FACETS = BIN_MAPPED_FACETS;
+const UNMAPPED_FACETS = BIN_UNMAPPED_FACETS;
 /** Legacy transparent (colour-keyed) face types, for faces with no material. */
 export const BIN_TRANSPARENT_FACE_TYPES = new Set([0x11, 0x33]);
 /** The untextured face type that takes its colour from the preceding MRGL_COLOR. */
