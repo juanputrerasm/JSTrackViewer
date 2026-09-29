@@ -19,8 +19,8 @@ import { PALETTES } from "../shared/bundled-palettes.js";
     1. A same-stem .ACT beside the texture. The archive putting FOO.ACT next to FOO.RAW is a
        direct statement and is never overridden.
     2. The palette named in the POD1 entry metadata. The 32-byte name field holds a second
-       NUL-terminated string for .RAW entries naming the .ACT it was authored against; see
-       decodePod1NameField in pod-format.js.
+       NUL-terminated string for .RAW entries naming the .ACT it was authored against; OpenPhotex
+       returns it as the entry's paletteName (see its docs/POD.md).
     3. The track's own palette, from the .SIT/.LVL ACT slot. For the flight titles this IS the
        game palette, and for MTM1/MTM2 it is at least the palette the terrain was built with.
     4. The archive's own METALCR2.ACT, then its VGA.ACT. A pod carrying either is telling us

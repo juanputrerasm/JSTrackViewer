@@ -10,12 +10,13 @@
 */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import {
   resolveMtm1WheelEntries,
   resolveSingleModelEntry,
   resolveWheelEntries,
 } from "../src/worker/truck/model-resolve.js";
+import { indexStockPod } from "./helpers/stock-pod.mjs";
 
 const STOCK_POD = `${process.env.HOME}/games/mtm2/TRUCK2.POD`;
 
@@ -28,26 +29,6 @@ function fakePod(...names) {
       title: name.split("\\").pop().toUpperCase(),
     })),
   };
-}
-
-function indexStockPod(podPath) {
-  const buf = readFileSync(podPath);
-  const count = buf.readInt32LE(0);
-  const entries = [];
-  for (let i = 0; i < count; i++) {
-    const base = 84 + i * 40;
-    const field = buf.toString("latin1", base, base + 32);
-    const nul = field.indexOf("\0");
-    const name = (nul >= 0 ? field.slice(0, nul) : field).trim();
-    entries.push({
-      name,
-      normalizedName: name.replace(/\\/g, "/").toUpperCase(),
-      title: name.split("\\").pop().toUpperCase(),
-      length: buf.readInt32LE(base + 32),
-      offset: buf.readInt32LE(base + 36),
-    });
-  }
-  return { entries };
 }
 
 test("an exact model name resolves straight through", () => {
@@ -153,7 +134,7 @@ test("MTM1 reuses one tire model on all four corners", () => {
 });
 
 test("BIGFOOT resolves against a stock TRUCK2.POD", { skip: !existsSync(STOCK_POD) && "no local MTM2 install" }, () => {
-  const pod = indexStockPod(STOCK_POD);
+  const pod = indexStockPod(STOCK_POD).podIndex;
   const warnings = [];
 
   /*

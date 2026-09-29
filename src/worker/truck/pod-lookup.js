@@ -10,7 +10,8 @@
 
   Everything here is a pure function of an already built pod index.
 */
-import { archiveTitle, basenameWithoutExtension, joinPath, normalizeArchiveName } from "../../shared/path-utils.js";
+import { findPodEntry, findPodEntryByTitle } from "../../vendor/openphotex/index.js";
+import { archiveTitle, basenameWithoutExtension, joinPath } from "../../shared/path-utils.js";
 
 /** Every TRUCK\*.TRK in the archive, in directory order. */
 export function findAllTruckManifests(podIndex) {
@@ -20,13 +21,11 @@ export function findAllTruckManifests(podIndex) {
 }
 
 export function findEntryByNormalizedName(podIndex, normalizedName) {
-  const upper = normalizeArchiveName(normalizedName);
-  return podIndex.entries.find((entry) => entry.normalizedName === upper) ?? null;
+  return findPodEntry(podIndex, normalizedName);
 }
 
 export function findEntryByTitle(podIndex, title) {
-  const upper = archiveTitle(title);
-  return podIndex.entries.find((entry) => entry.title === upper) ?? null;
+  return findPodEntryByTitle(podIndex, title);
 }
 
 /** Models under MODELS\ whose title starts with `prefix` and ends with `extension`. */

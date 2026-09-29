@@ -10,32 +10,11 @@
 */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { parseTruckManifestText, WHEEL_KEYS } from "../src/worker/truck/trk-parser.js";
+import { entryText, indexStockPod } from "./helpers/stock-pod.mjs";
 
 const STOCK_POD = `${process.env.HOME}/games/mtm2/TRUCK2.POD`;
-
-/** Minimal POD1 directory read, enough to pull one TRK out for the stock-file test. */
-function readPodEntry(podPath, predicate) {
-  const buf = readFileSync(podPath);
-  const count = buf.readInt32LE(0);
-  for (let i = 0; i < count; i++) {
-    const base = 84 + i * 40;
-    const field = buf.toString("latin1", base, base + 32);
-    const nul = field.indexOf("\0");
-    const name = (nul >= 0 ? field.slice(0, nul) : field).trim();
-    const entry = {
-      name,
-      normalizedName: name.replace(/\\/g, "/").toUpperCase(),
-      length: buf.readInt32LE(base + 32),
-      offset: buf.readInt32LE(base + 36),
-    };
-    if (predicate(entry)) {
-      return buf.subarray(entry.offset, entry.offset + entry.length).toString("latin1");
-    }
-  }
-  return null;
-}
 
 const MINIMAL = [
   "MTM2.1 truckName",
@@ -152,7 +131,7 @@ test("unrecognised labels are kept rather than dropped", () => {
 });
 
 test("BIGFOOT.TRK out of a stock TRUCK2.POD", { skip: !existsSync(STOCK_POD) && "no local MTM2 install" }, () => {
-  const text = readPodEntry(STOCK_POD, (e) => e.normalizedName === "TRUCK/BIGFOOT.TRK");
+  const text = entryText(indexStockPod(STOCK_POD), (e) => e.normalizedName === "TRUCK/BIGFOOT.TRK");
   assert.ok(text, "BIGFOOT.TRK should be in TRUCK2.POD");
   const m = parseTruckManifestText(text);
 

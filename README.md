@@ -169,6 +169,7 @@ Relative paths are resolved against the viewer page, and cross-origin URLs must 
 | OPFS | Isolated temporary archive and extracted-asset storage |
 | Three.js r169 | Terrain, model, water, backdrop, lighting, and overlay rendering |
 | fflate | ZIP extraction |
+| [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex) | POD archive parsing, vendored as plain ES modules in `src/vendor/openphotex/` |
 
 ```text
 src/
@@ -179,8 +180,11 @@ src/
 ├── zip-utils.js            POD-in-ZIP extraction
 ├── drive/                  Test Drive: truck simulation, colliders, cameras, and input
 ├── shared/                 OPFS, path, palette, and CPR schema helpers
-└── worker/                 POD, SIT, LVL, TRK, BIN, texture, and terrain decoders
+├── vendor/openphotex/      OpenPhotex build: the POD parser (do not edit)
+└── worker/                 SIT, LVL, TRK, BIN, texture, and terrain decoders
 ```
+
+POD archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex), the shared Terminal Reality format library; `src/worker/pod-format.js` only feeds it bytes from OPFS. The vendored copy is generated, never edited here: change OpenPhotex, then refresh it from the OpenPhotex checkout with `npm run build && npm run vendor -- ../JSTrackViewer/src/vendor/openphotex`. `src/vendor/openphotex/VERSION` records the version and commit it was built from.
 
 ## Known limitations
 

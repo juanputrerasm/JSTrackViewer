@@ -10,6 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { evoTrackTypeName, parseEvoSit } from "../src/worker/evo/evo-sit-parser.js";
+import { parsePod, readPodEntry } from "../src/vendor/openphotex/index.js";
 
 test("Evo race types: circuit, rally and mission by name, anything else by number", () => {
   assert.equal(evoTrackTypeName(2), "CIRCUIT");
@@ -19,24 +20,12 @@ test("Evo race types: circuit, rally and mission by name, anything else by numbe
   assert.equal(evoTrackTypeName(0), "UNKNOWN");
 });
 
-/** The .SIT of a POD2 archive, read directly: a 20 byte directory record per entry. */
+/** The .SIT of a stock Evo POD, found with OpenPhotex like every other POD read. */
 function sitOf(path) {
-  const b = readFileSync(path);
-  if (b.toString("latin1", 0, 4) !== "POD2") return null;
-  const count = b.readUInt32LE(0x58);
-  const table = 0x60;
-  const names = table + count * 20;
-  for (let i = 0; i < count; i++) {
-    const record = table + i * 20;
-    const nameAt = names + b.readUInt32LE(record);
-    let end = nameAt;
-    while (b[end] !== 0) end++;
-    const name = b.toString("latin1", nameAt, end);
-    if (!/\.SIT$/i.test(name)) continue;
-    const offset = b.readUInt32LE(record + 8);
-    return { name, bytes: new Uint8Array(b.subarray(offset, offset + b.readUInt32LE(record + 4))) };
-  }
-  return null;
+  const bytes = new Uint8Array(readFileSync(path));
+  const pod = parsePod(bytes);
+  const entry = pod.entries.find((e) => /\.SIT$/i.test(e.name));
+  return entry ? { name: entry.name, bytes: readPodEntry(bytes, entry) } : null;
 }
 
 const STOCK = [
