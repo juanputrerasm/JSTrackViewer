@@ -33,6 +33,7 @@ export function listTrackChoices(podIndex) {
  * Async version that also filters tunnel LVL entries by reading their header.
  */
 export async function listTrackChoicesAsync(podIndex, opfsPath) {
+  if (podIndex.format === "epd") return listFlyChoices(podIndex);
   const sitEntries = findSitEntries(podIndex);
   if (sitEntries.length > 0) {
     const choices = [];
@@ -257,4 +258,24 @@ function serializeCourse(course) {
 
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
   return origin === "HB" ? 3 : (requestedHeightScale ?? 4);
+}
+
+/*
+  A Fly! scenery EPD is one choice however many globe tiles it carries (the stock numbered
+  archives carry one each): its terrain. Other EPDs, the sectional charts and a set's models,
+  coasts and night lights, have nothing to show on their own.
+*/
+function listFlyChoices(podIndex) {
+  const tiles = new Set();
+  for (const e of podIndex.entries) {
+    const match = /^DATA\/(D\d{6})\/G[01][01]\.ALT$/.exec(e.normalizedName);
+    if (match) tiles.add(match[1]);
+  }
+  if (!tiles.size) return [];
+  return [{
+    name: podIndex.comment || "Fly! scenery",
+    fileName: `Fly! scenery, globe tile${tiles.size > 1 ? "s" : ""} ${[...tiles].join(", ")}`,
+    index: 0,
+    format: "FLY",
+  }];
 }

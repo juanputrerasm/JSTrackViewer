@@ -78,11 +78,6 @@ body {
   flex-wrap: wrap;
 }
 
-.url-group {
-  display: flex;
-  gap: 4px;
-}
-
 .top-track-picker {
   display: flex;
   align-items: center;
@@ -334,6 +329,27 @@ body {
 }
 
 .track-modal-list button:focus-visible { outline: 1px solid var(--accent); }
+
+/* Open from URL: the address and the reason a foreign link usually fails. */
+.url-modal-dialog { width: min(520px, 100%); }
+.url-modal-label {
+  padding: 4px 12px 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.url-modal-dialog input[type="url"] { margin: 0 12px; width: auto; }
+.url-modal-note {
+  margin: 8px 12px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.url-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 12px;
+}
 
 /* ── Controls ────────────────────────────────── */
 button {

@@ -8,6 +8,7 @@ import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
 import { decodeHeightSample } from "../shared/terrain-height.js";
 import { resolveKeyframeModel } from "./keyframes.js";
+import { readFile } from "../shared/opfs.js";
 
 let podIndex = null;
 let podOpfsPath = null;
@@ -53,14 +54,22 @@ self.onmessage = async (event) => {
     } else if (type === "listTrackChoices") {
       if (!podIndex) throw new Error("No POD indexed.");
       const choices = await listTrackChoicesAsync(podIndex, podOpfsPath);
-      result = { choices };
+      result = { choices, note: choices.length ? null : unsupportedArchiveNote(podIndex) };
 
     } else if (type === "loadTrack") {
       if (!podIndex) throw new Error("No POD indexed.");
       const { choiceIndex, heightScale } = payload;
       const choices = await listTrackChoicesAsync(podIndex, podOpfsPath);
       if (choiceIndex < 0 || choiceIndex >= choices.length) throw new Error(`Invalid choice: ${choiceIndex}`);
-      result = await loadTrackAsync(podIndex, podOpfsPath, choices[choiceIndex], heightScale ?? 3);
+      const choice = choices[choiceIndex];
+      // A single Fly! scenery EPD is one globe tile; it is read in place, not prefetched whole.
+      result = choice.format === "FLY"
+        ? await loadFly([{ blob: await readFile(podOpfsPath), name: choice.name }], { name: choice.name })
+        : await loadTrackAsync(podIndex, podOpfsPath, choice, heightScale ?? 3);
+
+    } else if (type === "loadFly") {
+      // A Fly! scenery set: the archives its .SCF lists, handed over as Files, never copied.
+      result = await loadFly(payload.archives, { name: payload.name, coverage: payload.coverage ?? null });
 
     } else if (type === "indexTruckPod") {
       truckPodOpfsPath = payload.opfsPodPath;
@@ -86,6 +95,22 @@ self.onmessage = async (event) => {
     self.postMessage({ id, ok: false, error: err?.message ?? String(err) });
   }
 };
+
+async function loadFly(archives, options) {
+  const { loadFlyScenery } = await import("./fly/fly-loader.js");
+  return loadFlyScenery(archives, options);
+}
+
+/*
+  Why an archive offers nothing to view, when it is something recognisable. Fly!'s Maps\
+  archives are sectional charts, 2D aviation maps, which this viewer does not draw.
+*/
+function unsupportedArchiveNote(index) {
+  if (index.format === "epd" && index.entries.some((e) => /^MAPS\/.*\.MAP$/.test(e.normalizedName))) {
+    return `${index.comment || "This EPD"} is a Fly! sectional chart (a 2D aviation map), not scenery. Open a city's scenery folder with Open from Folder.`;
+  }
+  return null;
+}
 
 async function getBytes(entry) {
   const k = entry.offset + "_" + entry.length;

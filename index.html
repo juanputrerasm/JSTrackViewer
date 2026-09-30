@@ -22,12 +22,11 @@
         <p>Online TRI Track viewer</p>
       </div>
       <div class="load-controls">
-        <input id="file-input" type="file" accept=".pod,.zip" hidden>
-        <button id="open-file-btn" type="button">Open POD/ZIP from disk</button>
-        <div class="url-group">
-          <input id="url-input" type="url" placeholder="https://example.com/track.pod or /tracks/track.zip" spellcheck="false">
-          <button id="open-url-btn" type="button">Open from URL</button>
-        </div>
+        <input id="file-input" type="file" accept=".pod,.zip,.epd" hidden>
+        <input id="folder-input" type="file" webkitdirectory hidden>
+        <button id="open-file-btn" type="button" title="A .POD, .EPD or .ZIP file">Open from Disk</button>
+        <button id="open-url-btn" type="button" title="A .POD, .EPD or .ZIP file on the web">Open from URL</button>
+        <button id="open-folder-btn" type="button" title="A Fly! scenery folder, the one holding its .SCF">Open from Folder</button>
         <button id="clear-temp-btn" type="button" class="quiet">Clear temp</button>
       </div>
       <div id="track-picker-panel" class="top-track-picker" hidden>
@@ -199,6 +198,25 @@
               <p id="track-modal-source" class="track-modal-source"></p>
               <div id="track-modal-list" class="track-modal-list"></div>
             </div>
+          </div>
+          <div id="url-modal" class="track-modal" hidden>
+            <form id="url-form" class="track-modal-dialog url-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="url-modal-title">
+              <div class="track-modal-head">
+                <h2 id="url-modal-title">Open from URL</h2>
+                <button id="url-modal-close" type="button" class="quiet" aria-label="Close">&times;</button>
+              </div>
+              <label for="url-input" class="url-modal-label">Address of a .POD, .EPD or .ZIP file</label>
+              <input id="url-input" type="url" placeholder="https://example.com/track.pod or /tracks/track.zip" spellcheck="false" required>
+              <p class="url-modal-note">
+                The browser only lets this page download files from its own site, or from a server that
+                allows other sites to read its files (CORS). Most file hosts don't, so a link from another
+                site will usually fail. If it does, download the file and use Open from Disk.
+              </p>
+              <div class="url-modal-actions">
+                <button id="url-modal-cancel" type="button" class="quiet">Cancel</button>
+                <button id="url-modal-open" type="submit">Open</button>
+              </div>
+            </form>
           </div>
           <div id="loading-overlay" class="loading-overlay" hidden>
             <div class="spinner"></div>

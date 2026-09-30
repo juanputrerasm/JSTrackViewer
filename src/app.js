@@ -3,6 +3,7 @@ import { WorkerClient } from "./worker-client.js";
 import { removePath, resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes, extractPodsFromZipBytes } from "./zip-utils.js";
 import { UNITS_PER_FOOT_H } from "./drive/world-frame.js";
+import { flySetsFromFolder } from "./fly-folder.js";
 
 const APP_TITLE = "JSTrackViewer";
 const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · L Lights · V Camera · R Reset";
@@ -72,13 +73,42 @@ export class TrackViewerApp {
       fileInput.value = "";
     });
 
-    // URL input
+    // Open from URL: a dialog, since it has a warning to carry about CORS.
+    const urlModal = doc.getElementById("url-modal");
+    const urlInput = doc.getElementById("url-input");
+    const hideUrlModal = () => {
+      if (urlModal.hidden) return;
+      urlModal.hidden = true;
+      doc.getElementById("viewport")?.focus();
+    };
     doc.getElementById("open-url-btn").addEventListener("click", () => {
-      const url = doc.getElementById("url-input").value.trim();
-      if (url) this._loadFromUrl(url);
+      urlModal.hidden = false;
+      urlInput.focus();
+      urlInput.select();
     });
-    doc.getElementById("url-input").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") doc.getElementById("open-url-btn").click();
+    doc.getElementById("url-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const url = urlInput.value.trim();
+      if (!url) return;
+      hideUrlModal();
+      this._loadFromUrl(url);
+    });
+    doc.getElementById("url-modal-close").addEventListener("click", hideUrlModal);
+    doc.getElementById("url-modal-cancel").addEventListener("click", hideUrlModal);
+    urlModal.addEventListener("click", (e) => {
+      if (e.target === urlModal) hideUrlModal();
+    });
+    doc.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideUrlModal();
+    });
+
+    // Open from Folder: a Fly! scenery folder, the one holding its .SCF.
+    const folderInput = doc.getElementById("folder-input");
+    doc.getElementById("open-folder-btn").addEventListener("click", () => folderInput.click());
+    folderInput.addEventListener("change", (e) => {
+      const files = [...(e.target.files ?? [])];
+      if (files.length) this._loadFromFolder(files);
+      folderInput.value = "";
     });
 
     // Clear temp
@@ -432,6 +462,7 @@ export class TrackViewerApp {
     this._archives = [];
     this._choices = [];
     this._indexedArchive = null;
+    const notes = [];
 
     for (let i = 0; i < pods.length; i++) {
       const { bytes, filename } = pods[i];
@@ -444,8 +475,9 @@ export class TrackViewerApp {
       };
       const { entryCount } = await this._worker.call("indexPod", { opfsPodPath: opfsPath });
       this._indexedArchive = archive;
-      const { choices } = await this._worker.call("listTrackChoices", {});
+      const { choices, note } = await this._worker.call("listTrackChoices", {});
       this._setStatus(`${filename}: ${entryCount} entries, ${choices.length} track(s).`);
+      if (note) notes.push(note);
       if (!choices.length) continue;
       this._archives.push(archive);
       for (const choice of choices) {
@@ -454,8 +486,9 @@ export class TrackViewerApp {
     }
 
     if (this._choices.length === 0) {
-      this._setStatus(`No tracks found in ${container}.`);
-      throw new Error(`No tracks found in ${container}.`);
+      const message = notes[0] ?? `No tracks found in ${container}.`;
+      this._setStatus(message);
+      throw new Error(message);
     }
 
     this._populateTrackPicker();
@@ -479,36 +512,29 @@ export class TrackViewerApp {
     this._setStatus(`Loading "${choice.name}"…`);
     this._showLoading(`Loading ${choice.name}…`);
     try {
-      if (this._indexedArchive !== choice.archive) {
-        await this._worker.call("indexPod", { opfsPodPath: choice.archive.opfsPath });
-        this._indexedArchive = choice.archive;
+      let result;
+      if (choice.flySet) {
+        // Handed to the worker as Files: a city is 50 to 150 MB, not worth copying anywhere.
+        const set = choice.flySet;
+        this._podSource = `Folder: ${set.directory}`;
+        result = await this._worker.call("loadFly", {
+          archives: set.archives.map((file) => ({ blob: file, name: file.name })),
+          name: set.name,
+          coverage: set.coverage,
+        });
+        if (set.missing.length) result.warnings.unshift(`${set.scfName} lists files not in the folder: ${set.missing.join(", ")}.`);
+      } else {
+        if (this._indexedArchive !== choice.archive) {
+          await this._worker.call("indexPod", { opfsPodPath: choice.archive.opfsPath });
+          this._indexedArchive = choice.archive;
+        }
+        this._podSource = choice.archive.source ?? "—";
+        result = await this._worker.call("loadTrack", {
+          choiceIndex: choice.index,
+          heightScale: this._heightScale,
+        });
       }
-      this._podSource = choice.archive.source ?? "—";
-      const result = await this._worker.call("loadTrack", {
-        choiceIndex: choice.index,
-        heightScale: this._heightScale,
-      });
-      this._renderFlags.checkpoints = !["MTM1", "MTM2", "EVO1", "EVO2", "CPR"].includes(result.origin);
-      this._doc.getElementById("tog-checkpoints").checked = this._renderFlags.checkpoints;
-      // The 2px terrain overlap hides seams on MTM2 and Evo's tile sets, and only blurs the
-      // others' (MTM1, CPR, TV, Fury3, Hellbender), so it starts on per game. Still a toggle.
-      this._renderFlags.terrainOverlap = ["MTM2", "EVO1", "EVO2"].includes(result.origin);
-      this._doc.getElementById("tog-terrain-overlap").checked = this._renderFlags.terrainOverlap;
-      this._scene.setTrack(result, this._renderFlags, this._heightScale);
-      this._doc.getElementById("sidebar").classList.remove("no-track");
-      if (this._truckAssembly) {
-        this._scene.setDriveTruck(this._truckAssembly);
-      }
-      this._minimap.setTrack(result);
-      this._minimap.updateCamera(this._scene.nav);
-      this._updateTrackInfo(result);
-      this._applyLayerAvailability(this._scene.layerPresence());
-      this._buildCourseToggles();
-      this._applyWeather();
-      this._setStatus(result.trackName || choice.name);
-      this._setDocumentTitle(result.trackName || choice.name, result.origin);
-      // Focus viewport after load
-      this._doc.getElementById("viewport")?.focus();
+      this._presentTrack(result, choice.name);
     } catch (err) {
       this._showError(`Error loading track: ${err.message}`);
       console.error(err);
@@ -516,6 +542,74 @@ export class TrackViewerApp {
       this._updateTruckButtons();
       this._hideLoading();
     }
+  }
+
+  /*
+    Open from Folder. Every Fly! scenery set under the folder becomes a choice, so picking the
+    Scenery folder itself offers all five cities. Nothing is copied: the Files go straight to
+    the worker, which reads only what it draws.
+  */
+  async _loadFromFolder(files) {
+    this._stopDrivingForChange();
+    this._setStatus("Looking for Fly! scenery…");
+    try {
+      const { folder, sets } = await flySetsFromFolder(files);
+      if (!sets.length) {
+        throw new Error(`No Fly! scenery in ${folder || "that folder"}: pick the folder holding a city's .SCF, such as Scenery/SANFRAN.`);
+      }
+      this._scene.clearTrack();
+      this._clearTrackInfo();
+      this._hideTrackPicker();
+      this._hideTrackModal();
+      const archive = { filename: folder, source: `Folder: ${folder}` };
+      this._archives = [archive];
+      this._indexedArchive = null;
+      this._choices = sets.map((set) => ({
+        archive,
+        index: 0,
+        name: set.name,
+        fileName: set.directory,
+        flySet: set,
+      }));
+      this._populateTrackPicker();
+      if (sets.length === 1) {
+        await this._loadTrackChoice(0);
+      } else {
+        this._setStatus(`Found ${sets.length} Fly! scenery sets. Choose one to load.`);
+        this._showTrackModal(folder);
+      }
+    } catch (err) {
+      this._showError(`Error: ${err.message}`);
+      this._updateTruckButtons();
+    }
+  }
+
+  /** Put a loaded result on screen: the scene, the minimap, the panels and the title. */
+  _presentTrack(result, fallbackName) {
+    const name = result.trackName || fallbackName;
+    this._renderFlags.checkpoints = !["MTM1", "MTM2", "EVO1", "EVO2", "CPR"].includes(result.origin);
+    this._doc.getElementById("tog-checkpoints").checked = this._renderFlags.checkpoints;
+    // The 2px terrain overlap hides seams on MTM2 and Evo's tile sets, and only blurs the
+    // others' (MTM1, CPR, TV, Fury3, Hellbender), so it starts on per game. Still a toggle.
+    this._renderFlags.terrainOverlap = ["MTM2", "EVO1", "EVO2"].includes(result.origin);
+    this._doc.getElementById("tog-terrain-overlap").checked = this._renderFlags.terrainOverlap;
+    this._scene.setTrack(result, this._renderFlags, this._heightScale);
+    this._doc.getElementById("sidebar").classList.remove("no-track");
+    // Fly! scenery is a flight world with no truck physics behind it.
+    if (this._truckAssembly && result.origin !== "FLY") {
+      this._scene.setDriveTruck(this._truckAssembly);
+    }
+    this._minimap.setTrack(result);
+    this._minimap.updateCamera(this._scene.nav);
+    this._updateTrackInfo(result);
+    this._applyLayerAvailability(this._scene.layerPresence());
+    this._buildCourseToggles();
+    this._applyWeather();
+    this._setStatus(name);
+    this._setDocumentTitle(name, result.origin);
+    for (const warning of result.warnings ?? []) console.warn(warning);
+    // Focus viewport after load
+    this._doc.getElementById("viewport")?.focus();
   }
 
   _stopDrivingForChange() {
@@ -543,7 +637,7 @@ export class TrackViewerApp {
     // Drive and its hitbox overlay mean nothing until a truck POD is open, so they are not
     // shown at all before then; with a truck but no track, Drive shows but stays disabled.
     const hasTruck = !!(this._truckChoices.length || this._truckAssembly);
-    const ready = !!(this._scene._trackData && hasTruck);
+    const ready = !!(this._scene._trackData && hasTruck && this._scene._trackData.origin !== "FLY");
     const drive = this._doc.getElementById("drive-btn");
     drive.hidden = !hasTruck;
     drive.disabled = !ready;
@@ -797,9 +891,13 @@ export class TrackViewerApp {
     list.replaceChildren();
     const grouped = this._archives.length > 1;
     let heading = null;
-    this._doc.getElementById("track-modal-source").textContent = grouped
-      ? `${container} holds ${this._archives.length} PODs with ${this._choices.length} tracks.`
-      : `${container} holds ${this._choices.length} tracks.`;
+    const scenery = this._choices.every((choice) => choice.flySet);
+    this._doc.getElementById("track-modal-title").textContent = scenery ? "Choose a scenery set" : "Choose a track";
+    this._doc.getElementById("track-modal-source").textContent = scenery
+      ? `${container} holds ${this._choices.length} Fly! scenery sets.`
+      : grouped
+        ? `${container} holds ${this._archives.length} PODs with ${this._choices.length} tracks.`
+        : `${container} holds ${this._choices.length} tracks.`;
     this._choices.forEach((choice, i) => {
       if (grouped && heading !== choice.archive.filename) {
         heading = choice.archive.filename;
@@ -874,6 +972,12 @@ export class TrackViewerApp {
     if (data.ambientSound != null) pairs.push(["Ambient", displayAmbientSound(data)]);
     if (data.redbookTrack != null) pairs.push(["Redbook track", String(data.redbookTrack)]);
     if (data.podComment) pairs.push(["POD comment", data.podComment]);
+    if (data.fly) {
+      pairs.push(["Globe tiles", data.fly.tiles.join(", ")]);
+      const c = data.fly.coverage;
+      if (c) pairs.push(["Coverage", `${formatLatitude(c.south)} to ${formatLatitude(c.north)}, ${formatLongitude(c.west)} to ${formatLongitude(c.east)}`]);
+      if (data.warnings?.length) pairs.push(["Notes", data.warnings.join(" ")]);
+    }
 
     // Only shown when the pod carries a Community Patch 3 version record.
     const version = data.trackVersion;
@@ -1279,6 +1383,16 @@ class Minimap {
 
   _buildHeightMap() {
     const terrain = this.track?.terrain;
+    // Fly! brings its own picture of the world, its satellite imagery, already north up.
+    if (this.canvas && terrain?.minimap) {
+      const { rgba, width, height } = terrain.minimap;
+      this.mapBitmap = new ImageData(new Uint8ClampedArray(rgba.buffer ?? rgba), width, height);
+      this.mapCanvas = document.createElement("canvas");
+      this.mapCanvas.width = width;
+      this.mapCanvas.height = height;
+      this.mapCanvas.getContext("2d").putImageData(this.mapBitmap, 0, 0);
+      return;
+    }
     if (!this.canvas || !terrain?.rawData) {
       this.mapBitmap = null;
       return;
@@ -1349,4 +1463,14 @@ class Minimap {
     ctx.stroke();
     ctx.fill();
   }
+}
+
+/** A latitude as 37.84°N. */
+function formatLatitude(degrees) {
+  return `${Math.abs(degrees).toFixed(2)}°${degrees < 0 ? "S" : "N"}`;
+}
+
+/** A longitude as 122.34°W. */
+function formatLongitude(degrees) {
+  return `${Math.abs(degrees).toFixed(2)}°${degrees < 0 ? "W" : "E"}`;
 }

@@ -48,6 +48,10 @@ export { parseEvoAiLine, matchEvoAiLineName, lapRuns } from "./evo/ai-line.js";
 export { sampleForPalette, medianCutPalette, colourCube, encodeRawTexture } from "./texture/encode.js";
 export { MTM2_PALETTE_WHITE_INDEX, MTM2_PALETTE_FIRST_AUTHORED, MTM2_PALETTE_AUTHORED_COUNT, mtm2LevelPalette, buildFogMap, } from "./mtm/level-palette.js";
 export { writeMtm2Sit, writeMtm2Lvl, writeTexList, writeEmptyList, emptyGroundBoxGrids, buildMtm2Lte, writeMtm2Trk, } from "./mtm/write.js";
+export { parseFlyTagged, flyTag, flyTags, parseFlyAngle } from "./fly/tagged.js";
+export { FLY_TILE_DEGREES, FLY_TILE_COLUMNS, FLY_EQUATOR_ROW, FLY_TILE_CELLS, FLY_QUADRANT_CELLS, flyRowLatitude, flyColumnLongitude, flyTileBounds, flyTileAt, parseFlyFolderName, flyFolderName, parseFlyTextureName, } from "./fly/globe.js";
+export { parseFlyScf, parseFlySceneryObjects } from "./fly/scenery.js";
+export { FLY_ALT_SIDE, parseFlyAlt, parseFlyTex, parseFlyTyp, parseFlyRef, parseFlyAl2, parseFlyQuadrant, } from "./fly/quadrant.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
 export const VERSION = "0.1.0";

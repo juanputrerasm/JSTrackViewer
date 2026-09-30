@@ -1037,8 +1037,8 @@ export class TrackScene {
     const has = (...groups) => groups.some((name) => g[name].children.length > 0);
     const objects = has("objects", "billboards", "vegetation", "checkpoints", "ramps");
     return {
-      terrain:    !!this._terrainMesh,
-      textures:   !!this._terrainMesh,
+      terrain:    !!this._terrainMesh || !!this._flyTileMeshes?.length,
+      textures:   !!this._terrainMesh || !!this._flyTileMeshes?.length,
       terrainOverlap: !!this._terrainMesh,
       grid:       !!this._terrainMesh,
       objects,
@@ -1135,6 +1135,9 @@ export class TrackScene {
     // texture toggle: swap between textured and flat terrain material
     const terrainMaterial = f.textures ? this._terrainMatTextured : this._terrainMatFlat;
     if (this._terrainMesh) this._terrainMesh.material = terrainMaterial;
+    for (const mesh of this._flyTileMeshes ?? []) {
+      mesh.material = f.textures ? mesh.userData.texturedMaterial : this._terrainMatFlat;
+    }
     const undergroundMaterial = f.textures
       ? (this._undergroundMatTextured ?? this._terrainMatFlat)
       : this._terrainMatFlat;
@@ -1174,6 +1177,12 @@ export class TrackScene {
       }
     }
     this._terrainMesh = null;
+    // The loop above frees the material each tile wears now, which is the flat one while
+    // textures are off, and never the textures themselves.
+    for (const mesh of this._flyTileMeshes ?? []) mesh.userData.texturedMaterial?.dispose();
+    for (const texture of this._flyTileTextures ?? []) texture.dispose();
+    this._flyTileTextures = [];
+    this._flyTileMeshes = [];
     /*
       The cavern surfaces share the terrain material rather than owning one, so the loop above
       disposes that material once per mesh that references it. Dropping the references here is
@@ -1239,7 +1248,8 @@ export class TrackScene {
     this._modelTexCache = {};
 
     if (trackData.modelTextures) this._loadModelTextures(trackData.modelTextures);
-    if (trackData.terrain) this._buildTerrain(trackData.terrain);
+    if (trackData.flyTiles) this._buildFlyTerrain(trackData.flyTiles);
+    else if (trackData.terrain) this._buildTerrain(trackData.terrain);
     // An arena REPLACES the backdrop rather than joining it: Traxx suppresses the backdrop
     // model at load (TrackPODFile.cpp:2758-2759) and again at draw
     // (TraxxViewDisplay.cpp:307-311, `openglbackdrop = arena.arena == FALSE && ...`).
@@ -1426,6 +1436,48 @@ export class TrackScene {
     gridLinGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(lineVerts), 3));
     const gridMat = new THREE.LineBasicMaterial({ color: 0x8888cc, opacity: 0.65, transparent: true });
     this._groups.terrainGrid.add(new THREE.LineSegments(gridLinGeo, gridMat));
+  }
+
+  /*
+    Fly! scenery: one mesh per globe tile, each draped with its own orthophoto.
+
+    The worker stitches a tile's 4,096 cell textures into one picture (see fly-loader.js), so
+    unlike the other games' atlases this is a single continuous texture per mesh, and it can
+    be mipmapped: from altitude a tile is mostly seen at a steep angle and a long way off,
+    where an unfiltered 2048 px photo shimmers. The Textures toggle swaps in the shared flat
+    material, as for any other terrain.
+  */
+  _buildFlyTerrain(tiles) {
+    this._terrainMatFlat = new THREE.MeshLambertMaterial({ color: 0x4a7a4a, side: THREE.FrontSide });
+    this._flyTileMeshes = [];
+    this._flyTileTextures = [];
+    const anisotropy = this._renderer.capabilities.getMaxAnisotropy();
+    for (const tile of tiles) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(tile.positions), 3));
+      geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(tile.normals), 3));
+      geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(tile.uvs), 2));
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(tile.indices), 1));
+
+      const { rgba, width, height } = tile.image;
+      const texture = new THREE.DataTexture(new Uint8Array(rgba.buffer ?? rgba), width, height, THREE.RGBAFormat);
+      texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.magFilter = THREE.LinearFilter;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.generateMipmaps = true;
+      texture.anisotropy = anisotropy;
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.needsUpdate = true;
+      this._flyTileTextures.push(texture);
+
+      const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.name = tile.folder;
+      mesh.userData.texturedMaterial = material;
+      mesh.receiveShadow = true;
+      this._groups.terrain.add(mesh);
+      this._flyTileMeshes.push(mesh);
+    }
   }
 
   /*
