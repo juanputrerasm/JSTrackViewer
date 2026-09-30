@@ -1181,6 +1181,8 @@ export class TrackScene {
     // textures are off, and never the textures themselves.
     for (const mesh of this._flyTileMeshes ?? []) mesh.userData.texturedMaterial?.dispose();
     for (const texture of this._flyTileTextures ?? []) texture.dispose();
+    for (const resource of this._flyObjectResources ?? []) resource.dispose();
+    this._flyObjectResources = [];
     this._flyTileTextures = [];
     this._flyTileMeshes = [];
     /*
@@ -1274,6 +1276,7 @@ export class TrackScene {
     if (trackData.raceTrackSurfaces?.length) this._buildRaceTrackLayer(trackData);
     this._buildCourses(trackData);
     if (trackData.boxes?.length) this._buildObjects(trackData);
+    if (trackData.flyObjects?.length) this._buildFlyObjects(trackData);
     this._reportMissingModelTextures(trackData);
     if (trackData.groundBoxes?.length) this._buildGroundBoxes(trackData.groundBoxes, this._heightScale, trackData);
     this._buildUnderground(trackData);
@@ -1478,6 +1481,70 @@ export class TrackScene {
       this._groups.terrain.add(mesh);
       this._flyTileMeshes.push(mesh);
     }
+  }
+
+  /*
+    Fly! buildings and landmarks.
+
+    The worker has already put each object in scene space: `position` is the bottom centre of
+    its model, and `scale` takes the decoder's units to scene units (see fly-loader.js). What
+    is left is the Traxx-local to scene axis swap that every BIN model needs, which is
+    traxxModelMatrix without its vertical stretch (Fly's relief is drawn true to scale), and
+    putting the recentred mesh back on the model's own vertical axis. One geometry per model
+    mesh is shared by every placement of it.
+  */
+  _buildFlyObjects(trackData) {
+    const geometries = new Map();
+    const materials = new Map();
+    const wireMat = new THREE.LineBasicMaterial({ color: 0xF5E287 });
+    for (const object of trackData.flyObjects) {
+      const model = trackData.models?.[object.modelName];
+      if (!model?.meshes?.length) continue;
+      if (!geometries.has(object.modelName)) {
+        geometries.set(object.modelName, model.meshes.map((mesh) => {
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
+          geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
+          geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+          geo.computeBoundingSphere();
+          return { geo, edges: new THREE.EdgesGeometry(geo), mesh };
+        }));
+      }
+      const [x, y, z] = object.position;
+      // Heading is clockwise from north, which is traxxModelMatrix's own sense: matched against
+      // the imagery at SFO, where the terminal's piers only land on the photographed ones so.
+      const matrix = traxxModelMatrix(object.heading, 0, 0, x, y, z, 1)
+        .multiply(new THREE.Matrix4().makeScale(object.scale, object.scale, object.scale))
+        .multiply(new THREE.Matrix4().makeTranslation(model.anchor?.x ?? 0, model.anchor?.y ?? 0, 0));
+      const group = new THREE.Group();
+      const wire = new THREE.Group();
+      group.name = wire.name = object.name;
+      for (const part of [group, wire]) {
+        part.matrixAutoUpdate = false;
+        part.matrix.copy(matrix);
+        part.matrixWorldNeedsUpdate = true;
+      }
+      for (const { geo, edges, mesh } of geometries.get(object.modelName)) {
+        const key = `${object.modelName}|${model.meshes.indexOf(mesh)}`;
+        if (!materials.has(key)) materials.set(key, this._createModelMaterial(mesh));
+        const material = materials.get(key);
+        const solid = new THREE.Mesh(geo, material);
+        if (!material.transparent && material.depthWrite && material.blending === THREE.NormalBlending) {
+          solid.castShadow = true;
+          material.shadowSide = material.side;
+        }
+        group.add(solid);
+        wire.add(new THREE.LineSegments(edges, wireMat));
+      }
+      this._groups.objects.add(group);
+      this._groups.objectsWire.add(wire);
+    }
+    // Nested under a group per placement, so clearTrack's flat loop cannot reach them.
+    this._flyObjectResources = [
+      ...[...geometries.values()].flat().flatMap(({ geo, edges }) => [geo, edges]),
+      ...materials.values(),
+      wireMat,
+    ];
   }
 
   /*

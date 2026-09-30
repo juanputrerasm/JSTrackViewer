@@ -21,6 +21,15 @@ const MRGLMAT_TEXSOLID = MRGLMAT.TEXSOLID;
 const TYPE_IGNORE_TEX = 0x19;
 
 export function decodeBinModel(bytes, modelName, origin) {
+  if (!bytes?.length || bytes.length < 4) return decodeParsedBin(null, modelName, origin);
+  return decodeParsedBin(parseBin(bytes), modelName, origin);
+}
+
+/**
+ * The same, from a model OpenPhotex has already read: a Fly! .BSP reaches the viewer that way,
+ * as the .BIN its nodes amount to (parseFlyBsp).
+ */
+export function decodeParsedBin(bin, modelName, origin) {
   const model = {
     name: modelName, format: "UNKNOWN",
     magnifyPower: 65536, baseZ: 0,
@@ -33,8 +42,7 @@ export function decodeBinModel(bytes, modelName, origin) {
     // and nothing else about it looks wrong, so say so rather than failing silently.
     incomplete: false, loadWarning: "",
   };
-  if (!bytes?.length || bytes.length < 4) return model;
-  const bin = parseBin(bytes);
+  if (!bin) return model;
   if (bin.kind === "lwo") { model.format = "LWO"; return model; }
   if (bin.kind === "mrgl") {
     model.format = "BIN";

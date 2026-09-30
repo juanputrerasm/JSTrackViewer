@@ -103,3 +103,37 @@ test("Fly! one numbered EPD on its own is one globe tile", { skip: skipSf }, asy
 test("Fly! archives without terrain are refused", { skip: skipSf }, async () => {
   await assert.rejects(loadFlyScenery([archive("SFMODELS.EPD")]), /No Fly! terrain/);
 });
+
+/*
+  Buildings and landmarks, San Francisco: the Golden Gate Bridge (a .BSP) and the Transamerica
+  Pyramid (a .BIN) stand where they are, at their real size, and the camera opens downtown.
+*/
+test("Fly! San Francisco places its buildings and bridges to scale", { skip: skipSf }, async () => {
+  const result = await loadFlyScenery(
+    ["SANFRAN1.EPD", "SANFRAN2.EPD", "SANFRAN3.EPD", "SANFRAN4.EPD", "SFMODELS.EPD"].map(archive));
+  const feet = (units) => units / result.fly.unitsPerFoot;
+  const byName = (name) => result.flyObjects.find((o) => o.name === name);
+
+  const bridge = byName("Golden Gate Bridge");
+  assert.equal(bridge.modelName, "GOLD1.BSP"); // the near model of the two it lists
+  // Its base on the water, heading about 175 degrees, a little west of north-south like the bridge.
+  assert.ok(Math.abs(feet(bridge.position[1])) < 5, `bridge base at ${feet(bridge.position[1])} ft`);
+  assert.ok(Math.abs(bridge.heading * 180 / Math.PI - 175.3) < 0.5);
+  const gold = result.models["GOLD1.BSP"];
+  assert.ok(gold.meshes.length > 0);
+  assert.ok(Math.abs((gold.rawVertexBounds.maxZ - gold.rawVertexBounds.minZ) / 128 - 750) < 10);
+
+  const pyramid = byName("Transamerica Building");
+  const model = result.models[pyramid.modelName];
+  assert.ok(Math.abs((model.rawVertexBounds.maxZ - model.rawVertexBounds.minZ) / 128 - 853) < 5);
+  // Its base 133 ft up, on the terrain under it: altitude 559.6 less half its height.
+  assert.ok(Math.abs(feet(pyramid.position[1]) - 133.3) < 1, `pyramid base at ${feet(pyramid.position[1])} ft`);
+
+  // Scene x east and z south: the bridge is west and north of the pyramid.
+  assert.ok(bridge.position[0] < pyramid.position[0] && bridge.position[2] < pyramid.position[2]);
+  // The camera opens a few cells south of downtown, looking north.
+  const view = result.startView;
+  assert.ok(Math.hypot(view.x - pyramid.position[0], view.z - pyramid.position[2]) < 4 * 64);
+  assert.equal(view.yaw, 0);
+  assert.ok(result.modelTextures.some((t) => t.name === "SANFRAN1.RAW" && t.width === 256));
+});

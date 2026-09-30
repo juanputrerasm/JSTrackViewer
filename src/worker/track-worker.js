@@ -803,6 +803,9 @@ function collectTransfers(obj) {
   if (!obj || typeof obj !== "object") return transfers;
   for (const value of Object.values(obj)) {
     if (value instanceof ArrayBuffer) transfers.push(value);
+    // A typed array holds numbers, never a buffer to find, and walking it element by element
+    // costs millions of steps on a Fly! orthophoto. It is copied, not transferred.
+    else if (ArrayBuffer.isView(value)) continue;
     else if (value && typeof value === "object") transfers.push(...collectTransfers(value));
   }
   return transfers;

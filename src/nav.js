@@ -129,6 +129,17 @@ export class TrackCamera {
       return;
     }
 
+    // A loader may name its own opening view, in scene units: Fly! opens over its busiest
+    // scenery rather than a quarter of a 250 km world away.
+    const view = trackData?.startView;
+    if (view) {
+      this.position.set(view.x, view.y, view.z);
+      this.yaw = view.yaw ?? 0;
+      this.pitch = view.pitch ?? -25;
+      this._applyToCamera();
+      return;
+    }
+
     const first = trackData?.primaryCourse?.segments?.[0];
     if (!first?.start || !first?.end) {
       this.resetToTrackCenter(gridSize, cellSize, heightScale);

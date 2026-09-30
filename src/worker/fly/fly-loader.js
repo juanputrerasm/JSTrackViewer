@@ -1,7 +1,9 @@
 import {
   parsePod, podDirectoryEnd, findPodEntry, readPodEntry, decodeActPalette, parseFlyQuadrant, parseFlyTextureName,
-  parseFlyFolderName, flyTileBounds, FLY_TILE_CELLS, FLY_QUADRANT_CELLS, FLY_ALT_SIDE,
+  parseFlyFolderName, flyTileBounds, flyTileAt, parseFlySceneryObjects, parseFlyBsp, FLY_TILE_CELLS, FLY_QUADRANT_CELLS, FLY_ALT_SIDE,
 } from "../../vendor/openphotex/index.js";
+import { decodeBinModel, decodeParsedBin } from "../bin-decoder.js";
+import { decodeRawTexture } from "../texture-decoder.js";
 
 /*
   Loads Fly! scenery (1999) into the viewer: the terrain of every globe tile found in the
@@ -120,6 +122,8 @@ export async function loadFlyScenery(archives, options = {}) {
   }
   flyTiles.sort((a, b) => b.row - a.row || a.column - b.column);
 
+  const objects = await loadFlyObjects(indexed, tiles, { west, north, unitsPerFoot }, warnings);
+
   const tileNames = flyTiles.map((t) => t.folder).join(", ");
   return {
     origin: "FLY",
@@ -139,11 +143,148 @@ export async function loadFlyScenery(archives, options = {}) {
       coverage: options.coverage ?? null,
       unitsPerFoot,
     },
+    flyObjects: objects.placed,
+    startView: startView(objects.placed, gridSize, unitsPerFoot),
     boxes: [],
-    models: {},
-    modelTextures: [],
+    models: objects.models,
+    modelTextures: objects.modelTextures,
     warnings,
   };
+}
+
+/*
+  Buildings and landmarks: the objects the SCENERY.Sxx files of the loaded tiles place.
+
+  An object is a model centred on its origin, placed by latitude, longitude and the altitude
+  of that origin in feet. Its vertices are 256 to the foot, which is 2 of bin-decoder's units
+  (it divides the words by 128), and the decoder moves each mesh's origin to the bottom
+  centre, so the base stands at altitude + anchor.z / 2 feet. On San Francisco and Los Angeles
+  that puts the median base exactly on the terrain (docs/FLY.md in OpenPhotex).
+
+  .BIN models and the .BSP structures (the bridges, which OpenPhotex reads as the .BIN their
+  nodes amount to) are drawn. .ARM beacons are not decoded yet, and a set's windsocks name
+  models that ship with the game, not the scenery.
+*/
+async function loadFlyObjects(indexed, tiles, frame, warnings) {
+  const byTitle = new Map();
+  for (const archive of indexed) {
+    for (const entry of archive.pod.entries) if (!byTitle.has(entry.title)) byTitle.set(entry.title, { archive, entry });
+  }
+  const read = async ({ archive, entry }) =>
+    new Uint8Array(await archive.blob.slice(entry.offset, entry.offset + entry.length).arrayBuffer());
+
+  const models = {};
+  const failed = new Set();
+  const skipped = new Map();
+  const placed = [];
+  for (const archive of indexed) {
+    for (const entry of archive.pod.entries) {
+      const match = /^DATA\/(D\d{6})\/SCENERY\.S[01][01]$/.exec(entry.normalizedName);
+      if (!match || !tiles.has(match[1])) continue;
+      const { objects, warnings: parseWarnings } = parseFlySceneryObjects(await read({ archive, entry }), entry.name);
+      warnings.push(...parseWarnings);
+      for (const object of objects) {
+        for (const file of chooseModels(object.models)) {
+          const title = file.toUpperCase();
+          if (!title.endsWith(".BIN") && !title.endsWith(".BSP")) {
+            const ext = title.slice(title.lastIndexOf("."));
+            skipped.set(ext, (skipped.get(ext) ?? 0) + 1);
+            continue;
+          }
+          if (!models[title] && !failed.has(title)) {
+            const source = byTitle.get(title);
+            const model = source ? await decodeFlyModel(await read(source), title, warnings) : null;
+            if (model?.meshes?.length) models[title] = model;
+            else failed.add(title);
+          }
+          const model = models[title];
+          if (!model) continue;
+          const at = flyTileAt(object.latitude, object.longitude);
+          const cellX = (at.column - frame.west) * FLY_TILE_CELLS + at.x;
+          const cellZ = (frame.north - at.row) * FLY_TILE_CELLS + (FLY_TILE_CELLS - at.y);
+          placed.push({
+            name: object.name,
+            modelName: title,
+            position: [cellX * CELL_UNITS, (object.altitude + model.anchor.z / 2) * frame.unitsPerFoot, cellZ * CELL_UNITS],
+            heading: object.orientation[1],
+            pitch: object.orientation[0],
+            roll: object.orientation[2],
+            scale: frame.unitsPerFoot / 2,
+            // Feet, from the model's vertical extent in bin-decoder units (2 to the foot).
+            height: model.rawVertexBounds ? (model.rawVertexBounds.maxZ - model.rawVertexBounds.minZ) / 128 : 0,
+          });
+        }
+      }
+    }
+  }
+  if (failed.size) warnings.push(`${failed.size} object model(s) are not in these archives: ${[...failed].sort().join(", ")}.`);
+  for (const [ext, count] of skipped) warnings.push(`${count} object(s) use ${ext} models, which are not drawn yet.`);
+
+  // The models' textures: 256 px .RAW files with a same-stem .ACT, at the archive root.
+  const modelTextures = [];
+  const cutouts = new Set(Object.values(models).flatMap((m) => m.meshes.filter((mesh) => mesh.transparent).map((mesh) => mesh.textureName)));
+  for (const name of new Set(Object.values(models).flatMap((m) => m.textureNames))) {
+    const raw = byTitle.get(name);
+    const act = byTitle.get(name.replace(/\.RAW$/, ".ACT"));
+    if (!raw || !act) continue;
+    try {
+      const decoded = decodeRawTexture(await read(raw), await read(act), name, cutouts.has(name) ? { cutout: true } : undefined);
+      modelTextures.push({ name, rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height });
+    } catch (err) {
+      warnings.push(`${name}: ${err?.message ?? err}`);
+    }
+  }
+  return { placed, models, modelTextures };
+}
+
+/*
+  Where the camera opens: south of the tallest cluster of scenery, which is a city's downtown
+  in every stock set, a few thousand feet up and looking north across it. Objects count by
+  their height, so a district of towers outweighs an airport's rows of hangars. Without
+  objects, the middle of the tiles from high up.
+*/
+function startView(placed, gridSize, unitsPerFoot) {
+  const world = gridSize * CELL_UNITS;
+  if (!placed.length) return { x: world / 2, y: world * 0.12, z: world * 0.75, yaw: 0, pitch: -30 };
+  const cells = new Map();
+  const cellOf = (object) => [Math.floor(object.position[0] / CELL_UNITS), Math.floor(object.position[2] / CELL_UNITS)];
+  for (const object of placed) {
+    const key = cellOf(object).join(",");
+    cells.set(key, (cells.get(key) ?? 0) + object.height);
+  }
+  let best = null, bestWeight = -1;
+  for (const object of placed) {
+    const [cx, cz] = cellOf(object);
+    let weight = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) weight += cells.get(`${cx + dx},${cz + dz}`) ?? 0;
+    if (weight > bestWeight) { bestWeight = weight; best = object; }
+  }
+  const [x, ground, z] = best.position;
+  return { x, y: ground + 3000 * unitsPerFoot, z: z + 2 * CELL_UNITS, yaw: 0, pitch: -18 };
+}
+
+/** A .BIN, or a .BSP read as the .BIN it amounts to, as bin-decoder's model. */
+async function decodeFlyModel(bytes, title, warnings) {
+  if (!title.endsWith(".BSP")) return decodeBinModel(bytes, title, "FLY");
+  try {
+    return decodeParsedBin(parseFlyBsp(bytes, title).model, title, "FLY");
+  } catch (err) {
+    warnings.push(`${title}: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
+/*
+  The model files an object shows. Each part (usually just `comp`) shows once: a part listed
+  with distance ranges (<mdst>) takes the one for the nearest view.
+*/
+function chooseModels(models) {
+  const byPart = new Map();
+  for (const model of models) {
+    const best = byPart.get(model.part);
+    if (!best || (model.near ?? 0) < (best.near ?? 0)) byPart.set(model.part, model);
+  }
+  return [...byPart.values()].map((model) => model.file);
 }
 
 /** The directory of an archive held as a Blob, reading only as much of it as that needs. */

@@ -52,6 +52,7 @@ export { parseFlyTagged, flyTag, flyTags, parseFlyAngle } from "./fly/tagged.js"
 export { FLY_TILE_DEGREES, FLY_TILE_COLUMNS, FLY_EQUATOR_ROW, FLY_TILE_CELLS, FLY_QUADRANT_CELLS, flyRowLatitude, flyColumnLongitude, flyTileBounds, flyTileAt, parseFlyFolderName, flyFolderName, parseFlyTextureName, } from "./fly/globe.js";
 export { parseFlyScf, parseFlySceneryObjects } from "./fly/scenery.js";
 export { FLY_ALT_SIDE, parseFlyAlt, parseFlyTex, parseFlyTyp, parseFlyRef, parseFlyAl2, parseFlyQuadrant, } from "./fly/quadrant.js";
+export { parseFlyBsp } from "./fly/bsp.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
 export const VERSION = "0.1.0";
