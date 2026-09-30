@@ -41,15 +41,19 @@ const POD2_TABLE_OFFSET = 0x60;
 const POD2_ENTRY_SIZE = 20;
 const POD2_MAX_ITEMS = 65536;
 /*
-  EPD, the container of Fly!. Known from one archive (SC24.EPD); see docs/POD.md.
+  EPD, the container of Fly!. Checked against all 72 stock archives; see docs/POD.md.
 
     0x00  4      "dtxe"
-    0x04  4      four-character archive title
-    0x08  136    unidentified
-    0x90  4      directory entry count
-    0x94  124    unidentified
+    0x04  9      archive title: a DOS base name of up to 8 characters, NUL-terminated
+    0x0d  247    uninitialised memory (stack and heap values), meaningless
+    0x104 4      directory entry count
+    0x108 4      zero in every stock archive
+    0x10c 4      unidentified, distinct per archive
     0x110 n*80   directory records
     ...          payloads
+
+  The count was once read at 0x90. That word is uninitialised memory: it happens to be 54 in
+  most sectional-chart archives (SC24.EPD has 272 entries) and is garbage in the scenery ones.
 
   Each 80-byte record: a 4-byte path prefix, a 60-byte path remainder, then uint32 payload
   length, absolute payload offset, Unix timestamp, and one unidentified uint32 (distinct per
@@ -58,8 +62,8 @@ const POD2_MAX_ITEMS = 65536;
 */
 const EPD_SIGNATURE = [0x64, 0x74, 0x78, 0x65]; // "dtxe"
 const EPD_TITLE_OFFSET = 0x04;
-const EPD_TITLE_SIZE = 4;
-const EPD_COUNT_OFFSET = 0x90;
+const EPD_TITLE_SIZE = 9;
+const EPD_COUNT_OFFSET = 0x104;
 const EPD_TABLE_OFFSET = 0x110;
 const EPD_ENTRY_SIZE = 80;
 const EPD_PREFIX_SIZE = 4;
@@ -276,11 +280,8 @@ function readEpd(bytes, view, size) {
     if (size < countEnd)
         throw new PodFormatError("TOO_SMALL", "File too small to be an EPD archive.");
     requirePrefix(bytes, countEnd);
-    // The title is four bytes with no terminator of its own; NULs anywhere in it are dropped.
-    const comment = decoder
-        .decode(bytes.subarray(EPD_TITLE_OFFSET, EPD_TITLE_OFFSET + EPD_TITLE_SIZE))
-        .replace(/\0/g, "")
-        .trim();
+    // The bytes after the title's terminator are uninitialised memory, so stop at the NUL.
+    const comment = decodeField(bytes, EPD_TITLE_OFFSET, EPD_TITLE_SIZE);
     const itemCount = view.getUint32(EPD_COUNT_OFFSET, true);
     if (itemCount < 1 || itemCount > EPD_MAX_ITEMS) {
         throw new PodFormatError("BAD_ENTRY_COUNT", `Suspicious EPD item count: ${itemCount}`);
