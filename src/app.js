@@ -63,6 +63,7 @@ export class TrackViewerApp {
       if (this._scene.drive?.isActive) this._scene.drive.teleport(x / UNITS_PER_FOOT_H, z / UNITS_PER_FOOT_H);
     });
     this._scene.setNavigationChangeCallback((nav) => this._minimap.updateCamera(nav));
+    this._scene.setFlyDetailProvider((folder, chunkX, chunkZ) => this._worker.call("flyDetail", { folder, chunkX, chunkZ }));
 
     // File input
     const fileInput = doc.getElementById("file-input");

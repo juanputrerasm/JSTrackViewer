@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { flySetsFromFolder } from "../src/fly-folder.js";
-import { loadFlyScenery } from "../src/worker/fly/fly-loader.js";
+import { loadFlyScenery, renderFlyDetail } from "../src/worker/fly/fly-loader.js";
+import { parsePod, findPodEntry, readPodEntry, decodeActPalette } from "../src/vendor/openphotex/index.js";
 
 /** What a browser's folder picker hands over: Files carrying their path under the folder. */
 function pickedFile(path, text = "") {
@@ -136,4 +137,38 @@ test("Fly! San Francisco places its buildings and bridges to scale", { skip: ski
   assert.ok(Math.hypot(view.x - pyramid.position[0], view.z - pyramid.position[2]) < 4 * 64);
   assert.equal(view.yaw, 0);
   assert.ok(result.modelTextures.some((t) => t.name === "SANFRAN1.RAW" && t.width === 256));
+});
+
+/*
+  Full-resolution chunks: 8 x 8 cells at 128 px, each cell its own texture pixel for pixel,
+  and at SFO the airport's 2 x 2 detail textures over the cell they refine.
+*/
+test("Fly! detail chunks draw every texture at its own resolution", { skip: skipSf }, async () => {
+  await loadFlyScenery(["SANFRAN1.EPD", "SANFRAN2.EPD", "SANFRAN3.EPD", "SANFRAN4.EPD"].map(archive));
+  const bytes = new Uint8Array(readFileSync(`${SF}/SANFRAN1.EPD`));
+  const pod = parsePod(bytes);
+  const texel = (path, x, y) => {
+    const indices = readPodEntry(bytes, findPodEntry(pod, `${path}.RAW`));
+    const palette = decodeActPalette(readPodEntry(bytes, findPodEntry(pod, `${path}.ACT`)));
+    const c = indices[y * 128 + x] * 3;
+    return [palette[c], palette[c + 1], palette[c + 2]];
+  };
+  // Chunk (7, 1) of D168156 holds cells x 56..63 and y 55..48 from the top, SFO among them.
+  const chunk = await renderFlyDetail("D168156", 7, 1);
+  assert.equal(chunk.width, 1024);
+  const pixel = (x, y) => [...chunk.rgba.slice((y * 1024 + x) * 4, (y * 1024 + x) * 4 + 3)];
+
+  // A texture's name is its folder and row * 64 + column in decimal, written in hex.
+  const name = (digits) => Number(digits).toString(16).toUpperCase().padStart(8, "0");
+  // Cell (56, 55), a plain one, sits at the chunk's top left.
+  assert.deepEqual(pixel(10, 20), texel(`DATA/D168156/${name(1681560000 + 55 * 64 + 56)}`, 10, 20));
+  // Cell (61, 50) is refined by detail folder D061050: its north-west quarter is sub-texture
+  // 0064 (x 0, y 1), 24637DE0, drawn at half size, so chunk pixel (5*128 + 3, 5*128 + 3)
+  // averages its texels (6..7, 6..7).
+  const left = (61 - 56) * 128, top = (55 - 50) * 128;
+  const sub = [0, 1, 2].map((k) => Math.floor(
+    [[6, 6], [7, 6], [6, 7], [7, 7]].reduce((sum, [x, y]) => sum + texel(`DATA/D168156/D061050/${name(610500064)}`, x, y)[k], 0) / 4));
+  const got = pixel(left + 3, top + 3);
+  assert.ok(got.every((v, k) => Math.abs(v - sub[k]) <= 1), `${got} vs ${sub}`);
+  await assert.rejects(renderFlyDetail("D000000", 0, 0), /No Fly! tile/);
 });

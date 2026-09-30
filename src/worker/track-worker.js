@@ -67,6 +67,12 @@ self.onmessage = async (event) => {
         ? await loadFly([{ blob: await readFile(podOpfsPath), name: choice.name }], { name: choice.name })
         : await loadTrackAsync(podIndex, podOpfsPath, choice, heightScale ?? 3);
 
+    } else if (type === "flyDetail") {
+      // One chunk of the loaded Fly! scenery at full resolution, its pixels transferred.
+      const { renderFlyDetail } = await import("./fly/fly-loader.js");
+      const image = await renderFlyDetail(payload.folder, payload.chunkX, payload.chunkZ);
+      result = { rgba: image.rgba.buffer, width: image.width, height: image.height };
+
     } else if (type === "loadFly") {
       // A Fly! scenery set: the archives its .SCF lists, handed over as Files, never copied.
       result = await loadFly(payload.archives, { name: payload.name, coverage: payload.coverage ?? null });

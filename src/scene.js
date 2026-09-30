@@ -300,6 +300,14 @@ function traxxRotationRows(psi, theta, phi) {
 // PushZStretch(768) the object stack applies.
 const TRAXX_Z_STRETCH = 0.75;
 
+/*
+  Fly! detail streaming: how many 8 x 8 cell chunks near the camera hold a full-resolution
+  texture at once, and how near (scene units, 64 a cell) a chunk must be to get one. The
+  tile orthophoto's 60 m texels start to show as blur within about that distance.
+*/
+const FLY_DETAIL_BUDGET = 12;
+const FLY_DETAIL_RANGE = 1600;
+
 /**
  * Object matrix for geometry authored in Traxx local space (BIN models): T * S * R,
  * where T maps Traxx (jx,jy,jz) -> Three.js (jx, jz, -jy).
@@ -853,6 +861,7 @@ export class TrackScene {
       this._truckLights?.update(this._camera, time);
       this._updateTextureAnimations(dt);
       this._updateKeyframes(dt);
+      this._updateFlyDetail(dt);
       this._updateShadows();
       const f = this._renderFlags;
       this._flare.update(this._camera, this._sunDirection, this._sky.visible && f.sunlight !== false,
@@ -1177,9 +1186,14 @@ export class TrackScene {
       }
     }
     this._terrainMesh = null;
-    // The loop above frees the material each tile wears now, which is the flat one while
-    // textures are off, and never the textures themselves.
-    for (const mesh of this._flyTileMeshes ?? []) mesh.userData.texturedMaterial?.dispose();
+    // The loop above frees the material each Fly! chunk wears now, which is the flat one while
+    // textures are off, and never the textures themselves. Replies still on their way belong
+    // to this scenery and are dropped when they land.
+    this._flyDetailGeneration = (this._flyDetailGeneration ?? 0) + 1;
+    for (const mesh of this._flyTileMeshes ?? []) {
+      this._dropFlyDetail(mesh);
+      mesh.userData.tileMaterial?.dispose();
+    }
     for (const texture of this._flyTileTextures ?? []) texture.dispose();
     for (const resource of this._flyObjectResources ?? []) resource.dispose();
     this._flyObjectResources = [];
@@ -1250,7 +1264,7 @@ export class TrackScene {
     this._modelTexCache = {};
 
     if (trackData.modelTextures) this._loadModelTextures(trackData.modelTextures);
-    if (trackData.flyTiles) this._buildFlyTerrain(trackData.flyTiles);
+    if (trackData.flyTiles) this._buildFlyTerrain(trackData.flyTiles, trackData.fly);
     else if (trackData.terrain) this._buildTerrain(trackData.terrain);
     // An arena REPLACES the backdrop rather than joining it: Traxx suppresses the backdrop
     // model at load (TrackPODFile.cpp:2758-2759) and again at draw
@@ -1442,25 +1456,31 @@ export class TrackScene {
   }
 
   /*
-    Fly! scenery: one mesh per globe tile, each draped with its own orthophoto.
+    Fly! scenery: each globe tile is 8 x 8 chunk meshes of 8 x 8 cells, draped in its imagery.
 
-    The worker stitches a tile's 4,096 cell textures into one picture (see fly-loader.js), so
-    unlike the other games' atlases this is a single continuous texture per mesh, and it can
-    be mipmapped: from altitude a tile is mostly seen at a steep angle and a long way off,
-    where an unfiltered 2048 px photo shimmers. The Textures toggle swaps in the shared flat
-    material, as for any other terrain.
+    The worker stitches a tile's 4,096 cell textures into one orthophoto at 32 px a cell (see
+    fly-loader.js). It is a single continuous texture per tile, so unlike the other games'
+    atlases it can be mipmapped: from altitude a tile is mostly seen at a steep angle and a long
+    way off, where an unfiltered photo shimmers. Every chunk of the tile draws it through the
+    first UV set.
+
+    Close to the ground that is 60 m a pixel, so the chunks nearest the camera are redrawn at
+    the textures' own 128 px a cell, fetched from the worker one chunk at a time and mapped
+    through a second UV set that runs 0 to 1 across the chunk (_updateFlyDetail). The Textures
+    toggle swaps in the shared flat material, as for any other terrain.
   */
-  _buildFlyTerrain(tiles) {
+  _buildFlyTerrain(tiles, fly) {
     this._terrainMatFlat = new THREE.MeshLambertMaterial({ color: 0x4a7a4a, side: THREE.FrontSide });
     this._flyTileMeshes = [];
     this._flyTileTextures = [];
+    this._flyDetailCells = fly?.detailChunkCells ?? 8;
     const anisotropy = this._renderer.capabilities.getMaxAnisotropy();
+    const side = 65;
+    const n = this._flyDetailCells;
     for (const tile of tiles) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(tile.positions), 3));
-      geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(tile.normals), 3));
-      geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(tile.uvs), 2));
-      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(tile.indices), 1));
+      const positions = new Float32Array(tile.positions);
+      const normals = new Float32Array(tile.normals);
+      const uvs = new Float32Array(tile.uvs);
 
       const { rgba, width, height } = tile.image;
       const texture = new THREE.DataTexture(new Uint8Array(rgba.buffer ?? rgba), width, height, THREE.RGBAFormat);
@@ -1472,15 +1492,140 @@ export class TrackScene {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.needsUpdate = true;
       this._flyTileTextures.push(texture);
-
       const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
-      const mesh = new THREE.Mesh(geo, material);
-      mesh.name = tile.folder;
-      mesh.userData.texturedMaterial = material;
-      mesh.receiveShadow = true;
-      this._groups.terrain.add(mesh);
-      this._flyTileMeshes.push(mesh);
+
+      for (let cz = 0; cz < 64 / n; cz++) {
+        for (let cx = 0; cx < 64 / n; cx++) {
+          const count = (n + 1) * (n + 1);
+          const p = new Float32Array(count * 3), nr = new Float32Array(count * 3);
+          const uv = new Float32Array(count * 2), uv1 = new Float32Array(count * 2);
+          let ground = 0;
+          for (let r = 0; r <= n; r++) {
+            for (let c = 0; c <= n; c++) {
+              const from = (cz * n + r) * side + cx * n + c, to = r * (n + 1) + c;
+              p.set(positions.subarray(from * 3, from * 3 + 3), to * 3);
+              nr.set(normals.subarray(from * 3, from * 3 + 3), to * 3);
+              uv.set(uvs.subarray(from * 2, from * 2 + 2), to * 2);
+              uv1[to * 2] = c / n;
+              uv1[to * 2 + 1] = r / n;
+              ground += positions[from * 3 + 1];
+            }
+          }
+          const index = new Uint32Array(n * n * 6);
+          let k = 0;
+          for (let r = 0; r < n; r++) {
+            for (let c = 0; c < n; c++) {
+              const a = r * (n + 1) + c, b = a + 1, d = a + n + 1, e = d + 1;
+              index[k++] = a; index[k++] = d; index[k++] = b;
+              index[k++] = b; index[k++] = d; index[k++] = e;
+            }
+          }
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.BufferAttribute(p, 3));
+          geo.setAttribute("normal", new THREE.BufferAttribute(nr, 3));
+          geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+          geo.setAttribute("uv1", new THREE.BufferAttribute(uv1, 2));
+          geo.setIndex(new THREE.BufferAttribute(index, 1));
+          geo.computeBoundingSphere();
+
+          const mesh = new THREE.Mesh(geo, material);
+          mesh.name = `${tile.folder} ${cx},${cz}`;
+          mesh.userData.tileMaterial = material;
+          mesh.userData.texturedMaterial = material;
+          mesh.userData.fly = {
+            folder: tile.folder, chunkX: cx, chunkZ: cz,
+            minX: p[0], minZ: p[2], maxX: p[(count - 1) * 3], maxZ: p[(count - 1) * 3 + 2],
+            ground: ground / count, detail: null, pending: false,
+          };
+          mesh.receiveShadow = true;
+          this._groups.terrain.add(mesh);
+          this._flyTileMeshes.push(mesh);
+        }
+      }
     }
+  }
+
+  /** Where Fly! detail chunks come from: (folder, chunkX, chunkZ) => Promise<{rgba, width, height}>. */
+  setFlyDetailProvider(provider) {
+    this._flyDetailProvider = provider;
+  }
+
+  /*
+    Keep the chunks nearest the camera at full resolution.
+
+    Nearness is the distance from the camera to the chunk's ground: across to its nearest edge
+    and down to its average height, so flying high over a chunk counts as being far from it.
+    Up to FLY_DETAIL_BUDGET chunks within FLY_DETAIL_RANGE hold a full-resolution texture
+    (4 MB each, a third more with mipmaps); the rest fall back to their tile's orthophoto, and
+    a chunk that drops out of the nearest set gives its texture up. Requests go to the worker
+    two at a time, nearest first, and a reply that arrives after the scenery changed is
+    dropped.
+  */
+  _updateFlyDetail(dt) {
+    if (!this._flyTileMeshes?.length || !this._flyDetailProvider) return;
+    this._flyDetailClock = (this._flyDetailClock ?? 0) + dt;
+    if (this._flyDetailClock < 0.25) return;
+    this._flyDetailClock = 0;
+
+    const cam = this._camera.position;
+    const ranked = [];
+    for (const mesh of this._flyTileMeshes) {
+      const f = mesh.userData.fly;
+      const dx = Math.max(f.minX - cam.x, 0, cam.x - f.maxX);
+      const dz = Math.max(f.minZ - cam.z, 0, cam.z - f.maxZ);
+      const distance = Math.hypot(dx, dz, Math.max(0, cam.y - f.ground));
+      if (distance < FLY_DETAIL_RANGE) ranked.push({ mesh, distance });
+    }
+    ranked.sort((a, b) => a.distance - b.distance);
+    const wanted = new Set(ranked.slice(0, FLY_DETAIL_BUDGET).map((r) => r.mesh));
+
+    for (const mesh of this._flyTileMeshes) {
+      if (mesh.userData.fly.detail && !wanted.has(mesh)) this._dropFlyDetail(mesh);
+    }
+    let inFlight = this._flyTileMeshes.filter((m) => m.userData.fly.pending).length;
+    const generation = this._flyDetailGeneration;
+    for (const { mesh } of ranked.slice(0, FLY_DETAIL_BUDGET)) {
+      if (inFlight >= 2) break;
+      const f = mesh.userData.fly;
+      if (f.detail || f.pending) continue;
+      f.pending = true;
+      inFlight++;
+      this._flyDetailProvider(f.folder, f.chunkX, f.chunkZ).then((image) => {
+        f.pending = false;
+        if (generation !== this._flyDetailGeneration || !this._flyTileMeshes.includes(mesh)) return;
+        this._applyFlyDetail(mesh, image);
+      }, (err) => {
+        f.pending = false;
+        console.warn(`Fly! detail ${mesh.name}: ${err?.message ?? err}`);
+      });
+    }
+  }
+
+  _applyFlyDetail(mesh, { rgba, width, height }) {
+    const texture = new THREE.DataTexture(new Uint8Array(rgba), width, height, THREE.RGBAFormat);
+    texture.channel = 1;
+    texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.magFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = this._renderer.capabilities.getMaxAnisotropy();
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
+    mesh.userData.fly.detail = { texture, material };
+    mesh.userData.texturedMaterial = material;
+    if (this._renderFlags.textures !== false) mesh.material = material;
+    this._shadowMaterialsDirty = true;
+  }
+
+  _dropFlyDetail(mesh) {
+    const { detail } = mesh.userData.fly;
+    if (!detail) return;
+    mesh.userData.texturedMaterial = mesh.userData.tileMaterial;
+    if (mesh.material === detail.material) mesh.material = mesh.userData.tileMaterial;
+    detail.material.dispose();
+    detail.texture.dispose();
+    mesh.userData.fly.detail = null;
   }
 
   /*

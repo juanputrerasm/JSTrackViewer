@@ -27,6 +27,13 @@ import { decodeRawTexture } from "../texture-decoder.js";
 
 const CELL_UNITS = 64;
 const PIXELS_PER_CELL = 32;
+/*
+  Near the camera the scene asks for chunks of 8 x 8 cells at the textures' own 128 px a cell
+  (renderFlyDetail), four times the tile orthophoto's resolution. A whole city at that size
+  would be about 1 GB of textures, so only the nearest chunks get one.
+*/
+const DETAIL_CHUNK_CELLS = 8;
+const DETAIL_PIXELS_PER_CELL = 128;
 const TEXTURE_SIDE = 128;
 const METRES_PER_DEGREE = 111_132;
 const FEET_PER_METRE = 3.28084;
@@ -124,6 +131,9 @@ export async function loadFlyScenery(archives, options = {}) {
 
   const objects = await loadFlyObjects(indexed, tiles, { west, north, unitsPerFoot }, warnings);
 
+  // Kept for renderFlyDetail: the tiles with their parsed quadrants, and where every texture is.
+  session = { tiles, texturesByTitle };
+
   const tileNames = flyTiles.map((t) => t.folder).join(", ");
   return {
     origin: "FLY",
@@ -142,6 +152,8 @@ export async function loadFlyScenery(archives, options = {}) {
       tiles: flyTiles.map((t) => t.folder),
       coverage: options.coverage ?? null,
       unitsPerFoot,
+      detailChunkCells: DETAIL_CHUNK_CELLS,
+      detailPixelsPerCell: DETAIL_PIXELS_PER_CELL,
     },
     flyObjects: objects.placed,
     startView: startView(objects.placed, gridSize, unitsPerFoot),
@@ -245,7 +257,7 @@ async function loadFlyObjects(indexed, tiles, frame, warnings) {
 */
 function startView(placed, gridSize, unitsPerFoot) {
   const world = gridSize * CELL_UNITS;
-  if (!placed.length) return { x: world / 2, y: world * 0.12, z: world * 0.75, yaw: 0, pitch: -30 };
+  if (!placed.length) return { x: world / 2, y: world * 0.12, z: world * 0.75, yaw: 0, pitch: -30, altitudeSpeed: altitudeSpeed(unitsPerFoot) };
   const cells = new Map();
   const cellOf = (object) => [Math.floor(object.position[0] / CELL_UNITS), Math.floor(object.position[2] / CELL_UNITS)];
   for (const object of placed) {
@@ -260,7 +272,7 @@ function startView(placed, gridSize, unitsPerFoot) {
     if (weight > bestWeight) { bestWeight = weight; best = object; }
   }
   const [x, ground, z] = best.position;
-  return { x, y: ground + 3000 * unitsPerFoot, z: z + 2 * CELL_UNITS, yaw: 0, pitch: -18 };
+  return { x, y: ground + 3000 * unitsPerFoot, z: z + 2 * CELL_UNITS, yaw: 0, pitch: -18, altitudeSpeed: altitudeSpeed(unitsPerFoot) };
 }
 
 /** A .BIN, or a .BSP read as the .BIN it amounts to, as bin-decoder's model. */
@@ -275,6 +287,14 @@ async function decodeFlyModel(bytes, title, warnings) {
 }
 
 /*
+  Navigation in proportion to height (nav.js): per second at the default speed, travel about
+  the camera's height and climb or descend by half of it, never below 50 ft above sea level.
+*/
+function altitudeSpeed(unitsPerFoot) {
+  return { move: 4, climb: 2, floor: 50 * unitsPerFoot };
+}
+
+/*
   The model files an object shows. Each part (usually just `comp`) shows once: a part listed
   with distance ranges (<mdst>) takes the one for the nearest view.
 */
@@ -285,6 +305,34 @@ function chooseModels(models) {
     if (!best || (model.near ?? 0) < (best.near ?? 0)) byPart.set(model.part, model);
   }
   return [...byPart.values()].map((model) => model.file);
+}
+
+/** The scenery loadFlyScenery last loaded, for renderFlyDetail. One set is open at a time. */
+let session = null;
+
+/**
+ * One chunk of a loaded tile's imagery at full resolution: DETAIL_CHUNK_CELLS square, chunk
+ * (0, 0) at the tile's north-west corner, row 0 at the north edge like the tile orthophoto.
+ * Textures are read from the archives' Blobs as needed.
+ */
+export async function renderFlyDetail(folder, chunkX, chunkZ) {
+  const tile = session?.tiles.get(folder);
+  if (!tile?.quadrants) throw new Error(`No Fly! tile ${folder} is loaded.`);
+  const size = DETAIL_CHUNK_CELLS * DETAIL_PIXELS_PER_CELL;
+  const rgba = new Uint8ClampedArray(size * size * 4);
+  const read = ({ archive, entry }) => readBlobEntry(archive, entry);
+  for (let dx = 0; dx < DETAIL_CHUNK_CELLS; dx++) {
+    for (let dz = 0; dz < DETAIL_CHUNK_CELLS; dz++) {
+      const x = chunkX * DETAIL_CHUNK_CELLS + dx;
+      const y = FLY_TILE_CELLS - 1 - (chunkZ * DETAIL_CHUNK_CELLS + dz);
+      const quadrant = tile.quadrants[`${x >> 5}${y >> 5}`];
+      if (!quadrant) continue;
+      const cell = (x % FLY_QUADRANT_CELLS) * FLY_QUADRANT_CELLS + (y % FLY_QUADRANT_CELLS);
+      await drawCell(rgba, size, dx * DETAIL_PIXELS_PER_CELL, dz * DETAIL_PIXELS_PER_CELL, DETAIL_PIXELS_PER_CELL,
+        quadrant, cell, tile, read, session.texturesByTitle);
+    }
+  }
+  return { rgba, width: size, height: size };
 }
 
 /** The directory of an archive held as a Blob, reading only as much of it as that needs. */
@@ -304,6 +352,9 @@ async function indexBlob(blob) {
 */
 async function buildTile(tile, bytes, texturesByTitle, warnings) {
   const { pod } = tile.archive;
+  tile.quadrants = {};
+  // The tile's archive is in memory; a texture borrowed from another is sliced out of its Blob.
+  const read = ({ archive, entry }) => archive === tile.archive ? readPodEntry(bytes, entry) : readBlobEntry(archive, entry);
   const heights = new Float32Array(TILE_SIDE * TILE_SIDE);
   const side = FLY_TILE_CELLS * PIXELS_PER_CELL;
   const rgba = new Uint8ClampedArray(side * side * 4);
@@ -312,13 +363,13 @@ async function buildTile(tile, bytes, texturesByTitle, warnings) {
   for (let qx = 0; qx < 2; qx++) {
     for (let qy = 0; qy < 2; qy++) {
       const stem = `DATA/${tile.folder}/G${qx}${qy}`;
-      const read = (ext) => {
+      const file = (ext) => {
         const entry = findPodEntry(pod, stem + ext);
         return entry ? readPodEntry(bytes, entry) : null;
       };
       let quadrant;
       try {
-        quadrant = parseFlyQuadrant({ alt: read(".ALT"), typ: read(".TYP"), tex: read(".TEX"), ref: read(".REF"), al2: read(".AL2") }, stem);
+        quadrant = parseFlyQuadrant({ alt: file(".ALT"), typ: file(".TYP"), tex: file(".TEX"), ref: file(".REF"), al2: file(".AL2") }, stem);
       } catch (err) {
         warnings.push(`${stem}: ${err?.message ?? err}`);
         continue;
@@ -334,23 +385,31 @@ async function buildTile(tile, bytes, texturesByTitle, warnings) {
         const y = y0 + (cell % FLY_QUADRANT_CELLS);
         const left = x * PIXELS_PER_CELL;
         const top = (FLY_TILE_CELLS - 1 - y) * PIXELS_PER_CELL;
-        const name = quadrant.textures[quadrant.cellTextures[cell]];
-        if (!await drawTexture(rgba, side, left, top, PIXELS_PER_CELL, name, tile, bytes, texturesByTitle)) {
-          fill(rgba, side, left, top, PIXELS_PER_CELL, genericColour(name));
-          missingTextures++;
-        }
-        // A kind 2 cell's 2 x 2 detail textures, where it has them, at twice the resolution.
-        const subs = quadrant.cellSubTextures[cell];
-        const half = PIXELS_PER_CELL / 2;
-        for (let i = 0; subs && i < 4; i++) {
-          if (subs[i] < 0) continue;
-          const sx = i >> 1, sy = i & 1;
-          await drawTexture(rgba, side, left + sx * half, top + (1 - sy) * half, half, quadrant.textures[subs[i]], tile, bytes, texturesByTitle);
-        }
+        if (!await drawCell(rgba, side, left, top, PIXELS_PER_CELL, quadrant, cell, tile, read, texturesByTitle)) missingTextures++;
       }
+      tile.quadrants[`${qx}${qy}`] = quadrant;
     }
   }
   return { heights, image: { rgba, width: side, height: side }, missingTextures };
+}
+
+/*
+  One cell of imagery, `size` pixels square with its top left at (left, top): its texture,
+  or the flat colour of a generic one, then a kind 2 cell's 2 x 2 detail textures over it,
+  each a quarter of the cell. Returns false when the cell's own texture is missing.
+*/
+async function drawCell(rgba, side, left, top, size, quadrant, cell, tile, read, texturesByTitle) {
+  const name = quadrant.textures[quadrant.cellTextures[cell]];
+  const drawn = await drawTexture(rgba, side, left, top, size, name, tile, read, texturesByTitle);
+  if (!drawn) fill(rgba, side, left, top, size, genericColour(name));
+  const subs = quadrant.cellSubTextures[cell];
+  const half = size / 2;
+  for (let i = 0; subs && i < 4; i++) {
+    if (subs[i] < 0) continue;
+    const sx = i >> 1, sy = i & 1;
+    await drawTexture(rgba, side, left + sx * half, top + (1 - sy) * half, half, quadrant.textures[subs[i]], tile, read, texturesByTitle);
+  }
+  return drawn;
 }
 
 /*
@@ -359,7 +418,7 @@ async function buildTile(tile, bytes, texturesByTitle, warnings) {
   detail texture lives in a Dxxxyyy inside the tile folder, which its name encodes), then
   anywhere. Returns false when the texture or its palette is missing.
 */
-async function drawTexture(rgba, side, left, top, size, name, tile, bytes, texturesByTitle) {
+async function drawTexture(rgba, side, left, top, size, name, tile, read, texturesByTitle) {
   if (!name) return false;
   const title = name.toUpperCase();
   const parsed = parseFlyTextureName(title);
@@ -370,8 +429,8 @@ async function drawTexture(rgba, side, left, top, size, name, tile, bytes, textu
   const raw = texturesByTitle.get(`${folder}|${title}`) ?? texturesByTitle.get(title);
   const act = texturesByTitle.get(`${folder}|${title.replace(/\.RAW$/, ".ACT")}`) ?? texturesByTitle.get(title.replace(/\.RAW$/, ".ACT"));
   if (!raw || !act) return false;
-  const indices = await entryBytes(raw, tile, bytes);
-  const palette = decodeActPalette(await entryBytes(act, tile, bytes));
+  const indices = await read(raw);
+  const palette = decodeActPalette(await read(act));
   if (!palette || indices.length !== TEXTURE_SIDE * TEXTURE_SIDE) return false;
 
   const step = TEXTURE_SIDE / size;
@@ -393,8 +452,7 @@ async function drawTexture(rgba, side, left, top, size, name, tile, bytes, textu
   return true;
 }
 
-async function entryBytes({ archive, entry }, tile, bytes) {
-  if (archive === tile.archive) return readPodEntry(bytes, entry);
+async function readBlobEntry(archive, entry) {
   return new Uint8Array(await archive.blob.slice(entry.offset, entry.offset + entry.length).arrayBuffer());
 }
 
