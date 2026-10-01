@@ -70,28 +70,58 @@ test("Fly! San Francisco loads as four textured globe tiles", { skip: skipSf }, 
   assert.deepEqual(result.flyTiles.map((t) => t.folder), ["D168157", "D169157", "D168156", "D169156"]);
 
   const [northWest, , , southEast] = result.flyTiles;
-  // North-west tile at the origin; x east, z south, 64 units a cell.
+  // North-west tile at the origin; x east, z south, in the other games' units: 2 to the foot
+  // across, so a cell (1.93 km where it is measured, row 157) is some 12,650 units.
   assert.deepEqual([northWest.positions[0], northWest.positions[2]], [0, 0]);
+  const cell = result.terrain.cellSize;
+  assert.ok(Math.abs(cell / 2 / 3.28084 - 1928) < 5, `cell ${cell / 2 / 3.28084} m`);
   const last = southEast.positions.length - 3;
-  assert.deepEqual([southEast.positions[last], southEast.positions[last + 2]], [128 * 64, 128 * 64]);
+  assert.ok(Math.abs(southEast.positions[last] - 128 * cell) < 1e-6 * 128 * cell);
+  assert.ok(Math.abs(southEast.positions[last + 2] - 128 * cell) < 1e-6 * 128 * cell);
   assert.equal(southEast.image.width, 2048);
 
-  // Mount Diablo, D169157 cell (19.5, 1.9) from its south-west corner: high ground, and a
-  // real photograph there rather than a flat generic colour.
+  // The grid has 4 points a cell side, for the finer .AL2 heights.
+  assert.equal(southEast.subdivisions, 4);
+  const side = 64 * 4 + 1;
+  // Heights are 1.5 units to the foot, the other games' vertical scale.
+  const feetAt = (tile, col, row) => tile.positions[(row * side + col) * 3 + 1] / result.fly.unitsPerFootV;
+  // Mount Diablo (3,849 ft), D169157 cell (19.5, 1.9) from its south-west corner. Its cell is
+  // refined, and the refined grid comes nearer the summit than the corner heights alone
+  // (2,624 ft at best).
   const diablo = result.flyTiles[1];
-  const row = 64 - 2, col = 20;
-  const height = diablo.positions[(row * 65 + col) * 3 + 1] / result.fly.unitsPerFoot;
-  assert.ok(height > 2000 && height < 4000, `Mount Diablo at ${height} ft`);
+  let height = 0;
+  for (let row = (64 - 3) * 4; row <= (64 - 1) * 4; row++) {
+    for (let col = 18 * 4; col <= 21 * 4; col++) height = Math.max(height, feetAt(diablo, col, row));
+  }
+  assert.ok(height > 2700 && height < 3900, `Mount Diablo at ${height} ft`);
   // Every normal points up.
   for (const tile of result.flyTiles) {
     for (let i = 1; i < tile.normals.length; i += 3) assert.ok(tile.normals[i] > 0);
   }
   // The open Pacific at the far west of the south-west tile is water-coloured and flat.
   const southWest = result.flyTiles[2];
-  assert.equal(southWest.positions[(40 * 65 + 2) * 3 + 1], 0);
+  assert.equal(feetAt(southWest, 2 * 4, 40 * 4), 0);
   const px = (40 * 32 * 2048 + 2 * 32) * 4;
   const [r, g, b] = southWest.image.rgba.slice(px, px + 3);
   assert.ok(b > r && g > r, `ocean pixel ${r},${g},${b}`);
+  // City lights: SFNIGHT.EPD is not loaded here, so no tile has any.
+  assert.ok(result.flyTiles.every((t) => t.night === null));
+});
+
+test("Fly! night lights come from the set's *NIGHT.EPD", { skip: skipSf }, async () => {
+  const result = await loadFlyScenery(
+    ["SANFRAN1.EPD", "SANFRAN2.EPD", "SANFRAN3.EPD", "SANFRAN4.EPD", "SFNIGHT.EPD"].map(archive));
+  // Downtown San Francisco and the peninsula (D168156) and the East Bay (D169156) are lit.
+  assert.deepEqual(result.flyTiles.filter((t) => t.night).map((t) => t.folder), ["D168156", "D169156"]);
+  // 643AA07CN.RAW lights cell (60, 58) of D168156; the rest of the tile stays black.
+  const night = result.flyTiles.find((t) => t.folder === "D168156").night;
+  const brightest = (left, top) => {
+    let max = 0;
+    for (let y = top; y < top + 32; y++) for (let x = left; x < left + 32; x++) max = Math.max(max, night.rgba[(y * 2048 + x) * 4]);
+    return max;
+  };
+  assert.ok(brightest(60 * 32, (63 - 58) * 32) > 30);
+  assert.equal(brightest(0, 0), 0);
 });
 
 test("Fly! one numbered EPD on its own is one globe tile", { skip: skipSf }, async () => {
@@ -112,13 +142,22 @@ test("Fly! archives without terrain are refused", { skip: skipSf }, async () => 
 test("Fly! San Francisco places its buildings and bridges to scale", { skip: skipSf }, async () => {
   const result = await loadFlyScenery(
     ["SANFRAN1.EPD", "SANFRAN2.EPD", "SANFRAN3.EPD", "SANFRAN4.EPD", "SFMODELS.EPD"].map(archive));
-  const feet = (units) => units / result.fly.unitsPerFoot;
+  const { createWorldFrame } = await import("../src/drive/world-frame.js");
+  const frame = createWorldFrame(result);
+  const feet = (units) => units / result.fly.unitsPerFootV;
   const byName = (name) => result.flyObjects.find((o) => o.name === name);
+  const groundError = (object) => Math.abs(feet(object.position[1])
+    - frame.heightAtFeet(object.position[0] / result.fly.unitsPerFoot, object.position[2] / result.fly.unitsPerFoot));
+  for (const object of result.flyObjects) {
+    assert.equal(object.snapToGround, true, `${object.name} is not flagged to snap`);
+    assert.ok(groundError(object) < 0.01, `${object.name} base ${groundError(object)} ft from ground`);
+  }
 
   const bridge = byName("Golden Gate Bridge");
   assert.equal(bridge.modelName, "GOLD1.BSP"); // the near model of the two it lists
   // Its base on the water, heading about 175 degrees, a little west of north-south like the bridge.
-  assert.ok(Math.abs(feet(bridge.position[1])) < 5, `bridge base at ${feet(bridge.position[1])} ft`);
+  assert.equal(bridge.snapToGround, true);
+  assert.ok(groundError(bridge) < 0.01, `bridge base ${groundError(bridge)} ft from ground`);
   assert.ok(Math.abs(bridge.heading * 180 / Math.PI - 175.3) < 0.5);
   const gold = result.models["GOLD1.BSP"];
   assert.ok(gold.meshes.length > 0);
@@ -127,14 +166,15 @@ test("Fly! San Francisco places its buildings and bridges to scale", { skip: ski
   const pyramid = byName("Transamerica Building");
   const model = result.models[pyramid.modelName];
   assert.ok(Math.abs((model.rawVertexBounds.maxZ - model.rawVertexBounds.minZ) / 128 - 853) < 5);
-  // Its base 133 ft up, on the terrain under it: altitude 559.6 less half its height.
-  assert.ok(Math.abs(feet(pyramid.position[1]) - 133.3) < 1, `pyramid base at ${feet(pyramid.position[1])} ft`);
+  // Flag bit 0 puts its base on the refined terrain rather than trusting the stored altitude.
+  assert.equal(pyramid.snapToGround, true);
+  assert.ok(groundError(pyramid) < 0.01, `pyramid base ${groundError(pyramid)} ft from ground`);
 
   // Scene x east and z south: the bridge is west and north of the pyramid.
   assert.ok(bridge.position[0] < pyramid.position[0] && bridge.position[2] < pyramid.position[2]);
   // The camera opens a few cells south of downtown, looking north.
   const view = result.startView;
-  assert.ok(Math.hypot(view.x - pyramid.position[0], view.z - pyramid.position[2]) < 4 * 64);
+  assert.ok(Math.hypot(view.x - pyramid.position[0], view.z - pyramid.position[2]) < 4 * result.terrain.cellSize);
   assert.equal(view.yaw, 0);
   assert.ok(result.modelTextures.some((t) => t.name === "SANFRAN1.RAW" && t.width === 256));
 });
@@ -171,4 +211,41 @@ test("Fly! detail chunks draw every texture at its own resolution", { skip: skip
   const got = pixel(left + 3, top + 3);
   assert.ok(got.every((v, k) => Math.abs(v - sub[k]) <= 1), `${got} vs ${sub}`);
   await assert.rejects(renderFlyDetail("D000000", 0, 0), /No Fly! tile/);
+});
+
+/*
+  Test Drive on Fly!: the world frame reads the ground from the stitched heights, in the
+  triangles the meshes are cut into, and the buildings are solid.
+*/
+test("Fly! ground and buildings for Test Drive", { skip: skipSf }, async () => {
+  const { createWorldFrame } = await import("../src/drive/world-frame.js");
+  const { createColliders } = await import("../src/drive/colliders.js");
+  const result = await loadFlyScenery(
+    ["SANFRAN1.EPD", "SANFRAN2.EPD", "SANFRAN3.EPD", "SANFRAN4.EPD", "SFMODELS.EPD"].map(archive));
+  const frame = createWorldFrame(result);
+  assert.equal(frame.hasTerrain, true);
+  // Every mesh vertex is on the ground the frame reports, in feet (2 units to the foot across),
+  // to within what a float32 position a million units out resolves (0.125 units) on a slope.
+  for (const tile of result.flyTiles) {
+    for (let i = 0; i < tile.positions.length; i += 3 * 97) {
+      const [x, y, z] = [tile.positions[i], tile.positions[i + 1], tile.positions[i + 2]];
+      assert.ok(Math.abs(frame.heightAtFeet(x / 2, z / 2) - y / 1.5) < 0.5, `${tile.folder} vertex ${i / 3}`);
+    }
+  }
+  // Mid-triangle too: the centre of a square lies on its north-east to south-west diagonal.
+  const t = result.flyTiles[1];
+  const side = 257;
+  const v = (col, row) => [t.positions[(row * side + col) * 3], t.positions[(row * side + col) * 3 + 1], t.positions[(row * side + col) * 3 + 2]];
+  const [bx, by, bz] = v(81, 245), [cx, cy, cz] = v(80, 246);
+  assert.ok(Math.abs(frame.heightAtFeet((bx + cx) / 4, (bz + cz) / 4) - (by + cy) / 3) < 0.5);
+  const up = frame.normalAtFeet(bx / 2, bz / 2);
+  assert.ok(up.y > 0.5);
+
+  // The Transamerica Pyramid is a solid, standing on its base.
+  const colliders = createColliders(result, frame);
+  const pyramid = result.flyObjects.find((o) => o.name === "Transamerica Building");
+  const solid = colliders.solids.find((s) => s.modelName === pyramid.modelName);
+  assert.ok(solid, "no collider for the pyramid");
+  assert.ok(Math.abs(solid.centre.x - pyramid.position[0] / 2) < 1);
+  assert.ok(colliders.solids.length >= result.flyObjects.length * 0.9);
 });

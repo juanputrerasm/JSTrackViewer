@@ -133,7 +133,7 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
   const worldFeet = worldSize * toFeetH;
 
   const solids = [];
-  const boxes = trackData?.boxes ?? [];
+  const boxes = [...(trackData?.boxes ?? []), ...flyObjectBoxes(trackData, worldSize, heightScale)];
   const evo = trackData?.origin === "EVO1" || trackData?.origin === "EVO2";
   const trunkModels = new Map();
   const trunkOf = (name, model) => {
@@ -968,4 +968,24 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
       return null;
     },
   };
+}
+
+/*
+  Fly!'s buildings and bridges as the solid model boxes this module already knows. The worker
+  places them in scene space (fly-loader.js) and the scene draws them with the SIT family's
+  own anchored matrix and 0.75 height stretch, so a box at the model's origin, turned by its
+  heading, collides exactly where it is drawn. The origin is the drawn base less the stretched
+  anchor. Type 0 is an ordinary solid, and mass 0 is immovable.
+*/
+function flyObjectBoxes(trackData, worldSize, heightScale) {
+  return (trackData?.flyObjects ?? []).map((object) => {
+    const anchorZ = trackData.models?.[object.modelName]?.anchor?.z ?? 0;
+    const [x, baseY, z] = object.position;
+    return {
+      modelName: object.modelName,
+      position: [x, worldSize - z, (baseY - anchorZ * 0.75) / heightScale],
+      psi: object.heading, theta: 0, phi: 0,
+      type: 0, mass: 0,
+    };
+  });
 }

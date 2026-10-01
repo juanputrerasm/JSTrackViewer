@@ -8,7 +8,7 @@ import { TruckLightRig } from "./drive/truck-lights.js";
 import { buildTruckObject } from "./drive/truck-object.js";
 import { createWorldFrame } from "./drive/world-frame.js";
 import { UNITS_PER_FOOT_H, UNITS_PER_FOOT_V } from "./drive/world-frame.js";
-import { groundForSpawn, trackSpawnPoint } from "./drive/spawn-point.js";
+import { groundForSpawn, spawnAt, trackSpawnPoint } from "./drive/spawn-point.js";
 import { createRaceTrackSupport } from "./drive/racetrack-collider.js";
 import { createMovers } from "./drive/moving-objects.js";
 import {
@@ -188,10 +188,13 @@ const AMBIENT_INTENSITY = 1.4;
   it is tinted instead. At night the moon takes the sun's place, as a dim cool light that
   still casts shadows.
 
-  Only the games whose own weather this imitates get it: MTM, MTM2, CPR and Evo. TV, Fury3
-  and Hellbender keep their own sky textures.
+  Only the games whose own weather this imitates get it: MTM, MTM2, CPR, Evo, and Fly!, which
+  flies day or night and lights its cities after dark. TV, Fury3 and Hellbender keep their own
+  sky textures.
 */
-const WEATHER_ORIGINS = new Set(["MTM1", "MTM2", "CPR", "EVO1", "EVO2"]);
+const WEATHER_ORIGINS = new Set(["MTM1", "MTM2", "CPR", "EVO1", "EVO2", "FLY"]);
+/** How brightly Fly!'s city lights glow under each weather: at night, a little at dusk. */
+const FLY_NIGHT_LIGHTS = { night: 1, dusk: 0.35 };
 /*
   `gradient` is the sky MTM1 and MTM2 draw with their textured sky switched off: one colour
   overhead that turns into a lighter horizon colour over the last few degrees above the
@@ -302,11 +305,11 @@ const TRAXX_Z_STRETCH = 0.75;
 
 /*
   Fly! detail streaming: how many 8 x 8 cell chunks near the camera hold a full-resolution
-  texture at once, and how near (scene units, 64 a cell) a chunk must be to get one. The
+  texture at once, and how near, in Fly! cells of about 2 km, a chunk must be to get one. The
   tile orthophoto's 60 m texels start to show as blur within about that distance.
 */
 const FLY_DETAIL_BUDGET = 12;
-const FLY_DETAIL_RANGE = 1600;
+const FLY_DETAIL_RANGE_CELLS = 25;
 
 /**
  * Object matrix for geometry authored in Traxx local space (BIN models): T * S * R,
@@ -736,6 +739,17 @@ export class TrackScene {
     this._backdropUniforms.backdropSaturation.value = preset?.backdropSaturation ?? 1;
     this._applyLighting();
     this._applyVisibility();
+    this._applyFlyNight();
+  }
+
+  /** Turn Fly!'s city lights up or down with the weather. */
+  _applyFlyNight() {
+    const intensity = this.weatherApplies() ? (FLY_NIGHT_LIGHTS[this._weather] ?? 0) : 0;
+    for (const mesh of this._flyTileMeshes ?? []) {
+      if (!mesh.userData.nightTexture) continue;
+      mesh.userData.tileMaterial.emissiveIntensity = intensity;
+      if (mesh.userData.fly.detail) mesh.userData.fly.detail.material.emissiveIntensity = intensity;
+    }
   }
 
   /*
@@ -807,9 +821,11 @@ export class TrackScene {
     this._renderer.toneMappingExposure = v;
   }
 
-  // Set view distance in grid-cell units (1 cell = 64 world units)
+  // Set view distance in grid-cell units: 64 world units, or a Fly! cell of about 12,800
   setViewDistance(cells) {
-    const dist = cells * 64;
+    this._viewDistanceCells = cells;
+    const cell = this._trackData?.origin === "FLY" ? this._trackData.terrain.cellSize : 64;
+    const dist = cells * cell;
     this._viewDistance = dist;
     if (this._tvFog) {
       this._tvFog.near = dist * TV_FOG_START;
@@ -862,6 +878,7 @@ export class TrackScene {
       this._updateTextureAnimations(dt);
       this._updateKeyframes(dt);
       this._updateFlyDetail(dt);
+      this._updateFlyNearPlane();
       this._updateShadows();
       const f = this._renderFlags;
       this._flare.update(this._camera, this._sunDirection, this._sky.visible && f.sunlight !== false,
@@ -1049,7 +1066,7 @@ export class TrackScene {
       terrain:    !!this._terrainMesh || !!this._flyTileMeshes?.length,
       textures:   !!this._terrainMesh || !!this._flyTileMeshes?.length,
       terrainOverlap: !!this._terrainMesh,
-      grid:       !!this._terrainMesh,
+      grid:       !!this._terrainMesh || !!this._flyTileMeshes?.length,
       objects,
       billboards: has("billboards"),
       checkpoints: has("checkpoints"),
@@ -1198,6 +1215,11 @@ export class TrackScene {
     for (const resource of this._flyObjectResources ?? []) resource.dispose();
     this._flyObjectResources = [];
     this._flyTileTextures = [];
+    // Fly! moves the near plane with the camera's height (_updateFlyNearPlane); put it back.
+    if (this._camera.near !== 1) {
+      this._camera.near = 1;
+      this._camera.updateProjectionMatrix();
+    }
     this._flyTileMeshes = [];
     /*
       The cavern surfaces share the terrain material rather than owning one, so the loop above
@@ -1311,6 +1333,8 @@ export class TrackScene {
     this._movers.setEnabled(this._renderFlags.movingObjects !== false);
 
     this._nav.resetToCourseStart(trackData, this._heightScale);
+    // A Fly! world's cells are 200 times the others', and the far plane counts them.
+    if (this._viewDistanceCells) this.setViewDistance(this._viewDistanceCells);
 
     this._applyVisibility();
     this._updateSunFromTrackData(trackData);
@@ -1457,6 +1481,7 @@ export class TrackScene {
 
   /*
     Fly! scenery: each globe tile is 8 x 8 chunk meshes of 8 x 8 cells, draped in its imagery.
+    The worker's grid has 4 points a cell side, where the game's finer .AL2 heights need them.
 
     The worker stitches a tile's 4,096 cell textures into one orthophoto at 32 px a cell (see
     fly-loader.js). It is a single continuous texture per tile, so unlike the other games'
@@ -1475,9 +1500,13 @@ export class TrackScene {
     this._flyTileTextures = [];
     this._flyDetailCells = fly?.detailChunkCells ?? 8;
     const anisotropy = this._renderer.capabilities.getMaxAnisotropy();
-    const side = 65;
-    const n = this._flyDetailCells;
+    const cellsPerChunk = this._flyDetailCells;
+    const gridMat = new THREE.LineBasicMaterial({ color: 0x8888cc, opacity: 0.65, transparent: true });
     for (const tile of tiles) {
+      // The worker refines the grid to `subdivisions` points a cell side (fly-loader.js).
+      const sub = tile.subdivisions ?? 1;
+      const side = 64 * sub + 1;
+      const n = cellsPerChunk * sub;
       const positions = new Float32Array(tile.positions);
       const normals = new Float32Array(tile.normals);
       const uvs = new Float32Array(tile.uvs);
@@ -1493,9 +1522,23 @@ export class TrackScene {
       texture.needsUpdate = true;
       this._flyTileTextures.push(texture);
       const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
+      // A tile with city lights glows with them after dark (_applyFlyNight).
+      let nightTexture = null;
+      if (tile.night) {
+        nightTexture = new THREE.DataTexture(new Uint8Array(tile.night.rgba.buffer ?? tile.night.rgba), tile.night.width, tile.night.height, THREE.RGBAFormat);
+        nightTexture.magFilter = THREE.LinearFilter;
+        nightTexture.minFilter = THREE.LinearMipmapLinearFilter;
+        nightTexture.generateMipmaps = true;
+        nightTexture.colorSpace = THREE.SRGBColorSpace;
+        nightTexture.needsUpdate = true;
+        this._flyTileTextures.push(nightTexture);
+        material.emissiveMap = nightTexture;
+        material.emissive = new THREE.Color(0xffffff);
+        material.emissiveIntensity = 0;
+      }
 
-      for (let cz = 0; cz < 64 / n; cz++) {
-        for (let cx = 0; cx < 64 / n; cx++) {
+      for (let cz = 0; cz < 64 / cellsPerChunk; cz++) {
+        for (let cx = 0; cx < 64 / cellsPerChunk; cx++) {
           const count = (n + 1) * (n + 1);
           const p = new Float32Array(count * 3), nr = new Float32Array(count * 3);
           const uv = new Float32Array(count * 2), uv1 = new Float32Array(count * 2);
@@ -1532,6 +1575,7 @@ export class TrackScene {
           mesh.name = `${tile.folder} ${cx},${cz}`;
           mesh.userData.tileMaterial = material;
           mesh.userData.texturedMaterial = material;
+          mesh.userData.nightTexture = nightTexture;
           mesh.userData.fly = {
             folder: tile.folder, chunkX: cx, chunkZ: cz,
             minX: p[0], minZ: p[2], maxX: p[(count - 1) * 3], maxZ: p[(count - 1) * 3 + 2],
@@ -1542,6 +1586,49 @@ export class TrackScene {
           this._flyTileMeshes.push(mesh);
         }
       }
+      this._groups.terrainGrid.add(this._flyGridLines(positions, side, sub, gridMat));
+    }
+  }
+
+  /*
+    The Grid layer for a Fly! tile: every cell edge, about 2 km apart, drawn through the
+    refined mesh's points so the lines follow the relief rather than cutting through it. They
+    are lifted a thousandth of a cell (about 8 ft) so the ground does not hide them from far
+    off, where a depth buffer spread over a 1.6 million unit world cannot tell them apart.
+  */
+  _flyGridLines(positions, side, sub, material) {
+    const lift = this._trackData.terrain.cellSize / 1000;
+    const vertices = [];
+    const point = (col, row) => {
+      const i = (row * side + col) * 3;
+      vertices.push(positions[i], positions[i + 1] + lift, positions[i + 2]);
+    };
+    for (let line = 0; line < side; line += sub) {
+      for (let k = 0; k < side - 1; k++) {
+        point(k, line); point(k + 1, line);   // along a row of cell edges, west to east
+        point(line, k); point(line, k + 1);   // along a column, north to south
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
+    return new THREE.LineSegments(geo, material);
+  }
+
+  /*
+    A Fly! world is 1.6 million units across and seen from anywhere between a truck's bumper
+    and 30,000 ft, which no single near plane serves: 1 unit keeps the truck but spends the
+    depth buffer's precision on the first few feet. So the near plane follows the camera's
+    height above the ground, a hundredth of it and at least 1 unit, and the far plane stays
+    where the view distance puts it.
+  */
+  _updateFlyNearPlane() {
+    if (this._trackData?.origin !== "FLY" || !this._flareFrame) return;
+    const cam = this._camera.position;
+    const ground = this._flareFrame.heightAtFeet(cam.x / UNITS_PER_FOOT_H, cam.z / UNITS_PER_FOOT_H) * UNITS_PER_FOOT_V;
+    const near = Math.min(2000, Math.max(1, (cam.y - ground) / 100));
+    if (Math.abs(near - this._camera.near) > this._camera.near * 0.1) {
+      this._camera.near = near;
+      this._camera.updateProjectionMatrix();
     }
   }
 
@@ -1574,7 +1661,7 @@ export class TrackScene {
       const dx = Math.max(f.minX - cam.x, 0, cam.x - f.maxX);
       const dz = Math.max(f.minZ - cam.z, 0, cam.z - f.maxZ);
       const distance = Math.hypot(dx, dz, Math.max(0, cam.y - f.ground));
-      if (distance < FLY_DETAIL_RANGE) ranked.push({ mesh, distance });
+      if (distance < FLY_DETAIL_RANGE_CELLS * this._trackData.terrain.cellSize) ranked.push({ mesh, distance });
     }
     ranked.sort((a, b) => a.distance - b.distance);
     const wanted = new Set(ranked.slice(0, FLY_DETAIL_BUDGET).map((r) => r.mesh));
@@ -1612,6 +1699,12 @@ export class TrackScene {
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
+    // The lights stay on the tile's own UV set; only the daylight imagery is sharper.
+    if (mesh.userData.nightTexture) {
+      material.emissiveMap = mesh.userData.nightTexture;
+      material.emissive = new THREE.Color(0xffffff);
+      material.emissiveIntensity = mesh.userData.tileMaterial.emissiveIntensity;
+    }
     mesh.userData.fly.detail = { texture, material };
     mesh.userData.texturedMaterial = material;
     if (this._renderFlags.textures !== false) mesh.material = material;
@@ -1632,9 +1725,8 @@ export class TrackScene {
     Fly! buildings and landmarks.
 
     The worker has already put each object in scene space: `position` is the bottom centre of
-    its model, and `scale` takes the decoder's units to scene units (see fly-loader.js). What
-    is left is the Traxx-local to scene axis swap that every BIN model needs, which is
-    traxxModelMatrix without its vertical stretch (Fly's relief is drawn true to scale), and
+    its model (see fly-loader.js), and the decoder's units are the scene's. What is left is the
+    Traxx-local to scene axis swap every BIN model needs, traxxModelMatrix as for MTM, and
     putting the recentred mesh back on the model's own vertical axis. One geometry per model
     mesh is shared by every placement of it.
   */
@@ -1658,8 +1750,8 @@ export class TrackScene {
       const [x, y, z] = object.position;
       // Heading is clockwise from north, which is traxxModelMatrix's own sense: matched against
       // the imagery at SFO, where the terminal's piers only land on the photographed ones so.
-      const matrix = traxxModelMatrix(object.heading, 0, 0, x, y, z, 1)
-        .multiply(new THREE.Matrix4().makeScale(object.scale, object.scale, object.scale))
+      // The decoder's units are the scene's, and the 0.75 height stretch is the terrain's too.
+      const matrix = traxxModelMatrix(object.heading, 0, 0, x, y, z)
         .multiply(new THREE.Matrix4().makeTranslation(model.anchor?.x ?? 0, model.anchor?.y ?? 0, 0));
       const group = new THREE.Group();
       const wire = new THREE.Group();
@@ -3529,6 +3621,10 @@ export class TrackScene {
     const { createDriveMode } = await import("./drive/drive-mode.js");
     if (generation !== this._driveGeneration || trackData !== this._trackData) return null;
     const frame = createWorldFrame(trackData);
+    // Fly! has no start grid: the truck starts where the camera is, and R brings it back there.
+    const flyStart = trackData.origin === "FLY"
+      ? { x: this._nav.position.x / UNITS_PER_FOOT_H, z: this._nav.position.z / UNITS_PER_FOOT_H, psi: this._nav.yaw * Math.PI / 180 }
+      : null;
 
     this._drive?.stop();
     this._drive?.dispose();
@@ -3547,7 +3643,9 @@ export class TrackScene {
         this._applyCrush(colliders);
         this._moveColliderMarkers(colliders);
       },
-      spawn: () => trackSpawnPoint(trackData, frame, assembly, this._drive?.colliders),
+      spawn: () => flyStart
+        ? spawnAt(frame, assembly, this._drive?.colliders, flyStart.x, flyStart.z, flyStart.psi)
+        : trackSpawnPoint(trackData, frame, assembly, this._drive?.colliders),
       onStatus,
       onPose,
       lights: this._truckLights,
@@ -3735,7 +3833,9 @@ export class TrackScene {
     const frame = createWorldFrame(trackData);
     // On CPR the grid is on the road layer, a couple of feet above the terrain under it.
     const road = trackData.raceTrackSurfaces?.length ? createRaceTrackSupport(trackData) : null;
-    const { psi, ...position } = trackSpawnPoint(trackData, frame, assembly, road);
+    const { psi, ...position } = trackData.origin === "FLY"
+      ? spawnAt(frame, assembly, road, this._nav.position.x / UNITS_PER_FOOT_H, this._nav.position.z / UNITS_PER_FOOT_H, this._nav.yaw * Math.PI / 180)
+      : trackSpawnPoint(trackData, frame, assembly, road);
     const ground = groundForSpawn(frame, road, position.x, position.z);
 
     truck.reset();

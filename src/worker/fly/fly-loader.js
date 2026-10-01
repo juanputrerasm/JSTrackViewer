@@ -18,14 +18,18 @@ import { decodeRawTexture } from "../texture-decoder.js";
   one-slot-per-texture terrain atlas. So each tile gets one picture instead, an orthophoto
   stitched from its cells at PIXELS_PER_CELL, drawn over one continuous mesh.
 
-  Scene space follows the other games: CELL_UNITS per cell, x east from the western edge of
-  the tiles, z south from their northern edge, y up. Cells are treated as square. Fly's rows
-  are cos(latitude) shorter than its columns are wide, which is exactly what keeps them near
-  square on the ground (1.954 by 1.943 km at San Francisco), so the error is under 1%.
-  Heights are feet, brought to the same scale as the ground so the relief is true.
+  Scene space is the other games' (drive/world-frame.js): 2 units to the foot across the map
+  and 1.5 up it, x east from the western edge of the tiles, z south from their northern edge,
+  y up. Being in the same units as every other world is what lets Test Drive's truck, its
+  cameras and its physics work here unchanged. A cell is about 6,400 ft, so a city is some
+  1.6 million units across. Cells are treated as square: Fly's rows are cos(latitude) shorter
+  than its columns are wide, which is exactly what keeps them near square on the ground
+  (1.954 by 1.943 km at San Francisco), so the error is under 1%.
 */
 
-const CELL_UNITS = 64;
+/** Scene units per foot, across and up: world-frame.js's UNITS_PER_FOOT_H and _V. */
+const UNITS_PER_FOOT_H = 2;
+const UNITS_PER_FOOT_V = 1.5;
 const PIXELS_PER_CELL = 32;
 /*
   Near the camera the scene asks for chunks of 8 x 8 cells at the textures' own 128 px a cell
@@ -33,12 +37,12 @@ const PIXELS_PER_CELL = 32;
   would be about 1 GB of textures, so only the nearest chunks get one.
 */
 const DETAIL_CHUNK_CELLS = 8;
+/** Mesh points along a cell side: the finest any stock cell's .AL2 heights divide it. */
+const MESH_SUBDIVISIONS = 4;
 const DETAIL_PIXELS_PER_CELL = 128;
 const TEXTURE_SIDE = 128;
 const METRES_PER_DEGREE = 111_132;
 const FEET_PER_METRE = 3.28084;
-/** Relief is drawn this many times its real height. */
-const VERTICAL_EXAGGERATION = 1;
 /*
   Cells outside a set's photographed area name generic textures, wt000s1.raw to wt888s1.raw,
   which ship with the game rather than the scenery, so such a cell is drawn in a flat colour.
@@ -99,10 +103,10 @@ export async function loadFlyScenery(archives, options = {}) {
   const north = Math.max(...all.map((t) => t.row));
   const gridSize = Math.max(east - west + 1, north - south + 1) * FLY_TILE_CELLS;
 
-  // Scene units per foot, from the ground size of a cell at the middle of the tiles.
+  // A cell's side in scene units, from its ground size at the middle of the tiles.
   const middle = flyTileBounds(west, Math.round((south + north) / 2));
   const cellMetres = ((middle.north - middle.south) / FLY_TILE_CELLS) * METRES_PER_DEGREE;
-  const unitsPerFoot = (CELL_UNITS / (cellMetres * FEET_PER_METRE)) * VERTICAL_EXAGGERATION;
+  const cellUnits = cellMetres * FEET_PER_METRE * UNITS_PER_FOOT_H;
 
   // One archive's bytes at a time: a tile's files and textures sit in the archive it came from.
   const flyTiles = [];
@@ -119,8 +123,9 @@ export async function loadFlyScenery(archives, options = {}) {
         column: tile.column,
         row: tile.row,
         bounds: flyTileBounds(tile.column, tile.row),
-        ...buildTileMesh(built.heights, (tile.column - west) * FLY_TILE_CELLS, (north - tile.row) * FLY_TILE_CELLS, unitsPerFoot),
+        ...buildTileMesh(refineHeights(built.heights, tile.quadrants), (tile.column - west) * FLY_TILE_CELLS, (north - tile.row) * FLY_TILE_CELLS, cellUnits),
         image: built.image,
+        night: built.night,
       });
     }
   }
@@ -129,7 +134,8 @@ export async function loadFlyScenery(archives, options = {}) {
   }
   flyTiles.sort((a, b) => b.row - a.row || a.column - b.column);
 
-  const objects = await loadFlyObjects(indexed, tiles, { west, north, unitsPerFoot }, warnings);
+  const heightsFeet = stitchHeights(flyTiles, west, north, gridSize);
+  const objects = await loadFlyObjects(indexed, tiles, { west, north, cellUnits, heightsFeet }, warnings);
 
   // Kept for renderFlyDetail: the tiles with their parsed quadrants, and where every texture is.
   session = { tiles, texturesByTitle };
@@ -143,7 +149,9 @@ export async function loadFlyScenery(archives, options = {}) {
     podComment: indexed.length === 1 ? indexed[0].pod.comment : "",
     terrain: {
       gridSize,
-      cellSize: CELL_UNITS,
+      cellSize: cellUnits,
+      // The ground in feet for Test Drive, the whole map on one grid (world-frame.js).
+      heightsFeet,
       heightScale: 1,
       minimap: buildMinimap(flyTiles, west, north, gridSize),
     },
@@ -151,12 +159,13 @@ export async function loadFlyScenery(archives, options = {}) {
     fly: {
       tiles: flyTiles.map((t) => t.folder),
       coverage: options.coverage ?? null,
-      unitsPerFoot,
+      unitsPerFoot: UNITS_PER_FOOT_H,
+      unitsPerFootV: UNITS_PER_FOOT_V,
       detailChunkCells: DETAIL_CHUNK_CELLS,
       detailPixelsPerCell: DETAIL_PIXELS_PER_CELL,
     },
     flyObjects: objects.placed,
-    startView: startView(objects.placed, gridSize, unitsPerFoot),
+    startView: startView(objects.placed, gridSize, cellUnits),
     boxes: [],
     models: objects.models,
     modelTextures: objects.modelTextures,
@@ -167,15 +176,16 @@ export async function loadFlyScenery(archives, options = {}) {
 /*
   Buildings and landmarks: the objects the SCENERY.Sxx files of the loaded tiles place.
 
-  An object is a model centred on its origin, placed by latitude, longitude and the altitude
-  of that origin in feet. Its vertices are 256 to the foot, which is 2 of bin-decoder's units
-  (it divides the words by 128), and the decoder moves each mesh's origin to the bottom
-  centre, so the base stands at altitude + anchor.z / 2 feet. On San Francisco and Los Angeles
-  that puts the median base exactly on the terrain (docs/FLY.md in OpenPhotex).
+  An object is a model centred on its origin, placed by latitude and longitude. Its vertices
+  are 256 to the foot, which is 2 of bin-decoder's units (it divides the words by 128):
+  exactly the scene's horizontal scale, so a Fly! model is drawn as an MTM one is. The
+  decoder moves each mesh's origin to the bottom centre. When <flag> bit 0 is set (all stock
+  objects), Fly! relocates that base onto the terrain; otherwise it stands at the stored
+  origin altitude plus the model's lower extent. See docs/FLY.md in OpenPhotex.
 
   .BIN models and the .BSP structures (the bridges, which OpenPhotex reads as the .BIN their
-  nodes amount to) are drawn. .ARM beacons are not decoded yet, and a set's windsocks name
-  models that ship with the game, not the scenery.
+  nodes amount to) are drawn. The beacons (.ARM) and windsocks name models that ship with the
+  game rather than the scenery, so they cannot be.
 */
 async function loadFlyObjects(indexed, tiles, frame, warnings) {
   const byTitle = new Map();
@@ -214,14 +224,18 @@ async function loadFlyObjects(indexed, tiles, frame, warnings) {
           const at = flyTileAt(object.latitude, object.longitude);
           const cellX = (at.column - frame.west) * FLY_TILE_CELLS + at.x;
           const cellZ = (frame.north - at.row) * FLY_TILE_CELLS + (FLY_TILE_CELLS - at.y);
+          const x = cellX * frame.cellUnits, z = cellZ * frame.cellUnits;
+          const baseFeet = object.snapToGround
+            ? flyTerrainHeight(x, z, frame.heightsFeet, frame.cellUnits)
+            : object.altitude + model.anchor.z / 2;
           placed.push({
             name: object.name,
             modelName: title,
-            position: [cellX * CELL_UNITS, (object.altitude + model.anchor.z / 2) * frame.unitsPerFoot, cellZ * CELL_UNITS],
+            position: [x, baseFeet * UNITS_PER_FOOT_V, z],
+            snapToGround: object.snapToGround,
             heading: object.orientation[1],
             pitch: object.orientation[0],
             roll: object.orientation[2],
-            scale: frame.unitsPerFoot / 2,
             // Feet, from the model's vertical extent in bin-decoder units (2 to the foot).
             height: model.rawVertexBounds ? (model.rawVertexBounds.maxZ - model.rawVertexBounds.minZ) / 128 : 0,
           });
@@ -230,7 +244,8 @@ async function loadFlyObjects(indexed, tiles, frame, warnings) {
     }
   }
   if (failed.size) warnings.push(`${failed.size} object model(s) are not in these archives: ${[...failed].sort().join(", ")}.`);
-  for (const [ext, count] of skipped) warnings.push(`${count} object(s) use ${ext} models, which are not drawn yet.`);
+  // .ARM (beacons) is the only other kind a stock set names, and no set carries one.
+  for (const [ext, count] of skipped) warnings.push(`${count} object(s) use ${ext} models, which are not in the scenery (they ship with the game).`);
 
   // The models' textures: 256 px .RAW files with a same-stem .ACT, at the archive root.
   const modelTextures = [];
@@ -250,16 +265,34 @@ async function loadFlyObjects(indexed, tiles, frame, warnings) {
 }
 
 /*
+  Height in feet under a scene-space point, over the same north-east to south-west triangle
+  split used by the Fly! meshes and Test Drive's world frame. The stitched grid is already
+  row-major from the north, with `subdivisions` samples per terrain cell.
+*/
+function flyTerrainHeight(x, z, { data, side, subdivisions }, cellUnits) {
+  const step = cellUnits / subdivisions;
+  const gx = Math.min(side - 1.000001, Math.max(0, x / step));
+  const gz = Math.min(side - 1.000001, Math.max(0, z / step));
+  const col = Math.floor(gx), row = Math.floor(gz);
+  const u = gx - col, w = gz - row;
+  const at = (dx, dz) => data[(row + dz) * side + col + dx];
+  const a = at(0, 0), b = at(1, 0), c = at(0, 1), d = at(1, 1);
+  return u + w <= 1
+    ? a + (b - a) * u + (c - a) * w
+    : d + (c - d) * (1 - u) + (b - d) * (1 - w);
+}
+
+/*
   Where the camera opens: south of the tallest cluster of scenery, which is a city's downtown
   in every stock set, a few thousand feet up and looking north across it. Objects count by
   their height, so a district of towers outweighs an airport's rows of hangars. Without
   objects, the middle of the tiles from high up.
 */
-function startView(placed, gridSize, unitsPerFoot) {
-  const world = gridSize * CELL_UNITS;
-  if (!placed.length) return { x: world / 2, y: world * 0.12, z: world * 0.75, yaw: 0, pitch: -30, altitudeSpeed: altitudeSpeed(unitsPerFoot) };
+function startView(placed, gridSize, cellUnits) {
+  const world = gridSize * cellUnits;
+  if (!placed.length) return { x: world / 2, y: world * 0.12, z: world * 0.75, yaw: 0, pitch: -30 };
   const cells = new Map();
-  const cellOf = (object) => [Math.floor(object.position[0] / CELL_UNITS), Math.floor(object.position[2] / CELL_UNITS)];
+  const cellOf = (object) => [Math.floor(object.position[0] / cellUnits), Math.floor(object.position[2] / cellUnits)];
   for (const object of placed) {
     const key = cellOf(object).join(",");
     cells.set(key, (cells.get(key) ?? 0) + object.height);
@@ -272,7 +305,7 @@ function startView(placed, gridSize, unitsPerFoot) {
     if (weight > bestWeight) { bestWeight = weight; best = object; }
   }
   const [x, ground, z] = best.position;
-  return { x, y: ground + 3000 * unitsPerFoot, z: z + 2 * CELL_UNITS, yaw: 0, pitch: -18, altitudeSpeed: altitudeSpeed(unitsPerFoot) };
+  return { x, y: ground + 3000 * UNITS_PER_FOOT_V, z: z + 2 * cellUnits, yaw: 0, pitch: -18 };
 }
 
 /** A .BIN, or a .BSP read as the .BIN it amounts to, as bin-decoder's model. */
@@ -284,14 +317,6 @@ async function decodeFlyModel(bytes, title, warnings) {
     warnings.push(`${title}: ${err?.message ?? err}`);
     return null;
   }
-}
-
-/*
-  Navigation in proportion to height (nav.js): per second at the default speed, travel about
-  the camera's height and climb or descend by half of it, never below 50 ft above sea level.
-*/
-function altitudeSpeed(unitsPerFoot) {
-  return { move: 4, climb: 2, floor: 50 * unitsPerFoot };
 }
 
 /*
@@ -359,6 +384,8 @@ async function buildTile(tile, bytes, texturesByTitle, warnings) {
   const side = FLY_TILE_CELLS * PIXELS_PER_CELL;
   const rgba = new Uint8ClampedArray(side * side * 4);
   let missingTextures = 0;
+  // The emissive city lights of a *NIGHT.EPD, only for a tile that has some.
+  let night = null;
 
   for (let qx = 0; qx < 2; qx++) {
     for (let qy = 0; qy < 2; qy++) {
@@ -386,11 +413,17 @@ async function buildTile(tile, bytes, texturesByTitle, warnings) {
         const left = x * PIXELS_PER_CELL;
         const top = (FLY_TILE_CELLS - 1 - y) * PIXELS_PER_CELL;
         if (!await drawCell(rgba, side, left, top, PIXELS_PER_CELL, quadrant, cell, tile, read, texturesByTitle)) missingTextures++;
+        // A cell with city lights has a night texture beside its own, the same name plus N.
+        const lights = quadrant.textures[quadrant.cellTextures[cell]]?.toUpperCase().replace(/\.RAW$/, "N.RAW");
+        if (lights && texturesByTitle.has(`DATA/${tile.folder}|${lights}`)) {
+          night ??= new Uint8ClampedArray(side * side * 4);
+          await drawTexture(night, side, left, top, PIXELS_PER_CELL, lights, tile, read, texturesByTitle);
+        }
       }
       tile.quadrants[`${qx}${qy}`] = quadrant;
     }
   }
-  return { heights, image: { rgba, width: side, height: side }, missingTextures };
+  return { heights, image: { rgba, width: side, height: side }, night: night && { rgba: night, width: side, height: side }, missingTextures };
 }
 
 /*
@@ -431,15 +464,18 @@ async function drawTexture(rgba, side, left, top, size, name, tile, read, textur
   if (!raw || !act) return false;
   const indices = await read(raw);
   const palette = decodeActPalette(await read(act));
-  if (!palette || indices.length !== TEXTURE_SIDE * TEXTURE_SIDE) return false;
+  // 128 px for the imagery, 64 px for the night lights; drawn at `size` or, if larger, repeated.
+  const textureSide = Math.sqrt(indices.length);
+  if (!palette || !Number.isInteger(textureSide) || textureSide > TEXTURE_SIDE) return false;
 
-  const step = TEXTURE_SIDE / size;
+  const step = Math.max(1, textureSide / size);
   const area = step * step;
+  const scale = textureSide / size;
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
       let r = 0, g = 0, b = 0;
       for (let sy = 0; sy < step; sy++) {
-        let at = (py * step + sy) * TEXTURE_SIDE + px * step;
+        let at = Math.floor(py * scale + sy) * textureSide + Math.floor(px * scale);
         for (let sx = 0; sx < step; sx++, at++) {
           const c = indices[at] * 3;
           r += palette[c]; g += palette[c + 1]; b += palette[c + 2];
@@ -474,45 +510,114 @@ function fill(rgba, side, left, top, size, [r, g, b]) {
 }
 
 /*
-  A tile's mesh: one vertex per corner, shared by its cells, with UVs running once across the
-  tile's orthophoto. `heights` is row by row from the north. v = 0 is the north edge, which is
-  where a DataTexture's first row lands.
+  A tile's heights at MESH_SUBDIVISIONS points a cell side, row by row from the north.
+
+  Most cells are flat planes between their four .ALT corners, and are filled in bilinearly.
+  A cell whose .TYP kind is not 0 carries its own finer heights in .AL2, 3 x 3 or 5 x 5
+  points including its corners, and those take over its points, edges included. Neighbours
+  share the edge points, so a plain cell next to a refined one bends to meet it rather than
+  leaving a crack. 4 points a side is the finest any stock cell is divided (type:1: 4,4).
 */
-function buildTileMesh(heights, cellX0, cellZ0, unitsPerFoot) {
-  const count = TILE_SIDE * TILE_SIDE;
+function refineHeights(coarse, quadrants) {
+  const side = FLY_TILE_CELLS * MESH_SUBDIVISIONS + 1;
+  const fine = new Float32Array(side * side);
+  const corner = (col, row) => coarse[Math.min(TILE_SIDE - 1, row) * TILE_SIDE + Math.min(TILE_SIDE - 1, col)];
+  for (let row = 0; row < side; row++) {
+    for (let col = 0; col < side; col++) {
+      const r = row / MESH_SUBDIVISIONS, c = col / MESH_SUBDIVISIONS;
+      const r0 = Math.min(FLY_TILE_CELLS - 1, Math.floor(r)), c0 = Math.min(FLY_TILE_CELLS - 1, Math.floor(c));
+      const tr = r - r0, tc = c - c0;
+      fine[row * side + col] =
+        (corner(c0, r0) * (1 - tc) + corner(c0 + 1, r0) * tc) * (1 - tr) +
+        (corner(c0, r0 + 1) * (1 - tc) + corner(c0 + 1, r0 + 1) * tc) * tr;
+    }
+  }
+  for (const [key, quadrant] of Object.entries(quadrants)) {
+    const qx = Number(key[0]) * FLY_QUADRANT_CELLS, qy = Number(key[1]) * FLY_QUADRANT_CELLS;
+    quadrant.cellHeights.forEach((block, cell) => {
+      if (!block) return;
+      const n = quadrant.cellTypes[cell].divisions;
+      const x = qx + Math.floor(cell / FLY_QUADRANT_CELLS), y = qy + (cell % FLY_QUADRANT_CELLS);
+      // The block is column-major too: index a * (n + 1) + b, a east and b north.
+      const at = (a, b) => block[a * (n + 1) + b];
+      for (let i = 0; i <= MESH_SUBDIVISIONS; i++) {
+        for (let j = 0; j <= MESH_SUBDIVISIONS; j++) {
+          const a = (i * n) / MESH_SUBDIVISIONS, b = (j * n) / MESH_SUBDIVISIONS;
+          const a0 = Math.min(n - 1, Math.floor(a)), b0 = Math.min(n - 1, Math.floor(b));
+          const ta = a - a0, tb = b - b0;
+          const h = (at(a0, b0) * (1 - ta) + at(a0 + 1, b0) * ta) * (1 - tb) + (at(a0, b0 + 1) * (1 - ta) + at(a0 + 1, b0 + 1) * ta) * tb;
+          fine[((FLY_TILE_CELLS - y) * MESH_SUBDIVISIONS - j) * side + x * MESH_SUBDIVISIONS + i] = h;
+        }
+      }
+    });
+  }
+  return fine;
+}
+
+/*
+  A tile's mesh: one vertex per point of the refined grid, shared by its cells, with UVs
+  running once across the tile's orthophoto. `heights` is row by row from the north. v = 0 is
+  the north edge, which is where a DataTexture's first row lands.
+*/
+function buildTileMesh(heights, cellX0, cellZ0, cellUnits) {
+  const sub = MESH_SUBDIVISIONS;
+  const side = FLY_TILE_CELLS * sub + 1;
+  const step = cellUnits / sub;
+  const count = side * side;
   const positions = new Float32Array(count * 3);
   const normals = new Float32Array(count * 3);
   const uvs = new Float32Array(count * 2);
-  const at = (col, row) => heights[Math.min(TILE_SIDE - 1, Math.max(0, row)) * TILE_SIDE + Math.min(TILE_SIDE - 1, Math.max(0, col))] * unitsPerFoot;
-  for (let row = 0; row < TILE_SIDE; row++) {
-    for (let col = 0; col < TILE_SIDE; col++) {
-      const i = row * TILE_SIDE + col;
-      positions[i * 3] = (cellX0 + col) * CELL_UNITS;
+  const at = (col, row) => heights[Math.min(side - 1, Math.max(0, row)) * side + Math.min(side - 1, Math.max(0, col))] * UNITS_PER_FOOT_V;
+  for (let row = 0; row < side; row++) {
+    for (let col = 0; col < side; col++) {
+      const i = row * side + col;
+      positions[i * 3] = cellX0 * cellUnits + col * step;
       positions[i * 3 + 1] = at(col, row);
-      positions[i * 3 + 2] = (cellZ0 + row) * CELL_UNITS;
-      // (-dh/dx, 1, -dh/dz) by central differences, scaled by 2 cells; row, like z, grows southward.
+      positions[i * 3 + 2] = cellZ0 * cellUnits + row * step;
+      // (-dh/dx, 1, -dh/dz) by central differences, scaled by 2 steps; row, like z, grows southward.
       const nx = at(col - 1, row) - at(col + 1, row);
       const nz = at(col, row - 1) - at(col, row + 1);
-      const ny = 2 * CELL_UNITS;
+      const ny = 2 * step;
       const length = Math.hypot(nx, ny, nz);
       normals[i * 3] = nx / length;
       normals[i * 3 + 1] = ny / length;
       normals[i * 3 + 2] = nz / length;
-      uvs[i * 2] = col / FLY_TILE_CELLS;
-      uvs[i * 2 + 1] = row / FLY_TILE_CELLS;
+      uvs[i * 2] = col / (side - 1);
+      uvs[i * 2 + 1] = row / (side - 1);
     }
   }
-  const indices = new Uint32Array(FLY_TILE_CELLS * FLY_TILE_CELLS * 6);
+  const cells = side - 1;
+  const indices = new Uint32Array(cells * cells * 6);
   let k = 0;
-  for (let row = 0; row < FLY_TILE_CELLS; row++) {
-    for (let col = 0; col < FLY_TILE_CELLS; col++) {
-      const a = row * TILE_SIDE + col, b = a + 1, c = a + TILE_SIDE, d = c + 1;
+  for (let row = 0; row < cells; row++) {
+    for (let col = 0; col < cells; col++) {
+      const a = row * side + col, b = a + 1, c = a + side, d = c + 1;
       // Counter-clockwise seen from above (+y), with z pointing south.
       indices[k++] = a; indices[k++] = c; indices[k++] = b;
       indices[k++] = b; indices[k++] = c; indices[k++] = d;
     }
   }
-  return { positions, normals, uvs, indices };
+  return { positions, normals, uvs, indices, subdivisions: sub, heightsFeet: heights };
+}
+
+/*
+  Every tile's refined heights on one grid over the whole square map, in feet, row by row from
+  the north, MESH_SUBDIVISIONS points a cell side; 0 (sea level) where no tile is loaded.
+  Test Drive samples it in the same triangles the meshes are cut into (world-frame.js).
+*/
+function stitchHeights(flyTiles, west, north, gridSize) {
+  const sub = MESH_SUBDIVISIONS;
+  const side = gridSize * sub + 1;
+  const tileSide = FLY_TILE_CELLS * sub + 1;
+  const data = new Float32Array(side * side);
+  for (const tile of flyTiles) {
+    const left = (tile.column - west) * FLY_TILE_CELLS * sub;
+    const top = (north - tile.row) * FLY_TILE_CELLS * sub;
+    for (let row = 0; row < tileSide; row++) {
+      data.set(tile.heightsFeet.subarray(row * tileSide, (row + 1) * tileSide), (top + row) * side + left);
+    }
+  }
+  return { data, side, subdivisions: sub };
 }
 
 /** The minimap: every tile's orthophoto shrunk onto the square world the map shows. */

@@ -180,20 +180,8 @@ export class TrackCamera {
     if (!this.enabled) return;
     const keys = this._keys;
     const worldSize = this._trackGridSize * this._trackCellSize;
-    let moveSpeed = MOVE_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
-    let heightSpeed = HEIGHT_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
-    /*
-      A world a loader marks as altitude-scaled (Fly!'s, 250 km across) moves in proportion to
-      the camera's height, as a map does: across a city in seconds from high up, a street at a
-      time near the ground, and never down through it in one keypress, since climbing and
-      descending change the height by a fraction of itself.
-    */
-    const scaled = this._trackData?.startView?.altitudeSpeed;
-    if (scaled) {
-      const height = Math.max(scaled.floor, this.position.y);
-      moveSpeed = height * scaled.move * this.speedFactor;
-      heightSpeed = height * scaled.climb * this.speedFactor;
-    }
+    const moveSpeed = MOVE_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
+    const heightSpeed = HEIGHT_SPEED_BASE * (worldSize / 16384) * this.speedFactor;
 
     if (keys.has("ArrowLeft"))  this.yaw -= TURN_SPEED * dt;
     if (keys.has("ArrowRight")) this.yaw += TURN_SPEED * dt;
@@ -209,7 +197,6 @@ export class TrackCamera {
     if (keys.has("ArrowDown")) this.position.addScaledVector(fwd, -moveSpeed * dt);
     if (keys.has("KeyA") || keys.has("a")) this.position.y += heightSpeed * dt;
     if (keys.has("KeyZ") || keys.has("z")) this.position.y -= heightSpeed * dt;
-    if (scaled) this.position.y = Math.max(scaled.floor, this.position.y);
 
     if (keys.has("Home")) {
       this.resetToCourseStart(this._trackData, this._trackHeightScale);
@@ -270,10 +257,7 @@ export class TrackCamera {
   _onWheel(e) {
     e.preventDefault();
     const worldSize = this._trackGridSize * this._trackCellSize;
-    const scaled = this._trackData?.startView?.altitudeSpeed;
-    const zoomStep = scaled
-      ? Math.max(scaled.floor, this.position.y) * scaled.move * 0.12
-      : MOVE_SPEED_BASE * (worldSize / 16384) * 0.12;
+    const zoomStep = MOVE_SPEED_BASE * (worldSize / 16384) * 0.12;
     const dir = e.deltaY > 0 ? -1 : 1;
     const fwd = this._forwardFlat();
     this.position.addScaledVector(fwd, zoomStep * dir);

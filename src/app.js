@@ -596,8 +596,7 @@ export class TrackViewerApp {
     this._doc.getElementById("tog-terrain-overlap").checked = this._renderFlags.terrainOverlap;
     this._scene.setTrack(result, this._renderFlags, this._heightScale);
     this._doc.getElementById("sidebar").classList.remove("no-track");
-    // Fly! scenery is a flight world with no truck physics behind it.
-    if (this._truckAssembly && result.origin !== "FLY") {
+    if (this._truckAssembly) {
       this._scene.setDriveTruck(this._truckAssembly);
     }
     this._minimap.setTrack(result);
@@ -638,7 +637,7 @@ export class TrackViewerApp {
     // Drive and its hitbox overlay mean nothing until a truck POD is open, so they are not
     // shown at all before then; with a truck but no track, Drive shows but stays disabled.
     const hasTruck = !!(this._truckChoices.length || this._truckAssembly);
-    const ready = !!(this._scene._trackData && hasTruck && this._scene._trackData.origin !== "FLY");
+    const ready = !!(this._scene._trackData && hasTruck);
     const drive = this._doc.getElementById("drive-btn");
     drive.hidden = !hasTruck;
     drive.disabled = !ready;
@@ -1106,6 +1105,8 @@ export class TrackViewerApp {
   */
   _applyLayerAvailability(presence) {
     for (const [id, flag] of Object.entries(this._toggleMap ?? {})) {
+      // Hitboxes belong to Test Drive and show only with a truck (_updateTruckButtons).
+      if (id === "tog-hitboxes") continue;
       const input = this._doc.getElementById(id);
       const row = input?.closest("label");
       if (row) row.hidden = presence ? presence[flag] === false : false;

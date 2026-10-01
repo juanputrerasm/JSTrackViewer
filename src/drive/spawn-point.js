@@ -41,3 +41,11 @@ export function trackSpawnPoint(trackData, frame, assembly, colliders = null) {
     + (assembly?.restHeight ?? 0);
   return { ...position, psi };
 }
+
+/**
+ * A spawn at a chosen point, dropped onto whatever is solid there. Fly! scenery has no start
+ * grid, so the truck starts under the camera, facing where it faces.
+ */
+export function spawnAt(frame, assembly, colliders, xFeet, zFeet, psi) {
+  return { x: xFeet, y: groundForSpawn(frame, colliders, xFeet, zFeet) + (assembly?.restHeight ?? 0), z: zFeet, psi };
+}

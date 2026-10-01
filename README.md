@@ -19,7 +19,7 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 ## Features
 
 - **POD and ZIP loading**: open a local archive or fetch one from a URL.
-- **Fly! scenery**: **Open from Folder** loads a Fly! city (San Francisco, Los Angeles, New York, Chicago or Dallas) from the folder holding its `.SCF`: four globe tiles of terrain, about 250 km across, draped in the game's satellite imagery, with the city's buildings and landmarks standing on it: downtown skylines, airports, stadiums and the bridges (the Golden Gate, Bay, Brooklyn and George Washington bridges among them). The camera opens over downtown, and moves in proportion to its height: across the city in seconds from high up, a block at a time near the ground. Terrain near the camera streams in at the imagery's full resolution, about 15 m a pixel, with the airports' finer detail textures. Picking the `Scenery` folder itself offers all five cities. A single numbered scenery EPD from **Open from Disk** shows its one globe tile.
+- **Fly! scenery**: **Open from Folder** loads a Fly! city (San Francisco, Los Angeles, New York, Chicago or Dallas) from the folder holding its `.SCF`: four globe tiles of terrain, about 250 km across, draped in the game's satellite imagery, with the city's buildings and landmarks standing on it: downtown skylines, airports, stadiums and the bridges (the Golden Gate, Bay, Brooklyn and George Washington bridges among them). The camera opens over downtown, and **Test Drive** works there too: the truck starts on the ground under the camera, facing where it faces, and the buildings and bridges are solid. Terrain near the camera streams in at the imagery's full resolution, about 15 m a pixel, with the airports' finer detail textures, over the game's finer relief where it has it. The Weather choice applies too, and at dusk and night the cities light up. Picking the `Scenery` folder itself offers all five cities. A single numbered scenery EPD from **Open from Disk** shows its one globe tile.
 - **Multi-track archives**: an archive with more than one `.SIT` or `.LVL` track opens a track chooser over the viewport, and the top bar picker switches between them without reopening the archive. A ZIP holding several PODs offers every track of every POD, grouped by POD.
 - **Broad game support**: inspect MTM/MTM2, Terminal Velocity/Fury3, Hellbender, CART Precision Racing, and 4x4 Evolution 1/2 track formats.
 - **Modern MTM2 (Community Patch 3) support**: read `.SI2` track scripts, long BIN texture names, material records, and PNG/TGA textures.
@@ -52,7 +52,8 @@ JSTrackViewer opens POD and ZIP archives from disk or URL and renders their terr
 | POD1 | Original Terminal Reality archive layout with 32-byte directory name fields |
 | POD2 | Indexed archive layout used by 4x4 Evolution 1 and 2 |
 | EPD | Fly! archive layout |
-| SCF + ALT, TYP, TEX, REF | Fly! scenery sets: globe tile heights and satellite imagery |
+| SCF + ALT, TYP, TEX, REF, AL2 | Fly! scenery sets: globe tile heights, finer relief and satellite imagery |
+| *NIGHT.EPD | Fly! city lights at dusk and night |
 | SCENERY.Sxx + BIN, BSP | Fly! buildings, landmarks and bridges |
 | ZIP | POD archives packaged in ZIP files, including ZIPs with several PODs |
 | SIT | MTM, MTM2, and CART Precision Racing track definitions |
@@ -198,7 +199,7 @@ POD archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhote
 - Test Drive handling is a feel-alike, not the original. Monster Truck Madness 2 keeps its mass, spring rates, gearing and tire grip in the executable rather than in track or truck files, so those values are approximated; see the [physics notes](docs/MTM2_PHYSICS_NOTES.md).
 - Test Drive collides with terrain, track objects, and the CART Precision Racing road surface and walls. It does not simulate other trucks, damage, or race rules beyond checkpoint order and lap timing.
 - CART Precision Racing absolute wall height is approximate.
-- Fly! scenery does not draw its beacons (`.ARM` models), windsocks (whose models ship with the game rather than the scenery), finer terrain detail, night lighting or the sectional charts in `Maps\`. Cells outside a city's photographed area use generic textures that ship with the game rather than the scenery, so they are drawn in flat land and water colours.
+- Fly! scenery does not draw its beacons and windsocks, whose models ship with the game rather than the scenery, or the sectional charts in `Maps\`. Cells outside a city's photographed area use generic textures that ship with the game rather than the scenery, so they are drawn in flat land and water colours.
 - CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
 - CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
 - Terminal Velocity/Fury3 and Hellbender tunnels are not supported. Hellbender's underground is not a tunnel: it is part of the same level and is drawn.

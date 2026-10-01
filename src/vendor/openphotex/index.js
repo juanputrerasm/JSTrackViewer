@@ -50,7 +50,7 @@ export { MTM2_PALETTE_WHITE_INDEX, MTM2_PALETTE_FIRST_AUTHORED, MTM2_PALETTE_AUT
 export { writeMtm2Sit, writeMtm2Lvl, writeTexList, writeEmptyList, emptyGroundBoxGrids, buildMtm2Lte, writeMtm2Trk, } from "./mtm/write.js";
 export { parseFlyTagged, flyTag, flyTags, parseFlyAngle } from "./fly/tagged.js";
 export { FLY_TILE_DEGREES, FLY_TILE_COLUMNS, FLY_EQUATOR_ROW, FLY_TILE_CELLS, FLY_QUADRANT_CELLS, flyRowLatitude, flyColumnLongitude, flyTileBounds, flyTileAt, parseFlyFolderName, flyFolderName, parseFlyTextureName, } from "./fly/globe.js";
-export { parseFlyScf, parseFlySceneryObjects } from "./fly/scenery.js";
+export { FLY_OBJECT_SNAP_TO_GROUND, parseFlyScf, parseFlySceneryObjects } from "./fly/scenery.js";
 export { FLY_ALT_SIDE, parseFlyAlt, parseFlyTex, parseFlyTyp, parseFlyRef, parseFlyAl2, parseFlyQuadrant, } from "./fly/quadrant.js";
 export { parseFlyBsp } from "./fly/bsp.js";
 export { PodFormatError } from "./errors.js";

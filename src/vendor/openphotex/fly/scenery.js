@@ -27,6 +27,8 @@ function bounds(lowerLeft, upperRight) {
         return null;
     return { south: south, west: west, north: north, east: east };
 }
+/** `<flag>` bit 0: relocate the model vertically so its lowest point rests on the terrain. */
+export const FLY_OBJECT_SNAP_TO_GROUND = 0x00000001;
 /*
     <wobj> mobj
     <bgno>
@@ -74,12 +76,14 @@ export function parseFlySceneryObjects(input, sourceName = "SCENERY.Sxx") {
                 }
             }
         }
+        const flag = numberOrNull(flyTag(body, "flag")?.values[0]);
         objects.push({
             kind: wobj.values[0] ?? "",
             type: flyTag(body, "type")?.values[0] ?? "",
             id,
             name: flyTag(body, "name")?.values[0] ?? "",
-            flag: numberOrNull(flyTag(body, "flag")?.values[0]),
+            flag,
+            snapToGround: flag !== null && (flag & FLY_OBJECT_SNAP_TO_GROUND) !== 0,
             detail: numberOrNull(flyTag(body, "detl")?.values[0]),
             latitude,
             longitude,

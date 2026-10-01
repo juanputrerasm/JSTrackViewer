@@ -79,6 +79,9 @@ export function createWorldFrame(trackData) {
 
   const stepsToFeet = (steps) => steps * heightScale / UNITS_PER_FOOT_V;
 
+  // Fly! gives its ground as heights in feet instead of a raw grid; see flyGround below.
+  const feetGrid = terrain?.heightsFeet ? flyGround(terrain.heightsFeet, cellSize) : null;
+
   // The .TTY value per cell (100 * ground type + depth), when the track assigns any.
   const surface = terrain?.surface
     ? (terrain.surface instanceof Uint16Array ? terrain.surface : new Uint16Array(terrain.surface))
@@ -118,6 +121,7 @@ export function createWorldFrame(trackData) {
     first triangle covers u >= w and the second covers w >= u.
   */
   function terrainHeightAtFeet(xFt, zFt) {
+    if (feetGrid) return feetGrid.heightAt(xFt, zFt);
     if (!raw) return 0;
     const sceneX = xFt * UNITS_PER_FOOT_H;
     const sceneZ = zFt * UNITS_PER_FOOT_H;
@@ -158,6 +162,7 @@ export function createWorldFrame(trackData) {
     that is not there.
   */
   function terrainNormalAtFeet(xFt, zFt) {
+    if (feetGrid) return feetGrid.normalAt(xFt, zFt);
     if (!raw) return { x: 0, y: 1, z: 0 };
     const cellFt = cellSize / UNITS_PER_FOOT_H;
     const sceneX = xFt * UNITS_PER_FOOT_H;
@@ -234,7 +239,7 @@ export function createWorldFrame(trackData) {
     worldSizeFeet: worldSize / UNITS_PER_FOOT_H,
     /** Cell pitch in feet (32 for the MTM family). */
     cellSizeFeet: cellSize / UNITS_PER_FOOT_H,
-    hasTerrain: !!raw,
+    hasTerrain: !!raw || !!feetGrid,
 
     heightAtFeet,
     normalAtFeet,
@@ -377,6 +382,41 @@ export function createWorldFrame(trackData) {
     */
     headingToForward(psi) {
       return { x: Math.sin(psi ?? 0), y: 0, z: -Math.cos(psi ?? 0) };
+    },
+  };
+}
+
+/*
+  Fly!'s ground: heights in feet on one grid over the whole map, row 0 at the north edge,
+  `subdivisions` points a cell side (fly-loader.js stitchHeights). Sampled over the same two
+  triangles its meshes are cut into, split along the diagonal from a square's north-east
+  corner to its south-west one, so the wheels meet the surface that is drawn.
+*/
+function flyGround({ data, side, subdivisions }, cellSize) {
+  const heights = data instanceof Float32Array ? data : new Float32Array(data);
+  const stepFt = cellSize / subdivisions / UNITS_PER_FOOT_H;
+  const at = (col, row) => heights[row * side + col];
+  // The square a point is in, and where in it: u east, w south, both 0 to 1.
+  const locate = (xFt, zFt) => {
+    const gx = Math.min(side - 1.000001, Math.max(0, xFt / stepFt));
+    const gz = Math.min(side - 1.000001, Math.max(0, zFt / stepFt));
+    const col = Math.floor(gx), row = Math.floor(gz);
+    return { col, row, u: gx - col, w: gz - row };
+  };
+  return {
+    heightAt(xFt, zFt) {
+      const { col, row, u, w } = locate(xFt, zFt);
+      const a = at(col, row), b = at(col + 1, row), c = at(col, row + 1), d = at(col + 1, row + 1);
+      return u + w <= 1 ? a + (b - a) * u + (c - a) * w : d + (c - d) * (1 - u) + (b - d) * (1 - w);
+    },
+    normalAt(xFt, zFt) {
+      const { col, row, u, w } = locate(xFt, zFt);
+      const a = at(col, row), b = at(col + 1, row), c = at(col, row + 1), d = at(col + 1, row + 1);
+      // Slopes in feet per foot, east (x) and south (z).
+      const east = u + w <= 1 ? (b - a) / stepFt : (d - c) / stepFt;
+      const south = u + w <= 1 ? (c - a) / stepFt : (d - b) / stepFt;
+      const length = Math.hypot(east, 1, south);
+      return { x: -east / length, y: 1 / length, z: -south / length };
     },
   };
 }
