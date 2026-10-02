@@ -1,4 +1,4 @@
-import { indexPodFile, readPodEntryBytes } from "./pod-format.js";
+import { indexPodFile, podFile, readPodEntryBytes } from "./pod-format.js";
 import { findAllTruckManifests } from "./truck/pod-lookup.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
 import { collectMtmCheckpoints } from "./checkpoint-list.js";
@@ -8,9 +8,9 @@ import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
 import { decodeHeightSample } from "../shared/terrain-height.js";
 import { resolveKeyframeModel } from "./keyframes.js";
-import { readFile } from "../shared/opfs.js";
 
 let podIndex = null;
+// Where the indexed POD is: an OPFS path, or a File from Open from Folder (see indexPodFile).
 let podOpfsPath = null;
 
 // Cache for POD entry bytes (keyed by "offset_length")
@@ -64,7 +64,7 @@ self.onmessage = async (event) => {
       const choice = choices[choiceIndex];
       // A single Fly! scenery EPD is one globe tile; it is read in place, not prefetched whole.
       result = choice.format === "FLY"
-        ? await loadFly([{ blob: await readFile(podOpfsPath), name: choice.name }], { name: choice.name })
+        ? await loadFly([{ blob: await podFile(podOpfsPath), name: choice.name }], { name: choice.name })
         : await loadTrackAsync(podIndex, podOpfsPath, choice, heightScale ?? 3);
 
     } else if (type === "flyDetail") {
@@ -554,6 +554,9 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   return {
     origin: doc.origin, podComment: doc.podComment, trackVersion,
+    // Shown in the viewer's Warnings strip: the SIT's own (a box count that disagrees with its
+    // records), then models that loaded short, then HD textures that were refused.
+    warnings: [...(doc.warnings ?? []), ...modelWarnings, ...hdWarnings.map((w) => `HD texture refused: ${w}`)],
     fileName: choice.fileName ?? choice.entry?.title ?? "",
     trackName: doc.trackName || choice.name,
     localeName: doc.localeName, trackType: doc.trackType,

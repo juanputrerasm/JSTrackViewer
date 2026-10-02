@@ -114,6 +114,7 @@ export function parseMtmSit(input, sitTitle = "") {
         arena: parseArena(lines),
         backdropModelNames: parseBackdrop(lines),
         trucks: parseTrucks(lines),
+        warnings: [],
     };
     const trackType = valueAfter("Track Race Type");
     if (trackType !== null)
@@ -133,20 +134,38 @@ export function parseMtmSit(input, sitTitle = "") {
             sit.weatherMask = parseLeadingInt(parts[2]);
         }
     }
-    parseBoxSection(lines, "*** Ramps ***", sit.boxes, true);
-    parseBoxSection(lines, "*** Boxes ***", sit.boxes, false);
+    parseBoxSection(lines, "*** Ramps ***", sit.boxes, true, sit.warnings);
+    parseBoxSection(lines, "*** Boxes ***", sit.boxes, false, sit.warnings);
     parseTopCrushSection(lines, sit.boxes);
     parseCourses(lines, sit);
     return sit;
 }
-function parseBoxSection(lines, sectionHeader, boxes, isRamp) {
+/*
+  The records are read up to the next "*** Name ***" header only. The engine and Traxx read as
+  many records as the count line declares, so a file declaring more than it holds sends them
+  into the next section: a hand-edited Roanoke River declared 4096 boxes, held 4095, and the
+  first course segment's "*****" line was read as the missing box. Such a file is reported, and
+  only the records that are there are read.
+*/
+function parseBoxSection(lines, sectionHeader, boxes, isRamp, warnings) {
     const section = indexOfLine(lines, sectionHeader);
     if (section < 0 || section + 1 >= lines.length)
         return;
     const count = parseLeadingInt(lines[section + 1]);
+    let sectionEnd = section + 2;
+    while (sectionEnd < lines.length && !/^\*\*\* \S/.test(lines[sectionEnd]))
+        sectionEnd++;
+    let present = 0;
+    for (let i = section + 2; i < sectionEnd; i++)
+        if (lines[i].startsWith("********"))
+            present++;
+    if (present !== count) {
+        const kind = isRamp ? "Ramp" : "Box";
+        warnings.push(`${kind} count ${count} and real ${isRamp ? "ramp" : "object"} count ${present} doesn't match`);
+    }
     let cursor = section + 2;
     let checkpointSequence = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < Math.min(count, present); i++) {
         cursor = nextBlockStart(lines, cursor);
         if (cursor < 0)
             return;

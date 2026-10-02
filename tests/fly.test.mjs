@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { flySetsFromFolder } from "../src/fly-folder.js";
+import { flySetsFromFolder, looseArchives } from "../src/folder-contents.js";
 import { loadFlyScenery, renderFlyDetail } from "../src/worker/fly/fly-loader.js";
 import { parsePod, findPodEntry, readPodEntry, decodeActPalette } from "../src/vendor/openphotex/index.js";
 
@@ -49,6 +49,20 @@ test("Open from Folder: a folder above the sets offers each, and only its own ar
   // Dallas names la1.epd, which is in another set's folder: that is not beside its .SCF.
   assert.deepEqual(sets[0].missing, ["la1.epd"]);
   assert.equal((await flySetsFromFolder([pickedFile("Tracks/A.POD")])).sets.length, 0);
+});
+
+test("Open from Folder: every POD, and any EPD no scenery set lists, in path order", async () => {
+  const files = [
+    pickedFile("games/SANFRAN/SANFRAN.SCF", scf("San Francisco", ["sanfran1.epd"])),
+    pickedFile("games/SANFRAN/SANFRAN1.EPD"),
+    pickedFile("games/mtm2/ALASKA.POD"),
+    pickedFile("games/mtm2/aztec.pod"),
+    pickedFile("games/Maps/SC24.EPD"),
+    pickedFile("games/mtm2/readme.txt"),
+  ];
+  const { sets } = await flySetsFromFolder(files);
+  assert.deepEqual(looseArchives(files, sets).map((f) => f.webkitRelativePath),
+    ["games/Maps/SC24.EPD", "games/mtm2/ALASKA.POD", "games/mtm2/aztec.pod"]);
 });
 
 const SF = `${process.env.HOME}/games/Fly/Scenery/SANFRAN`;

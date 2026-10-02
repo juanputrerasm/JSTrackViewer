@@ -11,6 +11,9 @@
   --accent: #5d9cf5;
   --accent-dim: #3a6bbf;
   --danger: #e05555;
+  --danger-bg: rgba(110, 32, 32, 0.30);
+  --warning: #e3b289;
+  --warning-bg: rgba(92, 56, 40, 0.28);
   --green: #55c070;
   --font: 'Segoe UI', system-ui, sans-serif;
   --mono: 'Consolas', 'Fira Code', monospace;
@@ -250,6 +253,64 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 #loading-msg { color: var(--text-dim); font-size: 12px; }
+
+/* Warnings and errors from the last load, under the viewport (as in JSTruckViewer). */
+.warnings-panel {
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 8px 12px 10px;
+  max-height: 30%;
+  overflow-y: auto;
+}
+
+.warnings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.warnings-head h2 {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.warnings-head button {
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.warnings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.warning-item,
+.error-item {
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.warning-item {
+  border-color: rgba(227, 178, 137, 0.34);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.error-item {
+  border-color: rgba(224, 85, 85, 0.45);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
 
 /* The track chooser shown over the viewport when an archive holds more than one track. */
 .track-modal {

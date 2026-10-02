@@ -1,12 +1,17 @@
 import { parseFlyScf } from "./vendor/openphotex/index.js";
 
 /*
-  Open from Folder: the Fly! scenery sets in a folder the user picked.
+  Open from Folder: what a picked folder holds that the viewer can open.
 
   A browser hands over every file under the chosen folder, each with its path relative to it
-  (webkitRelativePath), and nothing else: it cannot look beside a file it was given. So the
-  folder to pick is the one holding the set's .SCF, such as Scenery\SANFRAN, or any folder
-  above it, Scenery itself for example, in which case every set under it is offered.
+  (webkitRelativePath), and nothing else: it cannot look beside a file it was given. Two kinds
+  of thing are found in it, at any depth:
+
+    - Fly! scenery sets, each an .SCF with the archives it lists (flySetsFromFolder)
+    - every other archive, each POD and any EPD no set claims (looseArchives)
+
+  So picking an MTM2 install offers every track of every POD in it, picking Fly!'s Scenery
+  folder offers its five cities, and picking a folder above both offers all of them.
 
   A set is its .SCF and the archives it lists, looked up beside it ignoring case, as the game
   on Windows would. An archive the .SCF names but the folder lacks is reported, not fatal:
@@ -53,4 +58,21 @@ export async function flySetsFromFolder(files) {
   }
   sets.sort((a, b) => a.name.localeCompare(b.name));
   return { folder, sets };
+}
+
+/**
+ * The archives in a picked folder that are not part of a Fly! scenery set: every .POD, and
+ * any .EPD no set lists (a lone scenery tile; a sectional chart is offered and then reports
+ * what it is). In path order.
+ *
+ * @param {File[]} files  everything under the picked folder
+ * @param {{ archives: File[] }[]} sets  from flySetsFromFolder
+ * @returns {File[]}
+ */
+export function looseArchives(files, sets) {
+  const claimed = new Set(sets.flatMap((set) => set.archives));
+  const pathOf = (file) => file.webkitRelativePath || file.name;
+  return files
+    .filter((file) => /\.(pod|epd)$/i.test(file.name) && !claimed.has(file))
+    .sort((a, b) => pathOf(a).localeCompare(pathOf(b)));
 }

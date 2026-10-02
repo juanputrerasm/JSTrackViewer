@@ -28,6 +28,8 @@ export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
   const doc = createDoc(podComment);
   doc.origin = sit.origin;
   doc.prefix = prefixFromName(lvlName);
+  // A box count that disagrees with the records, for one; shown in the Track Data panel.
+  doc.warnings.push(...sit.warnings);
 
   // Parse LVL (embedded terrain references)
   const lvlEntry = findEntryFlexible(podIndex, lvlName);
@@ -370,5 +372,6 @@ function createDoc(podComment) {
     backdropModelNames: [],
     arena: null,
     fogMap: null,
+    warnings: [],
   };
 }

@@ -5,6 +5,10 @@ const MOVE_SPEED_BASE = 3000;  // world units/sec (crosses 256-cell track in ~5s
 const TURN_SPEED = 80;         // degrees/sec
 const PITCH_SPEED = 60;        // degrees/sec
 const HEIGHT_SPEED_BASE = 2000; // world units/sec
+/** The zoom range and the factor one wheel notch changes it by. */
+export const ZOOM_MIN = 0.5;
+export const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.1;
 
 /** .NAV entry type 6, the level's start point. */
 const NAV_START_POINT = 6;
@@ -46,6 +50,13 @@ export class TrackCamera {
     this._trackData = null;
     this._onGridSpanChange = null;
     this._onChange = null;
+    /*
+      Zoom narrows the field of view rather than moving the camera, as a lens does: 1 is the
+      game's own view (the camera's field of view when this was made), 2 shows half as wide.
+    */
+    this._baseFov = camera.fov;
+    this.zoom = 1;
+    this._onZoomChange = null;
 
     this._applyToCamera();
   }
@@ -56,6 +67,29 @@ export class TrackCamera {
 
   setChangeCallback(fn) {
     this._onChange = fn;
+  }
+
+  /** Called with the new zoom whenever the wheel or setZoom changes it, for the Zoom slider. */
+  setZoomChangeCallback(fn) {
+    this._onZoomChange = fn;
+  }
+
+  /**
+   * Zoom the lens: the field of view whose half-angle tangent is the base one's over `zoom`,
+   * so twice the zoom shows the middle half of the picture at twice the size.
+   */
+  setZoom(zoom) {
+    this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number.isFinite(zoom) ? zoom : 1));
+    // Drive cameras set their own field of view; the zoom waits for flying to resume.
+    if (this.enabled) this.applyZoom();
+    this._onZoomChange?.(this.zoom);
+  }
+
+  /** Put the zoom back on the camera, after drive mode has used a field of view of its own. */
+  applyZoom() {
+    const half = Math.atan(Math.tan((this._baseFov * DEG2RAD) / 2) / this.zoom);
+    this.camera.fov = (2 * half) / DEG2RAD;
+    this.camera.updateProjectionMatrix();
   }
 
   get gridSpan() { return this._gridSpan; }
@@ -254,13 +288,9 @@ export class TrackCamera {
     this._applyToCamera();
   }
 
+  // Each wheel notch zooms in or out by a tenth; scrolling down (toward you) zooms out.
   _onWheel(e) {
     e.preventDefault();
-    const worldSize = this._trackGridSize * this._trackCellSize;
-    const zoomStep = MOVE_SPEED_BASE * (worldSize / 16384) * 0.12;
-    const dir = e.deltaY > 0 ? -1 : 1;
-    const fwd = this._forwardFlat();
-    this.position.addScaledVector(fwd, zoomStep * dir);
-    this._applyToCamera();
+    this.setZoom(this.zoom * (e.deltaY > 0 ? 1 / ZOOM_STEP : ZOOM_STEP));
   }
 }

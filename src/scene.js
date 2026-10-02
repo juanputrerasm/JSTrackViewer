@@ -546,12 +546,27 @@ export class TrackScene {
     const { width, height } = this._container.getBoundingClientRect();
     this._camera = new THREE.PerspectiveCamera(NAV_FOV, (width || 800) / (height || 600), 1, 120000);
     this._nav = new TrackCamera(this._camera);
+    this._nav.setZoomChangeCallback((zoom) => this._zoomChanged(zoom));
     this._nav.bindElement(this._container);
     this._nav.setGridSpanChangeCallback((gs) => { this._onGridSpanChange?.(gs); });
   }
 
   setGridSpanChangeCallback(fn) { this._onGridSpanChange = fn; }
   setNavigationChangeCallback(fn) { this._nav?.setChangeCallback(fn); }
+
+  /*
+    The fly camera's zoom (nav.js): set from the Zoom slider, changed by the mouse wheel, and
+    reported back so the slider follows the wheel. Shadows are fitted to the view, so a new
+    field of view refits them.
+  */
+  setZoom(zoom) { this._nav.setZoom(zoom); }
+
+  setZoomChangeCallback(fn) { this._onZoomChange = fn; }
+
+  _zoomChanged(zoom) {
+    this._shadows?.refit();
+    this._onZoomChange?.(zoom);
+  }
 
   _initLights() {
     this._ambient = new THREE.AmbientLight(AMBIENT_COLOR, AMBIENT_INTENSITY);
@@ -3779,12 +3794,10 @@ export class TrackScene {
     this._drive?.dispose();
     this._drive = null;
     this._nav.enabled = true;
-    // Drive cameras set their own field of view; flying goes back to the game's.
-    if (this._camera.fov !== NAV_FOV) {
-      this._camera.fov = NAV_FOV;
-      this._camera.updateProjectionMatrix();
-      this._shadows.refit();
-    }
+    // Drive cameras set their own field of view; flying goes back to its own, zoom included.
+    const fov = this._camera.fov;
+    this._nav.applyZoom();
+    if (this._camera.fov !== fov) this._shadows.refit();
     // The markers are drive mode's, so they go when it does.
     this._renderFlags.hitboxes = false;
     this.setColliderMarkers(null);

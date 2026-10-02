@@ -3,7 +3,7 @@ import { WorkerClient } from "./worker-client.js";
 import { removePath, resetSessionFolder, writeBytesToFile } from "./shared/opfs.js";
 import { extractFirstPodFromZipBytes, extractPodsFromZipBytes } from "./zip-utils.js";
 import { UNITS_PER_FOOT_H } from "./drive/world-frame.js";
-import { flySetsFromFolder } from "./fly-folder.js";
+import { flySetsFromFolder, looseArchives } from "./folder-contents.js";
 
 const APP_TITLE = "JSTrackViewer";
 const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · L Lights · V Camera · R Reset";
@@ -68,6 +68,10 @@ export class TrackViewerApp {
     // File input
     const fileInput = doc.getElementById("file-input");
     doc.getElementById("open-file-btn").addEventListener("click", () => fileInput.click());
+    doc.getElementById("warnings-dismiss").addEventListener("click", () => {
+      this._messages = { track: [], truck: [] };
+      this._renderMessages();
+    });
     fileInput.addEventListener("change", (e) => {
       const file = e.target.files?.[0];
       if (file) this._loadFromFile(file);
@@ -270,6 +274,16 @@ export class TrackViewerApp {
     // Apply initial value
     this._scene.setViewDistance(parseInt(gridSlider.value, 10));
 
+    // Zoom: the slider sets the fly camera's lens, and follows it when the mouse wheel zooms.
+    const zoomSlider = doc.getElementById("zoom-slider");
+    const zoomLabel = doc.getElementById("zoom-value");
+    const showZoom = (zoom) => {
+      zoomSlider.value = String(zoom);
+      zoomLabel.textContent = `${zoom.toFixed(1)}×`;
+    };
+    zoomSlider.addEventListener("input", () => this._scene.setZoom(parseFloat(zoomSlider.value)));
+    this._scene.setZoomChangeCallback(showZoom);
+
     /*
       Weather, for the games that have it (see TrackScene.weatherApplies). The choice is kept
       across track loads and visits.
@@ -376,6 +390,7 @@ export class TrackViewerApp {
 
   async _loadFromFile(file, source = "Local file") {
     this._stopDrivingForChange();
+    this._setMessages("track", []);
     this._setStatus(`Reading ${file.name}…`);
     this._showLoading(`Reading ${file.name}…`);
     try {
@@ -392,6 +407,7 @@ export class TrackViewerApp {
 
   async _loadFromUrl(url) {
     this._stopDrivingForChange();
+    this._setMessages("track", []);
     this._setStatus(`Fetching…`);
     this._showLoading("Fetching from URL…");
     try {
@@ -456,6 +472,20 @@ export class TrackViewerApp {
     this._setStatus("Writing to temp storage…");
     await resetSessionFolder("track-viewer");
     await removePath(TRACK_OPFS_DIR);
+    this._resetChoices();
+    const archives = [];
+    for (let i = 0; i < pods.length; i++) {
+      const { bytes, filename } = pods[i];
+      const opfsPath = `${TRACK_OPFS_DIR}/pod-${i}.pod`;
+      await writeBytesToFile(opfsPath, bytes);
+      archives.push({ filename, opfsPath, source: pods.length > 1 ? `${source} / ${filename}` : source });
+    }
+    const notes = await this._indexArchives(archives);
+    await this._offerChoices(container, notes);
+  }
+
+  /** Forget the open archives and whatever was loaded from them. */
+  _resetChoices() {
     this._scene.clearTrack();
     this._clearTrackInfo();
     this._hideTrackPicker();
@@ -463,21 +493,29 @@ export class TrackViewerApp {
     this._archives = [];
     this._choices = [];
     this._indexedArchive = null;
-    const notes = [];
+  }
 
-    for (let i = 0; i < pods.length; i++) {
-      const { bytes, filename } = pods[i];
-      const opfsPath = `${TRACK_OPFS_DIR}/pod-${i}.pod`;
-      await writeBytesToFile(opfsPath, bytes);
-      this._setStatus(`Indexing ${filename}…`);
-      const archive = {
-        filename, opfsPath,
-        source: pods.length > 1 ? `${source} / ${filename}` : source,
-      };
-      const { entryCount } = await this._worker.call("indexPod", { opfsPodPath: opfsPath });
+  /*
+    Index each archive and add its tracks to the choices. An archive is where the worker can
+    read it: `opfsPath` for a staged copy, or `file` for one picked from a folder.
+
+    @returns the notes the worker gave for archives with nothing to view in them
+  */
+  async _indexArchives(archives) {
+    const notes = [];
+    for (const archive of archives) {
+      this._setStatus(`Indexing ${archive.filename}…`);
+      let indexed;
+      try {
+        indexed = await this._worker.call("indexPod", { opfsPodPath: archive.opfsPath ?? archive.file });
+      } catch (err) {
+        // One unreadable archive in a folder of them should not stop the rest.
+        notes.push(`${archive.filename}: ${err.message}`);
+        continue;
+      }
       this._indexedArchive = archive;
       const { choices, note } = await this._worker.call("listTrackChoices", {});
-      this._setStatus(`${filename}: ${entryCount} entries, ${choices.length} track(s).`);
+      this._setStatus(`${archive.filename}: ${indexed.entryCount} entries, ${choices.length} track(s).`);
       if (note) notes.push(note);
       if (!choices.length) continue;
       this._archives.push(archive);
@@ -485,15 +523,17 @@ export class TrackViewerApp {
         this._choices.push({ archive, index: choice.index, name: choice.name, fileName: choice.fileName ?? "" });
       }
     }
+    return notes;
+  }
 
+  /** Offer the choices: load the only one, or open the chooser. */
+  async _offerChoices(container, notes = []) {
     if (this._choices.length === 0) {
       const message = notes[0] ?? `No tracks found in ${container}.`;
       this._setStatus(message);
       throw new Error(message);
     }
-
     this._populateTrackPicker();
-
     if (this._choices.length === 1) {
       await this._loadTrackChoice(0);
     } else {
@@ -510,6 +550,7 @@ export class TrackViewerApp {
     this._doc.getElementById("track-select").value = String(choiceIndex);
 
     this._stopDrivingForChange();
+    this._setMessages("track", []);
     this._setStatus(`Loading "${choice.name}"…`);
     this._showLoading(`Loading ${choice.name}…`);
     try {
@@ -526,7 +567,7 @@ export class TrackViewerApp {
         if (set.missing.length) result.warnings.unshift(`${set.scfName} lists files not in the folder: ${set.missing.join(", ")}.`);
       } else {
         if (this._indexedArchive !== choice.archive) {
-          await this._worker.call("indexPod", { opfsPodPath: choice.archive.opfsPath });
+          await this._worker.call("indexPod", { opfsPodPath: choice.archive.opfsPath ?? choice.archive.file });
           this._indexedArchive = choice.archive;
         }
         this._podSource = choice.archive.source ?? "—";
@@ -546,42 +587,41 @@ export class TrackViewerApp {
   }
 
   /*
-    Open from Folder. Every Fly! scenery set under the folder becomes a choice, so picking the
-    Scenery folder itself offers all five cities. Nothing is copied: the Files go straight to
-    the worker, which reads only what it draws.
+    Open from Folder: every track in every archive under the folder, in one list, plus each
+    Fly! scenery set (folder-contents.js). Nothing is copied: the picked Files go straight to
+    the worker, which reads only the directories, then only what a chosen track needs. So an
+    MTM2 install, a folder of downloaded tracks or a whole games folder opens as one list,
+    and switching between tracks of different PODs is a click in the chooser or the top bar.
   */
   async _loadFromFolder(files) {
     this._stopDrivingForChange();
-    this._setStatus("Looking for Fly! scenery…");
+    this._setMessages("track", []);
+    this._setStatus("Looking through the folder…");
+    this._showLoading("Looking through the folder…");
     try {
       const { folder, sets } = await flySetsFromFolder(files);
-      if (!sets.length) {
-        throw new Error(`No Fly! scenery in ${folder || "that folder"}: pick the folder holding a city's .SCF, such as Scenery/SANFRAN.`);
+      const loose = looseArchives(files, sets);
+      if (!sets.length && !loose.length) {
+        throw new Error(`No POD or Fly! scenery in ${folder || "that folder"}.`);
       }
-      this._scene.clearTrack();
-      this._clearTrackInfo();
-      this._hideTrackPicker();
-      this._hideTrackModal();
-      const archive = { filename: folder, source: `Folder: ${folder}` };
-      this._archives = [archive];
-      this._indexedArchive = null;
-      this._choices = sets.map((set) => ({
-        archive,
-        index: 0,
-        name: set.name,
-        fileName: set.directory,
-        flySet: set,
-      }));
-      this._populateTrackPicker();
-      if (sets.length === 1) {
-        await this._loadTrackChoice(0);
-      } else {
-        this._setStatus(`Found ${sets.length} Fly! scenery sets. Choose one to load.`);
-        this._showTrackModal(folder);
+      this._resetChoices();
+      const pathOf = (file) => file.webkitRelativePath || file.name;
+      const notes = await this._indexArchives(loose.map((file) => ({
+        filename: pathOf(file), file, source: `Folder: ${pathOf(file)}`,
+      })));
+      if (sets.length) {
+        const scenery = { filename: "Fly! scenery", source: `Folder: ${folder}` };
+        this._archives.push(scenery);
+        for (const set of sets) {
+          this._choices.push({ archive: scenery, index: 0, name: set.name, fileName: set.directory, flySet: set });
+        }
       }
+      await this._offerChoices(folder, notes);
     } catch (err) {
       this._showError(`Error: ${err.message}`);
       this._updateTruckButtons();
+    } finally {
+      this._hideLoading();
     }
   }
 
@@ -607,7 +647,7 @@ export class TrackViewerApp {
     this._applyWeather();
     this._setStatus(name);
     this._setDocumentTitle(name, result.origin);
-    for (const warning of result.warnings ?? []) console.warn(warning);
+    this._setMessages("track", (result.warnings ?? []).map((text) => ({ text, kind: "warning" })));
     // Focus viewport after load
     this._doc.getElementById("viewport")?.focus();
   }
@@ -646,6 +686,7 @@ export class TrackViewerApp {
 
   async _loadTruckFromFile(file) {
     this._stopDrivingForChange();
+    this._setMessages("truck", []);
     this._showLoading(`Reading ${file.name}…`);
     try {
       const buffer = await file.arrayBuffer();
@@ -665,7 +706,7 @@ export class TrackViewerApp {
       }
       this._setTruckInfo("Status", `${this._truckChoices.length} truck${this._truckChoices.length === 1 ? "" : "s"} found. Click Drive to load one.`);
     } catch (err) {
-      this._showError(`Error loading truck: ${err.message}`);
+      this._showError(`Error loading truck: ${err.message}`, "truck");
       console.error(err);
     } finally {
       this._updateTruckButtons();
@@ -739,7 +780,7 @@ export class TrackViewerApp {
       this._doc.getElementById("viewport")?.focus();
     } catch (err) {
       if (requestId === this._driveRequestId) {
-        this._showError(`Error switching truck: ${err.message}`);
+        this._showError(`Error switching truck: ${err.message}`, "truck");
         console.error(err);
       }
     } finally {
@@ -765,7 +806,7 @@ export class TrackViewerApp {
     this._truckAssembly = assembly;
     this._truckAssemblyName = choice.normalizedName;
     this._scene.setDriveTruck(assembly);
-    if (assembly.warnings?.length) console.warn("[JSTrackViewer] truck:", assembly.warnings);
+    this._setMessages("truck", (assembly.warnings ?? []).map((text) => ({ text, kind: "warning" })));
     return assembly;
   }
 
@@ -795,7 +836,7 @@ export class TrackViewerApp {
       this._doc.getElementById("viewport")?.focus();
     } catch (err) {
       if (requestId === this._driveRequestId) {
-        this._showError(`Error starting test drive: ${err.message}`);
+        this._showError(`Error starting test drive: ${err.message}`, "truck");
         console.error(err);
       }
     } finally {
@@ -896,7 +937,7 @@ export class TrackViewerApp {
     this._doc.getElementById("track-modal-source").textContent = scenery
       ? `${container} holds ${this._choices.length} Fly! scenery sets.`
       : grouped
-        ? `${container} holds ${this._archives.length} PODs with ${this._choices.length} tracks.`
+        ? `${container} holds ${this._archives.length} archives with ${this._choices.length} tracks.`
         : `${container} holds ${this._choices.length} tracks.`;
     this._choices.forEach((choice, i) => {
       if (grouped && heading !== choice.archive.filename) {
@@ -976,7 +1017,6 @@ export class TrackViewerApp {
       pairs.push(["Globe tiles", data.fly.tiles.join(", ")]);
       const c = data.fly.coverage;
       if (c) pairs.push(["Coverage", `${formatLatitude(c.south)} to ${formatLatitude(c.north)}, ${formatLongitude(c.west)} to ${formatLongitude(c.east)}`]);
-      if (data.warnings?.length) pairs.push(["Notes", data.warnings.join(" ")]);
     }
 
     // Only shown when the pod carries a Community Patch 3 version record.
@@ -989,7 +1029,6 @@ export class TrackViewerApp {
       if (version.hdTextures) pairs.push(["HD textures", version.hdTextures]);
       if (version.legacyFallback) pairs.push(["Legacy fallback", version.legacyFallback]);
     }
-
     dl.innerHTML = pairs.map(([k, v]) =>
       `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`
     ).join("");
@@ -1185,27 +1224,48 @@ export class TrackViewerApp {
   }
 
   _showLoading(msg) {
-    this._errorShown = false;
     const overlay = this._doc.getElementById("loading-overlay");
     const msgEl   = this._doc.getElementById("loading-msg");
     if (overlay) overlay.hidden = false;
-    if (msgEl) { msgEl.textContent = msg; msgEl.style.color = ""; }
+    if (msgEl) msgEl.textContent = msg;
   }
 
-  /** Leave the failure on screen rather than hiding the overlay over a track that never came. */
-  _showError(msg) {
+  /*
+    A failure goes to the Warnings strip under the viewport and the loading overlay comes down.
+    Leaving the message inside the overlay kept the spinner turning over a load that had
+    already ended. `scope` says which load it belongs to; see _setMessages.
+  */
+  _showError(msg, scope = "track") {
     console.error(`[JSTrackViewer] ${msg}`);
-    this._errorShown = true;
-    const overlay = this._doc.getElementById("loading-overlay");
-    const msgEl   = this._doc.getElementById("loading-msg");
-    if (overlay) overlay.hidden = false;
-    if (msgEl) { msgEl.textContent = msg; msgEl.style.color = "#ff8080"; }
+    this._hideLoading();
+    this._setMessages(scope, [...(this._messages?.[scope] ?? []), { text: msg, kind: "error" }]);
   }
 
   _hideLoading() {
-    if (this._errorShown) return;
     const overlay = this._doc.getElementById("loading-overlay");
     if (overlay) overlay.hidden = true;
+  }
+
+  /*
+    The Warnings strip. The track and the truck keep separate lists, so loading a truck does not
+    wipe the warnings of the track it drives on, and opening another track does not wipe the
+    truck's. Each load replaces its own list.
+  */
+  _setMessages(scope, items) {
+    this._messages = { track: [], truck: [], ...this._messages, [scope]: items };
+    for (const item of items) if (item.kind === "warning") console.warn(`[JSTrackViewer] ${item.text}`);
+    this._renderMessages();
+  }
+
+  _renderMessages() {
+    const panel = this._doc.getElementById("warnings-panel");
+    const list = this._doc.getElementById("warnings");
+    if (!panel || !list) return;
+    const items = [...(this._messages?.track ?? []), ...(this._messages?.truck ?? [])];
+    panel.hidden = items.length === 0;
+    list.innerHTML = items.map((item) =>
+      `<div class="${item.kind === "error" ? "error-item" : "warning-item"}">${escHtml(String(item.text))}</div>`
+    ).join("");
   }
 }
 

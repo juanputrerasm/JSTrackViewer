@@ -16,13 +16,17 @@ import { archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 import { readFile, writeBytesToFile } from "../shared/opfs.js";
 
 /*
-  Index a POD stored in OPFS, reading only its directory.
+  Index a POD, reading only its directory.
 
   A pack's PODs are each indexed in turn to list their tracks, so the payloads are left on
   disk: OpenPhotex says how much of the file the directory needs and only that is read.
+
+  `source` is a path in OPFS, where an opened file or a ZIP's PODs are staged, or a File the
+  page picked, as Open from Folder hands them over: a folder can hold gigabytes of archives,
+  which are read where they are rather than copied.
 */
-export async function indexPodFile(opfsPodPath) {
-  const file = await readFile(opfsPodPath);
+export async function indexPodFile(source) {
+  const file = await podFile(source);
   let prefix = new Uint8Array(0);
   for (;;) {
     const need = podDirectoryEnd(prefix, file.size);
@@ -32,8 +36,8 @@ export async function indexPodFile(opfsPodPath) {
   return parsePod(prefix, { byteLength: file.size });
 }
 
-export async function readPodEntryBytes(opfsPodPath, entry) {
-  const file = await readFile(opfsPodPath);
+export async function readPodEntryBytes(source, entry) {
+  const file = await podFile(source);
   const buffer = await file.slice(entry.offset, entry.offset + entry.length).arrayBuffer();
   return new Uint8Array(buffer);
 }
@@ -42,6 +46,11 @@ export async function extractPodEntry(opfsPodPath, entry, outputPath) {
   const bytes = await readPodEntryBytes(opfsPodPath, entry);
   await writeBytesToFile(outputPath, bytes);
   return outputPath;
+}
+
+/** An archive as a Blob: an OPFS path is opened, a File or Blob is used as it is. */
+export async function podFile(source) {
+  return typeof source === "string" ? readFile(source) : source;
 }
 
 export function findEntry(podIndex, normalizedName) {
