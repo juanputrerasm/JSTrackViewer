@@ -230,6 +230,9 @@ function parseBoxBlock(lines, blockStart, isRamp) {
             box.flags = parseLeadingInt(parts[1] ?? "0");
         }
     }
+    const priorityIdx = indexOfLinePrefix(lines, "priority", blockStart, endIndex);
+    if (priorityIdx >= 0 && priorityIdx + 1 < lines.length)
+        box.priority = parseLeadingInt(lines[priorityIdx + 1]);
     const massIdx = indexOfLinePrefix(lines, "mass", blockStart, endIndex);
     if (massIdx >= 0 && massIdx + 1 < lines.length)
         box.mass = parseFloat(lines[massIdx + 1]) || 0;
@@ -474,6 +477,7 @@ export function parseMtmLvl(input) {
     const skyRaw = at(10) === null ? null : normalizePodPath(at(10));
     const lvl = {
         lineCount: lines.length,
+        levelType: parseLeadingInt(lines[0]),
         rawName: normalizePodPath(lines[2]),
         clrName: normalizePodPath(lines[3]),
         actName: normalizePodPath(lines[4]),
