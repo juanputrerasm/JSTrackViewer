@@ -457,8 +457,10 @@ function parseTruckBlock(lines, startIdx) {
     if (nameIdx >= 0 && nameIdx + 1 < lines.length)
         truck.name = lines[nameIdx + 1].trim();
     const iposIdx = indexOfLinePrefix(lines, "ipos", startIdx);
-    if (iposIdx >= 0 && iposIdx + 1 < lines.length)
+    if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
         truck.position = sitWorldTriplet(lines[iposIdx + 1]);
+        truck.positionFt = sitFeetTriplet(lines[iposIdx + 1]);
+    }
     const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", startIdx);
     if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
         const a = parseFloatTriplet(lines[anglesIdx + 1]);
