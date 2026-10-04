@@ -62,6 +62,10 @@ export { parseNocturneFog, NOCTURNE_FOG_GRID_SIDE, NOCTURNE_FOG_GRID_BYTES } fro
 export { parseNocturneSet } from "./nocturne/set.js";
 export { parseNocturneThm, NOCTURNE_THM_WIDTH, NOCTURNE_THM_HEIGHT, NOCTURNE_THM_SLOTS } from "./nocturne/thm.js";
 export { parseNocturneZth, NOCTURNE_ZTH_WIDTH, NOCTURNE_ZTH_HEIGHT, NOCTURNE_ZTH_MAP_BYTES } from "./nocturne/zth.js";
+export { parseKlp, parseMtmAmbientSounds, weatherMaskIncludes } from "./mtm/sound.js";
+export { parseMtmSun } from "./mtm/sun.js";
+export { parseLoc } from "./mtm/loc.js";
+export { parseCockpitLayout, parseCockpitSections } from "./mtm/cockpit.js";
 export * as mtm2Sim from "./sim/mtm2/index.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
