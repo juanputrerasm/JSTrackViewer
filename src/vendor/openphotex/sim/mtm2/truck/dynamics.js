@@ -6,12 +6,13 @@
   The order of operations and every constant follow the game; where the game does something
   surprising the comment says so, with the section that records it.
 */
-import { AIR_DENSITY, DIFFICULTY, ENGINE, G, INV_G, LATERAL_TABLE, MPH_10, TRUCK } from "../constants.js";
+import { DIFFICULTY, ENGINE, G, INV_G, LATERAL_TABLE, MPH_10, TRUCK } from "../constants.js";
 import { eulerToMatrix, matrixToEuler, wrapPi, wrapTwoPi } from "../math.js";
 import { cutFactor, surfaceMu, surfaceSinkFt, surfaceType } from "../world/surface.js";
 import { weatherGrip } from "../constants.js";
 import { deliveredTorque, gearRatio, stepGearbox } from "./drivetrain.js";
 import { solveHullContacts } from "./contacts.js";
+import { fluidAreas } from "./water-drag.js";
 const SKIN = 0.25;
 const TWO_PI = Math.PI * 2;
 const AREA = TRUCK.aeroArea; // x, y, z
@@ -95,9 +96,11 @@ export function stepTruck(s, p, ctx, dt) {
     // Gravity and drag, body axes (§14.7).
     const force = [-W * m[3], -W * m[4], -W * m[5]];
     const drag = [0, 0, 0];
+    const fluid = fluidAreas(s, p, ctx.ground);
+    s.splash = fluid.splash;
     for (let k = 0; k < 3; k++) {
         const v = s.bvel[k];
-        drag[k] = -(AREA[k] * AIR_DENSITY) * (v * Math.abs(v) * CD[k] * 0.5);
+        drag[k] = -fluid.rhoA[k] * (v * Math.abs(v) * CD[k] * 0.5);
         force[k] += drag[k];
     }
     // Tires (§14.3-§14.6).
@@ -441,6 +444,8 @@ export function postStepTruck(s, p, ground, dt) {
         const [ax, ay, az] = p.hubs[i];
         const px = p.tireWidthFt * sign * 0.5 + ax;
         const pr = probeGround(s, ground, px, ay, az, p.tireRadiusFt);
+        t.waterDepth = pr.water;
+        t.waterPoint = pr.point;
         const d = pr.depth * pr.normal[1];
         const vec = [pr.normal[0] * d, pr.normal[1] * d, pr.normal[2] * d];
         const along = dot(bodyY, vec);
@@ -558,6 +563,8 @@ function solveAxle(s, p, axleIdx, carry, dt) {
             s.pos[k] += deep.normal[k] * lift;
         for (let j = 0; j < 16; j++)
             s.depths[j] -= lift;
+        R.waterDepth -= lift;
+        Lt.waterDepth -= lift;
     }
     if (R.compression < 0)
         R.compression = 0;

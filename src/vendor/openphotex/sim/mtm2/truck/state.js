@@ -16,6 +16,7 @@ function tire() {
         compression: 0, extensionRate: 0, penetration: -9999, lever: 0, normal: [0, 1, 0], onGround: false,
         spin: 0, angle: 0, pitchG: 0, rollG: 0, load: 0, grip: 0,
         hub: [0, 0, 0], contact: [0, 0, 0], velocity: [0, 0, 0], force: [0, 0, 0],
+        waterDepth: 0, waterPoint: [0, 0, 0],
     };
 }
 /**
@@ -44,6 +45,7 @@ export function createTruckState(pos, heading = 0, gear = GEAR.FIRST, params) {
         heliTimer: 0,
         impulseMoment: 0,
         impactForce: 0,
+        splash: false,
     };
     eulerToMatrix(0, 0, heading, state.matrix);
     return state;
