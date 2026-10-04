@@ -13,6 +13,7 @@ import { weatherGrip } from "../constants.js";
 import { deliveredTorque, gearRatio, stepGearbox } from "./drivetrain.js";
 import { solveHullContacts } from "./contacts.js";
 import { fluidAreas } from "./water-drag.js";
+import { helicopterStep, updateStuck } from "./recovery.js";
 const SKIN = 0.25;
 const TWO_PI = Math.PI * 2;
 const AREA = TRUCK.aeroArea; // x, y, z
@@ -83,6 +84,12 @@ function tireFrame(s, t, steer) {
  * forces and the post-step come after.
  */
 export function stepTruck(s, p, ctx, dt) {
+    // In helicopter flight the helicopter carries the truck instead (§10.3).
+    if (s.heliTimer > 0) {
+        helicopterStep(s, ctx.ground, dt);
+        s.splash = false;
+        return { force: [0, 0, 0], moment: [0, 0, 0], count: 0 };
+    }
     const m = s.matrix;
     eulerToMatrix(s.euler[0], s.euler[1], s.euler[2], m);
     const c = s.controls;
@@ -294,11 +301,15 @@ export function stepTruck(s, p, ctx, dt) {
     s.bvel[2] += az * dt;
     let ivel = toWorld(m, s.bvel[0], s.bvel[1], s.bvel[2]);
     const iv = Math.hypot(ivel[0], ivel[1], ivel[2]);
-    if (iv < 0.1 || (iv < 0.5 && contacts.count >= 3)) {
+    const atRest = iv < 0.1 || (iv < 0.5 && contacts.count >= 3);
+    if (atRest) {
         s.bvel.fill(0);
         s.rates.fill(0);
         ivel = [0, 0, 0];
     }
+    // The stuck checks (§10.3); a reset or lift-off keeps this step's move, as in the game.
+    if (ctx.recovery)
+        updateStuck(s, p, ctx.ground, ctx.recovery, iv, contacts.count, atRest, dt);
     for (let k = 0; k < 3; k++)
         s.pos[k] += ivel[k] * dt;
     integrateOrientation(s, dt);
@@ -399,6 +410,9 @@ function probeContacts(s, p, ground) {
 }
 /** The post-step (§14.11): axle reset, push-out, wheels and solid axles, bottoming. */
 export function postStepTruck(s, p, ground, dt) {
+    // Skipped in helicopter flight (§10.3).
+    if (s.heliTimer > 0)
+        return;
     const m = s.matrix;
     eulerToMatrix(s.euler[0], s.euler[1], s.euler[2], m);
     s.axles[0].articulation = 0;

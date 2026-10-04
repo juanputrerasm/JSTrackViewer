@@ -43,6 +43,8 @@ export function createTruckState(pos, heading = 0, gear = GEAR.FIRST, params) {
         waterDepths: new Float64Array(16),
         contactCount: 0,
         heliTimer: 0,
+        carry: { pitch: 0, roll: 0, heading: 0, x: 0, z: 0 },
+        hover: 0,
         impulseMoment: 0,
         impactForce: 0,
         splash: false,

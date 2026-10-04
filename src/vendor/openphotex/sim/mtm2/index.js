@@ -18,3 +18,4 @@ export * from "./truck/drivetrain.js";
 export { stepTruck, postStepTruck, tireGeometry, probeGround, lateralCoefficient, truckWeight } from "./truck/dynamics.js";
 export { solveHullContacts } from "./truck/contacts.js";
 export { fluidAreas, hullFaceWaterArea, wheelWaterAreas, SPLASH_SPEED } from "./truck/water-drag.js";
+export * from "./truck/recovery.js";
