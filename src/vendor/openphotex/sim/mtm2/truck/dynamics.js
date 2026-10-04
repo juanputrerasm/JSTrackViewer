@@ -185,9 +185,10 @@ export function stepTruck(s, p, ctx, dt) {
     totalGrip = s.tires.reduce((a, t) => a + t.grip, 0);
     for (let i = 0; i < 4; i++) {
         const t = s.tires[i];
-        const front = i < 2;
-        // In the air the tire's force starts from zero; the lateral law still runs (§14.5).
-        const f = frames[i] ?? tireFrame(s, t, front ? c.steer : c.rearSteer);
+        // An airborne tire has no lateral force (the routine returns at once, §14.5).
+        const f = frames[i];
+        if (!t.onGround || !f)
+            continue;
         let alpha;
         if (Math.abs(f.vFwd) <= 10) {
             if (f.vFwd >= 0)
