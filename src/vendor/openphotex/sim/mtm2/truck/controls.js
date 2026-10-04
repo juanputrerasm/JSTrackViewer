@@ -14,8 +14,11 @@
     towards 0 at 4 × dt′ when not), clamped to ±0.45, and shaped again:
     s = sign · 0.45 · (|lin| / 0.45)^e, e = (1 + 0.25 · response) · clamp(|v_fwd| · 0.025, 1, 1.1).
   - The rear wheels steer −0.33 × the front, and −0.4125 × in drag mode.
+
+  A joystick or wheel (MONSTER_EXE_ANALYSIS.md §7, routine 0x5853b0) sets the controls directly,
+  with no ramps, after the keyboard routine and once per sub-step: see `applyJoystick`.
 */
-import { CONTROLS, GEAR } from "../constants.js";
+import { CONTROLS, DIFFICULTY, GEAR } from "../constants.js";
 /** The routine's frame-time scale: a 16.16 multiply by 0x7fff. */
 export const KEY_DT_SCALE = 0x7fff / 0x10000;
 export function createControlState(gear = GEAR.FIRST) {
@@ -94,6 +97,61 @@ function steerKeys(c, left, right, dt, ctx) {
     c.steerExponent = ((ctx.steeringResponse ?? 1) * 0.25 + 1) * speedFactor;
     c.steer = (lin < 0 ? -1 : 1) * lock * Math.pow(Math.abs(lin) / lock, c.steerExponent);
     c.rearSteer = rearSteer(c.steer, ctx.dragMode);
+}
+/** An axis with the dead zone taken out and the rest stretched back to -1..1. */
+function deadZoned(v, n) {
+    let out;
+    if (v <= 0) {
+        out = v + n;
+        if (out > 0)
+            out = 0;
+    }
+    else {
+        out = v - n;
+        if (out < 0)
+            out = 0;
+    }
+    return out / (1 - n);
+}
+/**
+ * Apply one sub-step of joystick or wheel input (MONSTER_EXE_ANALYSIS.md §7). Steering follows
+ * the stick through a steep power curve; the pedal axis sets the throttle or the brakes
+ * directly, selecting Reverse or first gear as the keyboard does with autoShift.
+ */
+export function applyJoystick(c, j, ctx) {
+    const n = j.deadZone ?? 0;
+    const speedFactor = Math.min(1.1, Math.max(1, Math.abs(ctx.forwardSpeed * 0.025)));
+    const e = ((ctx.steeringResponse ?? 1) * 2 + 1) * speedFactor;
+    let x = deadZoned(Math.max(-1, Math.min(1, j.x)), n);
+    if ((ctx.difficulty ?? DIFFICULTY.INTERMEDIATE) === DIFFICULTY.ROOKIE && !ctx.dragMode)
+        x *= 0.75;
+    const s = Math.pow(Math.min(1, Math.abs(x) * 1.11), e);
+    c.steer = (x < 0 ? -s : s) * CONTROLS.steerLock;
+    c.rearSteer = rearSteer(c.steer, ctx.dragMode);
+    if (j.shiftUp)
+        c.shiftRequest = 1;
+    if (j.shiftDown)
+        c.shiftRequest = -1;
+    const y = deadZoned(Math.max(-1, Math.min(1, j.y)), n);
+    const gateOpen = !ctx.dragMode || ctx.segments > 3;
+    if (y <= 0) {
+        if (ctx.autoShift && gateOpen && c.gear === GEAR.REVERSE)
+            c.gear = GEAR.FIRST;
+        c.throttle = -y;
+        c.brakeFront = 0;
+        c.brakeRear = 0;
+        return;
+    }
+    if (ctx.autoShift && c.gear !== GEAR.PARK && gateOpen && y > 0.25 && ctx.forwardSpeed <= 0) {
+        c.gear = GEAR.REVERSE;
+        c.brakeFront = 0;
+        c.brakeRear = 0;
+        c.throttle = y;
+        return;
+    }
+    c.throttle = 0;
+    c.brakeFront = y;
+    c.brakeRear = y;
 }
 /** The rear axle's steering angle for a front angle. */
 export function rearSteer(front, dragMode) {
