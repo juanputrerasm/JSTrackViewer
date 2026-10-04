@@ -34,7 +34,7 @@ export { TUNNEL_LOGIC_NAMES, parseTunnelDefs } from "./tv/tdf.js";
 export { ANIMATION_BASE_FPS, parseAnimations } from "./tv/ani.js";
 export { parseHbBriefing } from "./tv/hb-briefing.js";
 export { CPR_HEIGHT_DIVISOR, CPR_ALTITUDE_DIVISOR, CPR_HEIGHT_UNIT_SCALE, LEGACY_ALTITUDE_DIVISOR, decodeHeightSample, legacyWholeHeight16, heightAtCell, } from "./terrain/height.js";
-export { parseMtmSit, parseMtmLvl, parseTexList, parseTty, detectSitOrigin, sitTrackTypeName, sitWorldTriplet, } from "./mtm/sit.js";
+export { parseMtmSit, parseMtmLvl, parseTexList, parseTty, detectSitOrigin, sitTrackTypeName, sitWorldTriplet, sitFeetTriplet, } from "./mtm/sit.js";
 export { parseTvLvl, detectTvLvlOrigin, isNullAssetName, tvLvlFallbackName } from "./tv/lvl.js";
 export { parseDef, defPlacementToEditor, TR_ANGLE_TO_RAD } from "./tv/def.js";
 export { SKY_PALETTE_FIRST_SLOT, SKY_ACT_FIRST_COLOUR, SKY_GRADIENT_COLOURS, skyGradient, skyHorizon } from "./texture/sky.js";
@@ -62,6 +62,7 @@ export { parseNocturneFog, NOCTURNE_FOG_GRID_SIDE, NOCTURNE_FOG_GRID_BYTES } fro
 export { parseNocturneSet } from "./nocturne/set.js";
 export { parseNocturneThm, NOCTURNE_THM_WIDTH, NOCTURNE_THM_HEIGHT, NOCTURNE_THM_SLOTS } from "./nocturne/thm.js";
 export { parseNocturneZth, NOCTURNE_ZTH_WIDTH, NOCTURNE_ZTH_HEIGHT, NOCTURNE_ZTH_MAP_BYTES } from "./nocturne/zth.js";
+export * as mtm2Sim from "./sim/mtm2/index.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
 export const VERSION = "1.0.0";
