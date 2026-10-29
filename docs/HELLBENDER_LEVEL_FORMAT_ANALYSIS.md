@@ -112,7 +112,10 @@ what the shipped levels do with it and nothing further is claimed.
 | 13 | Retrieve | 1 | one placement index | "Retrieve the Message Pod left behind at the abandoned relay station." |
 | 14 | Pursue | 1 | one placement index | "It's Nyx again! His backup ships are destroyed, take him down." |
 
-There are no types 10 or 11 in shipped content.
+There are no types 10 or 11 in shipped content. The game's loader accepts them (HELLBEND.EXE
+`0x470bd0`: type 10 carries a pitch, bank, heading triple and one more value, type 11 a random
+range) and also inserts the type 7 sync points itself, which is where the "auto added" text
+comes from; see [HELLBENDER_EXE_ANALYSIS.md](HELLBENDER_EXE_ANALYSIS.md) 6.4.
 
 ### 2.3 Validation
 
@@ -266,8 +269,14 @@ pair needs where `CLR` holds the one a single surface needs.
 
 ### 6.2 The altitude bias
 
+> **Corrected.** The executable settles the bias at **255**, not 256: the level loader stores
+> every cavern byte as `(byte - 255) << 7`, so byte 255 is altitude 0. The measurement below was
+> within its +-3 tolerance of either value. See
+> [HELLBENDER_EXE_ANALYSIS.md](HELLBENDER_EXE_ANALYSIS.md) section 3; the viewer and OpenPhotex
+> now use 255.
+
 The cavern grids are byte heightfields like the surface one, but biased down by a full byte:
-the altitude is `value - 256`.
+the altitude is `value - 256` (as first measured; 255 by the executable).
 
 This is measured. The test does not need the terrain at all - it uses the objects Hellbender
 already places down there. An underground `.DEF` placement should stand between the cavern
@@ -310,6 +319,10 @@ reading is floor first, then ceiling, on three independent signals:
 A fourth test - whether each field is better predicted by the floor height or the ceiling
 height - came out too close to call and is not counted. So this is a strong reading rather
 than a proven one. Swapping the two would swap two textures and change nothing structural.
+
+> **Now proven.** The game's cavern floor renderer (`0x418d70`) draws with the first word and
+> its ceiling renderer (`0x419230`) with the second; see
+> [HELLBENDER_EXE_ANALYSIS.md](HELLBENDER_EXE_ANALYSIS.md) 4.2.
 
 ### 6.5 Drawing it
 
@@ -380,7 +393,7 @@ Files that exist in `DATA/` and that this pass does not touch.
 
 | Extension | Count | What it appears to be |
 |---|---|---|
-| `.QKE` | 26 | Ground quakes and box quakes: counted sections with per-entry timing and amplitude rows. |
+| `.QKE` | 26 | Ground quakes and box quakes. **Now read** (OpenPhotex `parseHbQuakes`) and marked by the viewer; layout and meaning in [HELLBENDER_EXE_ANALYSIS.md](HELLBENDER_EXE_ANALYSIS.md) 5. |
 | `.GLT` | 10 | Animated light strips - triples of on/off/broken `.RAW` names with a timing row. |
 | `.CRS` | 24 | Polyline paths, `numPoints,groundCourse,periodic` then that many 16.16 points. Patrol or camera routes. |
 | `.TTY` | 26 | Present for every level; `FLOAT.TTY` contains only `0`. |

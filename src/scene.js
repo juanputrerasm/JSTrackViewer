@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { heightAtCell, LEGACY_ALTITUDE_DIVISOR } from "./shared/terrain-height.js";
+import { cellTriangleHeight, cellUsesOtherDiagonal } from "./vendor/openphotex/index.js";
 import { TrackCamera } from "./nav.js";
 import { SunShadows } from "./sun-shadows.js";
 import { SunFlare } from "./sun-flare.js";
@@ -108,6 +109,10 @@ const NAV_START_POINT = 6;
 const NAV_TYPES_WITHOUT_A_PLACE = new Set([7, 9]);
 const TUNNEL_ENTRANCE_COLOR = 0x00ccff;
 const TUNNEL_EXIT_COLOR = 0x0066aa;
+// Hellbender moving terrain (.QKE): doors, lifts, crushers, switches.
+const QUAKE_COLOR = 0xff7733;
+// The Models box's outline round the object it went to.
+const SELECTION_HIGHLIGHT_COLOR = 0xffd400;
 const POWERUP_COLOR = 0x66ff99;
 const MARKER_HEAD_RADIUS = 22;
 /** Where the label floats above the ground, in world units. */
@@ -136,6 +141,8 @@ function navLabelSuffix(point) {
     case 4: return "tunnel exit";
     case 5: return "boss";
     case 6: return "start";
+    // A Hellbender sync point the game inserted itself (HELLBEND.EXE 0x470bd0).
+    case 7: return point.autoAdded ? "sync (auto)" : (point.typeName ?? "sync point");
     default: return point.typeName ?? "";
   }
 }
@@ -386,10 +393,12 @@ function isTvFamilyOrigin(origin) {
   Stretching by heightScale / 2 to "match" the terrain was tried and drew FIRSMALL.BIN at 2.5
   times as tall as wide against its authored 1.7.
 
-  Hellbender keeps the Traxx 0.75, which its terrain shares.
+  Hellbender is drawn the same way. Its engine is isotropic too (a step is 1/16 of a cell, so 4
+  scene units at 64 per cell, which is the scale its terrain now uses), and its models are in
+  those world units on every axis; the Traxx 0.75 it used to share squashed both.
 */
 function modelZStretch(origin) {
-  return isTvFamilyOrigin(origin) ? 1 : TRAXX_Z_STRETCH;
+  return isTvFamilyOrigin(origin) || origin === "HB" ? 1 : TRAXX_Z_STRETCH;
 }
 
 /** True for the two 4x4 Evolution generations, which share one placement convention. */
@@ -431,13 +440,14 @@ export class TrackScene {
       objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true, terrainOverlap: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
-      navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
+      navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
       racetrack: true, underground: true, lensflare: true, sky: true, fog: true,
       movingObjects: true,
     };
     this._heightScale = 4;
     this._textureSmoothingEnabled = true;
     this._undergroundSurfaces = [];
+    this._undergroundMatFlat = null;
     this._terrainUvTargets = [];
     this._courses = [];
     // Shared by both terrain materials, which survive a texture toggle; see _buildRoadMask.
@@ -520,6 +530,7 @@ export class TrackScene {
       navPoints:  new THREE.Group(),
       checkpointMarkers: new THREE.Group(),
       tunnels:    new THREE.Group(),
+      quakes:     new THREE.Group(),
       powerups:   new THREE.Group(),
       water:      new THREE.Group(),
       trucks:     new THREE.Group(),
@@ -670,6 +681,7 @@ export class TrackScene {
   /** "clear", "cloudy", "dusk" or "night". Applies to the tracks in WEATHER_ORIGINS only. */
   setWeather(name) {
     this._weather = WEATHERS[name] ? name : "clear";
+    this._drive?.sim.setWeather(this.weatherApplies() ? this._weather : "clear");
     this._applyWeather();
   }
 
@@ -906,6 +918,181 @@ export class TrackScene {
 
   get nav() { return this._nav; }
 
+  /*
+    The Models box (ui/models-box.js): every model the track carries, with its size and the
+    objects that place it.
+
+    `instances` are indices into trackData.boxes of the objects drawn with the model, in track
+    order; a model the track names but places nowhere (a powerup pickup, a backdrop) has none.
+  */
+  /** The loaded track's game ("MTM2", "TV/F3", "HB", "EVO2" ...), or null. */
+  get trackOrigin() { return this._trackData?.origin ?? null; }
+
+  modelCatalog() {
+    const td = this._trackData;
+    if (!td?.models) return [];
+    const placed = new Map();
+    (td.boxes ?? []).forEach((box, index) => {
+      if (!box.modelName || !this._objectsByBox?.has(index)) return;
+      if (!placed.has(box.modelName)) placed.set(box.modelName, []);
+      placed.get(box.modelName).push(index);
+    });
+    const count = (data, per) => (data ? (ArrayBuffer.isView(data) ? data.length : data.byteLength / 4) / per : 0);
+    return Object.entries(td.models)
+      .filter(([, model]) => model?.meshes?.length)
+      .map(([name, model]) => {
+        let vertices = 0, triangles = 0;
+        for (const mesh of model.meshes) {
+          const v = count(mesh.positions, 3);
+          vertices += v;
+          triangles += mesh.indices ? count(mesh.indices, 3) : v / 3;
+        }
+        return { name, vertices: Math.round(vertices), triangles: Math.round(triangles), instances: placed.get(name) ?? [] };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /*
+    A model on its own for the Models box's preview: a copy of a placed object's drawn group
+    (its meshes and materials shared, so nothing is decoded twice), turned as placed but moved
+    to the origin. Null for a model that is placed nowhere.
+  */
+  modelPreviewGroup(name) {
+    const index = this.modelCatalog().find((m) => m.name === name)?.instances[0];
+    const drawn = index === undefined ? null : this._objectsByBox?.get(index);
+    if (!drawn?.group) return null;
+    const copy = drawn.group.clone();
+    const outlines = [];
+    copy.traverse((node) => { if (node.userData?.selectionHighlight) outlines.push(node); });
+    for (const node of outlines) node.removeFromParent();
+    copy.matrixAutoUpdate = false;
+    copy.matrix.copy(drawn.group.matrix);
+    copy.matrix.setPosition(0, 0, 0);
+    copy.matrixWorldNeedsUpdate = true;
+    return copy;
+  }
+
+  /*
+    Flies the camera to stand in front of one placed object and keeps it outlined: the Models
+    box's "go to". The object is wireframed in a bright colour, drawn over everything, until
+    another object is picked, the highlight is cleared or the track changes. The lines are
+    children of the object's own meshes, so they follow it if it moves.
+
+    In front: along the model's own forward axis, which is local +y in the SIT, TV and
+    Hellbender families (the way their objects face) and local +z for 4x4 Evolution's Y-up
+    models. Should that axis be nearly vertical, the camera keeps the side it is already on.
+  */
+  focusObject(boxIndex) {
+    const drawn = this._objectsByBox?.get(boxIndex);
+    if (!drawn?.group) return false;
+    this.clearHighlight();
+    const group = drawn.group;
+    group.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(group);
+    if (bounds.isEmpty()) return false;
+    const centre = bounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(4, bounds.getSize(new THREE.Vector3()).length() / 2);
+
+    const evo = this._trackData?.origin === "EVO1" || this._trackData?.origin === "EVO2";
+    const axis = new THREE.Vector3().setFromMatrixColumn(group.matrixWorld, evo ? 2 : 1);
+    axis.y = 0;
+    if (axis.lengthSq() < 1e-6) axis.copy(this._camera.position).sub(centre).setY(0);
+    if (axis.lengthSq() < 1e-6) axis.set(0, 0, 1);
+    axis.normalize();
+    const fov = THREE.MathUtils.degToRad(this._camera.fov);
+    const distance = Math.max(radius * 1.25 / Math.sin(fov / 2), radius + 16);
+    const eye = centre.clone().addScaledVector(axis, distance);
+    eye.y += radius * 0.35;
+    this._nav.lookFrom(eye, centre);
+
+    const material = new THREE.LineBasicMaterial({
+      color: SELECTION_HIGHLIGHT_COLOR, depthTest: false, transparent: true, opacity: 0.95, fog: false,
+    });
+    this._highlight = { material, lines: [] };
+    group.traverse((node) => {
+      if (!node.isMesh || !node.geometry) return;
+      const lines = new THREE.LineSegments(new THREE.WireframeGeometry(node.geometry), material);
+      lines.renderOrder = 1002;
+      lines.userData.selectionHighlight = true;
+      lines.frustumCulled = false;
+      node.add(lines);
+      this._highlight.lines.push(lines);
+    });
+    return true;
+  }
+
+  /** Removes the Models box's outline, if any. */
+  clearHighlight() {
+    if (!this._highlight) return;
+    for (const lines of this._highlight.lines) {
+      lines.removeFromParent();
+      lines.geometry.dispose();
+    }
+    this._highlight.material.dispose();
+    this._highlight = null;
+  }
+
+  /*
+    The Textures box (ui/textures-box.js): the track's textures as RGBA images, in three
+    groups. Terrain tiles are cut from the terrain atlas, which holds each .TEX slot once at the
+    size it was decoded at; model textures and the sky are the decoded images the scene drew.
+  */
+  textureCatalog() {
+    const td = this._trackData;
+    const groups = [];
+    // A tunnel level's tiles are in its tube's atlas, laid out the same way.
+    const atlas = td?.terrain?.atlas ?? td?.tunnelInterior?.atlas;
+    if (atlas?.rgba && atlas.width) {
+      const rgba = new Uint8ClampedArray(atlas.rgba);
+      const cols = atlas.atlasCols ?? 1, tile = atlas.atlasTileSize ?? 64, pad = atlas.atlasPadding ?? 0;
+      const side = atlas.sourceTileSize ?? tile;
+      const names = td.terrain?.textureNames ?? atlas.textureNames ?? [];
+      const ground = td.terrain?.textureGround ?? [];
+      const vegetation = td.terrain?.textureVegetation ?? [];
+      const count = atlas.textureCount ?? names.length;
+      const items = [];
+      for (let i = 0; i < count; i++) {
+        const x0 = (i % cols) * tile + pad, y0 = Math.floor(i / cols) * tile + pad;
+        items.push({
+          name: names[i] ?? `Slot ${i}`, width: atlas.slotLegacySides?.[i] ?? side, height: atlas.slotLegacySides?.[i] ?? side,
+          slot: i, ground: ground[i] ?? null, vegetation: vegetation[i] ?? null,
+          image: () => {
+            const out = new Uint8ClampedArray(side * side * 4);
+            for (let y = 0; y < side; y++) {
+              const from = ((y0 + y) * atlas.width + x0) * 4;
+              out.set(rgba.subarray(from, from + side * 4), y * side * 4);
+            }
+            return { rgba: out, width: side, height: side };
+          },
+        });
+      }
+      groups.push({ title: "Terrain", items });
+    }
+    // CART Precision Racing's road layer (.TTX): its own textures, each with a road surface type.
+    const road = (td?.raceTrackTextures ?? []).filter((t) => t?.rgba && t.width);
+    if (road.length) {
+      groups.push({
+        title: "Road",
+        items: road.map((t) => ({ name: t.name, width: t.width, height: t.height, roadFlags: t.flags ?? 0,
+          image: () => ({ rgba: new Uint8ClampedArray(t.rgba), width: t.width, height: t.height }) })),
+      });
+    }
+    const models = (td?.modelTextures ?? []).filter((t) => t?.rgba && t.width);
+    if (models.length) {
+      groups.push({
+        title: "Models",
+        items: models.map((t) => ({ name: t.name, width: t.width, height: t.height,
+          image: () => ({ rgba: new Uint8ClampedArray(t.rgba), width: t.width, height: t.height }) })),
+      });
+    }
+    const sky = td?.skyTexture;
+    if (sky?.rgba && sky.width) {
+      groups.push({ title: "Sky", items: [{ name: "Sky", width: sky.width, height: sky.height,
+        image: () => ({ rgba: new Uint8ClampedArray(sky.rgba), width: sky.width, height: sky.height }) }] });
+    }
+    return groups;
+  }
+
   setRenderFlags(flags) {
     Object.assign(this._renderFlags, flags);
     if (this._movers && this._movers.enabled !== (this._renderFlags.movingObjects !== false)) {
@@ -1078,9 +1265,10 @@ export class TrackScene {
     const has = (...groups) => groups.some((name) => g[name].children.length > 0);
     const objects = has("objects", "billboards", "vegetation", "checkpoints", "ramps");
     return {
-      terrain:    !!this._terrainMesh || !!this._flyTileMeshes?.length,
+      terrain:    !!this._terrainMesh || !!this._flyTileMeshes?.length || !!this._tunnelInteriorMesh,
       textures:   !!this._terrainMesh || !!this._flyTileMeshes?.length,
       terrainOverlap: !!this._terrainMesh,
+      rockTops:   !!this._rockCells?.length,
       grid:       !!this._terrainMesh || !!this._flyTileMeshes?.length,
       objects,
       billboards: has("billboards"),
@@ -1094,6 +1282,7 @@ export class TrackScene {
       navpoints:  has("navPoints"),
       cpmarkers:  has("checkpointMarkers"),
       tunnels:    has("tunnels"),
+      quakes:     has("quakes"),
       powerups:   has("powerups"),
       water:      has("water"),
       backdrop:   has("backdrop"),
@@ -1145,6 +1334,7 @@ export class TrackScene {
     this._groups.navPoints.visible = f.navpoints !== false;
     this._groups.checkpointMarkers.visible = f.cpmarkers !== false;
     this._groups.tunnels.visible = f.tunnels !== false;
+    this._groups.quakes.visible = f.quakes !== false;
     this._groups.powerups.visible = f.powerups !== false;
     this._groups.water.visible = f.water;
     this._groups.trucks.visible = f.trucks !== false;
@@ -1173,6 +1363,8 @@ export class TrackScene {
       this._shadowMaterialsDirty = true;
     }
 
+    this._applyRockTops(f.rockTops !== false);
+
     // texture toggle: swap between textured and flat terrain material
     const terrainMaterial = f.textures ? this._terrainMatTextured : this._terrainMatFlat;
     if (this._terrainMesh) this._terrainMesh.material = terrainMaterial;
@@ -1181,8 +1373,11 @@ export class TrackScene {
     }
     const undergroundMaterial = f.textures
       ? (this._undergroundMatTextured ?? this._terrainMatFlat)
-      : this._terrainMatFlat;
-    for (const surface of this._undergroundSurfaces ?? []) surface.material = undergroundMaterial;
+      : (this._undergroundMatFlat ?? this._terrainMatFlat);
+    for (const surface of this._undergroundSurfaces ?? []) {
+      surface.material = !surface.userData.chamber ? undergroundMaterial
+        : (f.textures ? this._chamberMat : this._chamberMatFlat) ?? undergroundMaterial;
+    }
   }
 
   setHeightScale(hs) {
@@ -1190,6 +1385,7 @@ export class TrackScene {
   }
 
   clearTrack() {
+    this.clearHighlight();
     this.stopDrive();
     /*
       The truck disposes itself, because the loop below cannot.
@@ -1237,13 +1433,23 @@ export class TrackScene {
     }
     this._flyTileMeshes = [];
     /*
-      The cavern surfaces share the terrain material rather than owning one, so the loop above
-      disposes that material once per mesh that references it. Dropping the references here is
-      what keeps the next track from swapping a disposed material back in.
+      Cavern surfaces share their own textured/flat pair. The loop above disposes whichever one
+      each mesh currently wears; dropping both references here keeps the next track from swapping
+      an old material back in after a texture toggle.
     */
     this._undergroundSurfaces = [];
     this._trackSunDirection = null;
     this._undergroundMatTextured = null;
+    this._undergroundMatFlat = null;
+    this._chamberMat?.dispose();
+    this._chamberMat = null;
+    this._chamberMatFlat?.dispose();
+    this._chamberMatFlat = null;
+    this._rockCells = null;
+    this._rockTopsShown = true;
+    this._tunnelAtlasTex?.dispose();
+    this._tunnelAtlasTex = null;
+    this._tunnelInteriorMesh = null;
     this._undergroundWireMat = null;
     this._terrainMatTextured = null;
     this._terrainMatFlat = null;
@@ -1298,11 +1504,13 @@ export class TrackScene {
     if (renderFlags) Object.assign(this._renderFlags, renderFlags);
     if (heightScale !== undefined) this._heightScale = heightScale;
     if (trackData.terrain?.heightScale) this._heightScale = trackData.terrain.heightScale;
+    else if (trackData.tunnelInterior?.heightScale) this._heightScale = trackData.tunnelInterior.heightScale;
     this._modelTexCache = {};
 
     if (trackData.modelTextures) this._loadModelTextures(trackData.modelTextures);
     if (trackData.flyTiles) this._buildFlyTerrain(trackData.flyTiles, trackData.fly);
     else if (trackData.terrain) this._buildTerrain(trackData.terrain);
+    if (trackData.tunnelInterior) this._buildTunnelInterior(trackData.tunnelInterior);
     // An arena REPLACES the backdrop rather than joining it: Traxx suppresses the backdrop
     // model at load (TrackPODFile.cpp:2758-2759) and again at draw
     // (TraxxViewDisplay.cpp:307-311, `openglbackdrop = arena.arena == FALSE && ...`).
@@ -1336,9 +1544,10 @@ export class TrackScene {
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
     if (trackData.checkpoints?.length) this._buildCheckpointMarkers(trackData);
     if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
+    if (trackData.quakes) this._buildQuakeMarkers(trackData);
     this._buildPowerups(trackData);
     // Markers are map legends, not scenery: fog must not fade them out.
-    for (const name of ["navPoints", "checkpointMarkers", "tunnels", "powerups"]) {
+    for (const name of ["navPoints", "checkpointMarkers", "tunnels", "quakes", "powerups"]) {
       this._groups[name].traverse((child) => { if (child.material) child.material.fog = false; });
     }
     this._installTextureAnimations(trackData);
@@ -1365,15 +1574,16 @@ export class TrackScene {
     masked to the cells the level says are hollow. See hb-underground.js for what that band is
     and how it was measured.
 
-    They share the surface terrain's material, which is why they are built after it. That is
-    not only a memory saving: the atlas is a transferable buffer, so the worker builds one and
-    hands it over once, and the two cavern meshes arrive with no atlas of their own.
+    They share the surface terrain's atlas, which is why they are built after it. The atlas is a
+    transferable buffer, so the worker builds one and hands it over once; the two cavern meshes
+    arrive with no atlas of their own and use a separate double-sided material pair here.
   */
   _buildUnderground(trackData) {
     const group = this._groups.underground;
+    const sunlit = trackData.undergroundSunlit === true;
 
     /*
-      The cavern is drawn unlit.
+      Enclosed caverns are drawn unlit.
 
       The scene has one directional light standing in for the sun, and underground there is no
       sun: the ceiling faces away from it by definition and the floor is shadowed by the whole
@@ -1381,6 +1591,10 @@ export class TrackScene {
       Hellbender's own art is already shaded into the texture - these are the same 64x64 tiles
       the surface uses - so drawing the two cavern surfaces at texture brightness shows what
       the level actually contains, which is the entire point of the layer.
+
+      Floating missions are different: removing their fallback floor/ceiling opens the lower
+      world to the sky. Their remaining cavern terrain uses Lambert lighting and receives the
+      same sun shadows as the surface above it.
     */
     if (this._terrainAtlasTex && !this._undergroundMatTextured) {
       /*
@@ -1393,8 +1607,12 @@ export class TrackScene {
         happens to end. With FrontSide, roughly half of those walls vanish - the ones leaning
         away from the camera - which reads as a cave with two of its four sides missing.
       */
-      this._undergroundMatTextured = new THREE.MeshBasicMaterial({
+      const Material = sunlit ? THREE.MeshLambertMaterial : THREE.MeshBasicMaterial;
+      this._undergroundMatTextured = new Material({
         map: this._terrainAtlasTex, side: THREE.DoubleSide,
+      });
+      this._undergroundMatFlat = new Material({
+        color: 0x4a7a4a, side: THREE.DoubleSide,
       });
     }
     if (!this._undergroundWireMat) {
@@ -1411,6 +1629,7 @@ export class TrackScene {
       geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
       geo.computeBoundingSphere();
       const surface = new THREE.Mesh(geo, this._undergroundMatTextured ?? this._terrainMatFlat);
+      surface.receiveShadow = sunlit;
       group.add(surface);
       this._undergroundSurfaces.push(surface);
 
@@ -1426,10 +1645,84 @@ export class TrackScene {
     addSurface(trackData.undergroundFloor);
     addSurface(trackData.undergroundCeiling);
 
+    /*
+      Terminal Velocity and Fury3 chamber ceilings (tv-chambers.js), under the same toggle.
+
+      Front faces only, unlike the Hellbender cavern. A chamber ceiling is the floor mirrored
+      about altitude 255, so it rises above the rock tops around it; the game only draws it from
+      inside the chamber, where the rock tops are out of view. Seen from above it is a back face,
+      so one-sided keeps it from capping the level with mounds; from inside, or with the rock
+      tops hidden, it is the room's roof. Unlit, like an enclosed cavern.
+    */
+    if (trackData.chamberCeiling) {
+      if (!this._chamberMat && this._terrainAtlasTex) {
+        this._chamberMat = new THREE.MeshBasicMaterial({ map: this._terrainAtlasTex, side: THREE.FrontSide });
+        this._chamberMatFlat = new THREE.MeshBasicMaterial({ color: 0x4a7a4a, side: THREE.FrontSide });
+      }
+      const before = this._undergroundSurfaces.length;
+      addSurface(trackData.chamberCeiling);
+      const surface = this._undergroundSurfaces[before];
+      if (surface && this._chamberMat) {
+        surface.material = this._chamberMat;
+        // Keep the chamber material when textures are toggled; see _applyVisibility.
+        surface.userData.chamber = true;
+      }
+    }
+
     if (trackData.undergroundBoxes?.length) {
       this._buildGroundBoxes(trackData.undergroundBoxes, this._heightScale, trackData,
         group, this._groups.undergroundWire);
     }
+  }
+
+  /*
+    Terminal Velocity and Fury3 rock tops: cells whose four corners are all at altitude 255.
+
+    The game never draws them (GAME.EXE 0x3caf0 skips a triangle whose corners are all 255);
+    they are the solid rock above a chamber, which the player's flight ceiling keeps out of
+    sight. The viewer's camera is not so limited, so they are drawn by default, as the level
+    looks from outside, and hiding them opens the chambers to a view from above. Hiding a cell
+    collapses its six indices onto one vertex, as a masked cell does in terrain-builder.js.
+  */
+  _applyRockTops(show) {
+    if (!this._rockCells || !this._terrainMesh || show === this._rockTopsShown) return;
+    const index = this._terrainMesh.geometry.index;
+    const array = index.array;
+    if (show) {
+      array.set(this._rockTopIndices);
+    } else {
+      for (const cell of this._rockCells) {
+        const base = cell * 6;
+        const vertex = cell * 4;
+        for (let k = 0; k < 6; k++) array[base + k] = vertex;
+      }
+    }
+    index.needsUpdate = true;
+    this._rockTopsShown = show;
+  }
+
+  /*
+    A Terminal Velocity or Fury3 tunnel level's tube (tunnel-builder.js), with its own atlas,
+    since a tunnel level has no terrain to share one with. Drawn from inside, so both sides,
+    and unlit: the tiles carry their own shading, as the cavern's do.
+  */
+  _buildTunnelInterior(tube) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(tube.positions), 3));
+    geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(tube.normals), 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(tube.uvs), 2));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(tube.indices), 1));
+    geo.computeBoundingSphere();
+    const texture = new THREE.DataTexture(new Uint8Array(tube.atlas.rgba), tube.atlas.width, tube.atlas.height, THREE.RGBAFormat);
+    texture.magFilter = this._textureSmoothingEnabled ? THREE.LinearFilter : THREE.NearestFilter;
+    texture.minFilter = texture.magFilter;
+    texture.generateMipmaps = false;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    this._tunnelAtlasTex = texture;
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide }));
+    this._groups.terrain.add(mesh);
+    this._tunnelInteriorMesh = mesh;
   }
 
   _buildTerrain(terrainData) {
@@ -1473,6 +1766,10 @@ export class TrackScene {
 
     this._terrainMesh = new THREE.Mesh(geo, this._terrainMatTextured);
     this._terrainMesh.receiveShadow = true;
+    // TV/F3 rock tops, which the "Rock tops" toggle can hide; see _applyRockTops.
+    this._rockCells = terrainData.rockCells ? new Uint32Array(terrainData.rockCells) : null;
+    this._rockTopIndices = this._rockCells ? new Uint32Array(indices) : null;
+    this._rockTopsShown = true;
     this._groups.terrain.add(this._terrainMesh);
 
     // Grid overlay: quad edges only (no triangle diagonals)
@@ -2273,9 +2570,10 @@ export class TrackScene {
     error rather than as a deliberate altitude. Sampling the heightfield makes every marker
     agree with the surface under it.
 
-    The height is bilinear between the four vertices around the point. For a marker on a cell
-    centre that is the average of the cell's corners; TV-family markers keep their exact
-    sub-cell position (tv-coords.js), and bilinear is what lands them on the surface there.
+    On a checkerboard terrain (CPR, Terminal Velocity, Fury3, Hellbender) the height is the
+    plane of the triangle the point falls in, which is both what the mesh draws and what the
+    games' own sampler returns (TV GAME.EXE 0x3c940; OpenPhotex cellTriangleHeight). Other
+    terrains keep the bilinear blend between the four vertices around the point.
 
     A 16-bit heightfield is read two ways, because two games write one: CPR is 10.6 fixed
     point (divisor 64) and Evo is 11.5 (divisor 32), and each loader states its divisor on the
@@ -2300,7 +2598,9 @@ export class TrackScene {
     const h10 = heightAtCell(terrain, raw, cx + 1, cz);
     const h01 = heightAtCell(terrain, raw, cx, cz + 1);
     const h11 = heightAtCell(terrain, raw, cx + 1, cz + 1);
-    const h = (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+    const h = terrain.cellSplit === "checkerboard"
+      ? cellTriangleHeight(h00, h10, h11, h01, tx, tz, cellUsesOtherDiagonal(cx, cz, "checkerboard"))
+      : (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
     return h * this._heightScale;
   }
 
@@ -2508,8 +2808,41 @@ export class TrackScene {
       const n = i + 1;
       const entrance = this._markerGroundPosition(tunnel.entrancePosition, trackData);
       const exit = this._markerGroundPosition(tunnel.exitPosition, trackData);
-      this._addMapMarker(group, entrance, TUNNEL_ENTRANCE_COLOR, `T${n} start`);
+      // A tunnel whose level is not in the archive is a leftover: Hellbender's JURASIC and
+      // JURASIC3 name Terminal Velocity's ARTIC-T1.LVL, which Hellbender does not ship.
+      const missing = tunnel.levelMissing ? ` (no ${tunnel.levelName.replace(/\.LVL$/, "")})` : "";
+      this._addMapMarker(group, entrance, TUNNEL_ENTRANCE_COLOR, `T${n} start${missing}`);
       this._addMapMarker(group, exit, TUNNEL_EXIT_COLOR, `T${n} exit${tunnel.exitsIntoChamber ? " (chamber)" : ""}`);
+    });
+  }
+
+  /*
+    Hellbender's moving terrain, from its .QKE (OpenPhotex parseHbQuakes; HELLBEND.EXE 0x410260).
+
+    A ground quake moves a rectangle of cells, a box quake one ground box, each between two
+    height limits: these are the level's doors, lifts and crushers, and some boxes are switches
+    that set another one going. One marker per entry, at the middle of what moves and at its
+    upper limit, labelled with what moves and the range in height steps. They are not
+    animated: the trigger that starts each one is gameplay.
+  */
+  _buildQuakeMarkers(trackData) {
+    const group = this._groups.quakes;
+    const grid = trackData.terrain?.gridSize ?? 128;
+    const span = (a, b) => ((b - a) % grid + grid) % grid;
+    const layerName = { 1: "ground", 2: "cavern floor", 3: "cavern ceiling" };
+    const range = (q) => `${Math.round(q.lowerStep)}..${Math.round(q.upperStep)}`;
+    (trackData.quakes.groundQuakes ?? []).forEach((q, i) => {
+      if (!q.mode) return;
+      const cx = q.x0 + (span(q.x0, q.x1) + 1) / 2;
+      const cz = q.z0 + (span(q.z0, q.z1) + 1) / 2;
+      const base = this._markerGroundPosition([cx * 64, cz * 64, q.upperStep], trackData, false);
+      this._addMapMarker(group, base, QUAKE_COLOR, `Q${i + 1} moving ${layerName[q.layer] ?? "ground"} ${range(q)}`);
+    });
+    (trackData.quakes.boxQuakes ?? []).forEach((q, i) => {
+      if (!q.mode) return;
+      const base = this._markerGroundPosition([(q.x + 0.5) * 64, (q.z + 0.5) * 64, q.upperStep], trackData, false);
+      const what = q.switchFlag ? "switch" : `moving ${q.layer === 1 ? "box" : "cavern box"}`;
+      this._addMapMarker(group, base, QUAKE_COLOR, `B${i + 1} ${what} ${range(q)}`);
     });
   }
 
@@ -2517,12 +2850,13 @@ export class TrackScene {
     Loose powerup pickups from the level's .PUP.
 
     Labelled PUP1..PUPn with the pickup's name ("PUP3 Shield Restore"). The type index is named
-    from the table both period editors carry (tv-tables.js); a type outside it, or any
-    Hellbender pickup, keeps the bare index as "t<n>".
+    from the table both period editors carry (tv-tables.js), or for Hellbender from its own
+    31-type table in HELLBEND.EXE (OpenPhotex HB_POWERUPS); a type outside the table keeps the
+    bare index as "t<n>".
 
     The pickup model is drawn at the record's own position when the open archive carries it.
-    The stock POWER*.BIN models live in STARTUP.POD, so on a stock level archive the marker is
-    all there is.
+    The stock POWER*.BIN and Hellbender F6*.BIN models live in STARTUP.POD, so on a stock level
+    archive the marker is all there is.
 
     Loose pickups are the exception, though. Most powerups in a TV/F3 level are hidden inside
     objects: a .DEF definition names a drop type and a drop chance, and authors put the real
@@ -3068,7 +3402,8 @@ export class TrackScene {
 
       if (renderModel) {
         this._buildBinModel(model, box, hs, ws, trackData,
-          { checkpoint: isCheckpoint, billboard: isBillboard, underground });
+          { checkpoint: isCheckpoint, billboard: isBillboard, underground,
+            sunlitUnderground: underground && trackData.undergroundSunlit === true });
       }
 
       /*
@@ -3262,6 +3597,7 @@ export class TrackScene {
     const checkpoint = options.checkpoint === true;
     const billboard = options.billboard === true;
     const underground = options.underground === true;
+    const sunlitUnderground = options.sunlitUnderground === true;
     const [wx, wy, wz] = box.position ?? [0, 0, 0];
     const evo = isEvoOrigin(trackData.origin);
 
@@ -3269,7 +3605,7 @@ export class TrackScene {
     const posX = wx;
     const anchored = traxxTrueOrigin(trackData.origin) && !billboard;
     const posY = evo ? wz * hs
-      : trackData.origin === "HB" ? wz * 3
+      : trackData.origin === "HB" ? wz * hs
       : anchored ? wz * hs
       : wz * hs + (model.baseZ ?? 0) * 0.75;
     const posZ = ws - wy;
@@ -3418,7 +3754,9 @@ export class TrackScene {
       else this._keyframeAnimations.push(animation);
     }
 
-    if (billboard || underground) group.traverse((child) => { if (child.isMesh) child.castShadow = false; });
+    if (billboard || (underground && !sunlitUnderground)) {
+      group.traverse((child) => { if (child.isMesh) child.castShadow = false; });
+    }
     targetGroup.add(group);
     targetWireGroup?.add(wireGroup);
   }
@@ -3665,6 +4003,7 @@ export class TrackScene {
       onPose,
       lights: this._truckLights,
       movers: this._movers,
+      weather: this.weatherApplies() ? this._weather : "clear",
     });
     this._resetCrush();
     // Dusk and night start with the lights on, as a driver would; L switches them.

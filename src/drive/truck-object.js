@@ -216,12 +216,21 @@ export function buildTruckObject(assembly, createMaterial, getTexture = () => nu
   const delta = new THREE.Vector3();
 
   /** Re-aim every link from the current axle offsets. */
-  function updateLinks(axleTravel) {
+  function updateLinks(axleTravel, axlePoses) {
+    const attach = (point, axleIndex) => {
+      const pose = axlePoses?.[axleIndex];
+      if (!pose) { point.y += travelOf(axleIndex, axleTravel); return; }
+      const restY = axles[axleIndex]?.restY ?? (pose.travel * FEET_TO_INNER - travelOf(axleIndex, axleTravel));
+      const x = point.x, y = point.y - restY;
+      const c = Math.cos(pose.articulation), s = Math.sin(pose.articulation);
+      point.x = x * c - y * s;
+      point.y = x * s + y * c + pose.travel * FEET_TO_INNER;
+    };
     for (const seg of linkSegments) {
       from.copy(seg.start);
       to.copy(seg.end);
-      if (seg.startAttachment === "axle") from.y += travelOf(seg.startAxle, axleTravel);
-      if (seg.endAttachment === "axle") to.y += travelOf(seg.endAxle, axleTravel);
+      if (seg.startAttachment === "axle") attach(from, seg.startAxle);
+      if (seg.endAttachment === "axle") attach(to, seg.endAxle);
       delta.subVectors(to, from);
       const length = delta.length();
       if (!(length > 1e-6)) {
@@ -246,11 +255,15 @@ export function buildTruckObject(assembly, createMaterial, getTexture = () => nu
     /** Restore the whole truck to its unloaded pose, which is how it is first shown. */
     reset() {
       for (const wheel of wheels) {
-        wheel.mount.position.y = wheel.restY;
+        wheel.mount.position.copy(truckVector(wheel.anchor));
+        wheel.mount.rotation.z = 0;
         wheel.steer.rotation.y = 0;
         wheel.spin.rotation.x = 0;
       }
-      for (const axle of axles) axle.group.position.y = axle.restY;
+      for (const axle of axles) {
+        axle.group.position.y = axle.restY;
+        axle.group.rotation.z = 0;
+      }
       updateLinks([0, 0]);
     },
     /**
@@ -259,12 +272,19 @@ export function buildTruckObject(assembly, createMaterial, getTexture = () => nu
      * @param {number[]} compression  per wheel, in feet, positive upward
      * @param {number[]} steerAngles  per wheel, radians
      * @param {number[]} spinAngles   per wheel, radians
+     * @param {object[]} wheelPoses   optional articulated hub poses, viewer body feet
+     * @param {object[]} axlePoses    optional solid-axle travel (feet) and articulation (radians)
      */
-    setWheelState(compression, steerAngles, spinAngles) {
+    setWheelState(compression, steerAngles, spinAngles, wheelPoses, axlePoses) {
       const axleTravel = [0, 0];
       wheels.forEach((wheel, i) => {
         const travel = (compression?.[i] ?? 0) * FEET_TO_INNER;
         wheel.mount.position.y = wheel.restY + travel;
+        const pose = wheelPoses?.[i];
+        if (pose) {
+          wheel.mount.position.set(pose.position.x * FEET_TO_INNER, pose.position.y * FEET_TO_INNER, pose.position.z * FEET_TO_INNER);
+        }
+        wheel.mount.rotation.z = pose?.articulation ?? 0;
         /*
           Negated, for the same reason the spawn heading is.
 
@@ -280,9 +300,11 @@ export function buildTruckObject(assembly, createMaterial, getTexture = () => nu
         axleTravel[axleIndex] += travel / 2;
       });
       axles.forEach((axle, i) => {
-        axle.group.position.y = axle.restY + axleTravel[i];
+        axle.group.position.y = axlePoses?.[i]
+          ? axlePoses[i].travel * FEET_TO_INNER : axle.restY + axleTravel[i];
+        axle.group.rotation.z = axlePoses?.[i]?.articulation ?? 0;
       });
-      updateLinks(axleTravel);
+      updateLinks(axleTravel, axlePoses);
     },
     /**
      * Place the truck.

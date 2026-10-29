@@ -16,6 +16,23 @@ JSTrackViewer opens the archives of **Monster Truck Madness**, **Monster Truck M
 
 ---
 
+## What's new in 1.1.0
+
+Changes since 1.0.0:
+
+- Added a Models window with 3D previews, model statistics, and controls to find and step through placed objects.
+- Added a Textures window with adjustable thumbnails, texture dimensions, ground types and depths, and road surface details.
+- Test Drive now uses the OpenPhotex MTM2 simulation shared with OpenMTM2, including solid axles, suspension, tire grip, gearing, and air and water drag.
+- Improved truck wheel and axle animation, tire sizing, ground-box and scenery collisions, analog gamepad input, and truck switching.
+- Added explorable Terminal Velocity and Fury3 tunnel interiors, listed separately after surface levels, with the camera starting inside the entrance.
+- Added Terminal Velocity and Fury3 chamber ceilings and a Rock tops toggle for viewing rooms inside solid terrain.
+- Corrected terrain proportions, triangle sampling, and object placement in Terminal Velocity, Fury3, and Hellbender.
+- Fixed Hellbender cavern heights, surface openings, underground visibility and lighting, and texture palette selection.
+- Added Hellbender moving-terrain markers with height ranges, named powerups, automatic navigation-point labels, and warnings for missing tunnel levels. Moving terrain is marked but not animated.
+- Updated the shared OpenPhotex library and expanded regression tests and documentation for driving physics and game-specific level behavior.
+
+Release notes: [plain text](docs/releases/1.1.0.txt) · [phpBB list](docs/releases/1.1.0-phpbb.txt).
+
 ## Features
 
 - **Opens archives from disk, URL or a whole folder**: POD, EPD and ZIP files, with every track of every archive in one list.
@@ -25,7 +42,7 @@ JSTrackViewer opens the archives of **Monster Truck Madness**, **Monster Truck M
 - **Lighting and weather**: the game's sun position, cascaded shadows, Clear, Cloudy, Dusk and Night skies, lens flare and truck lights.
 - **Test Drive**: drive a Monster Truck Madness truck on any loaded level, with collisions, surfaces and lap timing.
 - **Fly! cities**: 250 km of satellite-textured terrain with skylines and bridges, streamed at full resolution near the camera.
-- **Inspection tools**: wireframes, a terrain grid, hitboxes, texture filtering and track statistics.
+- **Inspection tools**: Models and Textures windows, wireframes, a terrain grid, hitboxes, texture filtering and track statistics.
 - **Free camera**: fly anywhere, zoom with the mouse wheel, and jump around with the minimap.
 
 Each feature is described in detail under [Feature details](#feature-details).
@@ -56,7 +73,7 @@ Each feature is described in detail under [Feature details](#feature-details).
 | RA0 | MTM1, MTM2, Hellbender | Ground boxes: lower height of the box in each cell, 1 byte per cell |
 | RA1 | MTM1, MTM2, Hellbender | Ground boxes: upper height of the box in each cell, 1 byte per cell; 0 means the cell has no box |
 | CL0 | MTM1, MTM2, Hellbender | Ground boxes: the six face textures of each cell's box (south, north, east, west, top, bottom), one texture word each, 12 bytes per cell |
-| RA2 | Hellbender | Underground: cavern floor height, 1 byte per cell, a full 256 steps below the surface heights |
+| RA2 | Hellbender | Underground: cavern floor height, 1 byte per cell, biased so that byte 255 is altitude 0 (the surface datum) |
 | RA3 | Hellbender | Underground: cavern ceiling height, 1 byte per cell; where it equals the floor, the cell is solid rock |
 | CL1 | Hellbender | Underground: cavern floor texture, then ceiling texture, one texture word each, 4 bytes per cell |
 | RA4 | Hellbender | Underground ground boxes: lower height, encoded as RA0 on the cavern's heights |
@@ -64,6 +81,8 @@ Each feature is described in detail under [Feature details](#feature-details).
 | CL2 | Hellbender | Underground ground boxes: face textures, encoded as CL0 |
 | DEF | Terminal Velocity, Fury3, Hellbender | Object definitions and placements |
 | NAV, PUP, TDF, ANI | Terminal Velocity, Fury3, Hellbender | Navigation points, powerups, tunnel definitions and animated textures |
+| TNL | Terminal Velocity, Fury3 | A tunnel level's tube: segments of two elliptical rings, one terrain square long |
+| QKE | Hellbender | Moving terrain: cells and ground boxes that rise and fall (doors, lifts, crushers, switches) |
 | TXT (briefing) | Hellbender | Planet, location and mission text |
 | Sky RAW + ACT, VOX | MTM1, Terminal Velocity, Fury3, Hellbender | Sky texture, recolouring palette and horizon colour; `STARS.VOX` star field |
 | TRK + TTX | CPR | The road layer: surfaces, curbs, walls and their textures |
@@ -179,9 +198,11 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 
 ### Terrain and ground boxes
 
-- The heightfield is drawn with its texture grid, each cell's texture mirrored and rotated as its CLR entry says. CPR splits its cells along alternating diagonals, as the game does.
+- The heightfield is drawn with its texture grid, each cell's texture mirrored and rotated as its CLR entry says. CPR, Terminal Velocity, Fury3 and Hellbender split their cells along alternating diagonals, as the games do, and markers sit on those triangles.
+- Terminal Velocity, Fury3 and Hellbender terrain is drawn in its true proportions against the objects on it (one height step is 1/32 of a square in Terminal Velocity and Fury3, 1/16 in Hellbender).
 - MTM1 and MTM2 terrain is drawn at the brightness its LTE file bakes in.
-- Ground boxes are the solid blocks that stand on single cells, each face textured from CL0. Hellbender's underground is a second layer under the surface: cavern floor and ceiling meshes covering only the hollow cells, plus the cavern's own ground boxes.
+- Ground boxes are the solid blocks that stand on single cells, each face textured from CL0. Hellbender's underground is a second layer under the surface: cavern floor and ceiling meshes covering only the hollow cells, plus the cavern's own ground boxes. The surface opens into it where the game opens it, at every point whose surface height is 0 above a cavern ceiling at 0: almost all of the floating levels, and the shafts and pits of levels such as JURASIC and KREASH3.
+- Terminal Velocity and Fury3 chambers, the rooms inside the solid rock at altitude 255, get the ceiling the game generates: the floor mirrored about 255, textured from ten squares along. The Rock tops toggle hides the rock the game never draws, to look down into them.
 - Texture presentation: smooth or sharp (pixelated) filtering, and the two-pixel tile overlap that hides seams between terrain tiles, on by default where a game's tile sets need it.
 
 ### Objects
@@ -198,11 +219,13 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 - 4x4 Evolution stores only the straight runs of a course, so the corners and hairpin legs between them are drawn back in along the roads. A rally is a one-way run, so its course ends at the finish. When a track ships its computer drivers' recorded laps, each distinct lap is its own AI line.
 - CPR's five courses are named and coloured by purpose: three AI racing lines, the pit road lap and pit row. Its checkpoints are labelled pit entry, pit speed limit start and end, start/finish, then the lap's gates.
 - Numbered checkpoint markers for MTM, MTM2, CPR and 4x4 Evolution. MTM1 checkpoint banners are ordinary scenery; only the invisible trigger boxes wait behind the Checkpoints toggle.
-- Terminal Velocity, Fury3 and Hellbender show navigation points with their objective text, tunnels and powerups. Powerups are named (Laser, Shield Restore, AfterBurner and so on), and objects that always drop one are marked.
+- Terminal Velocity, Fury3 and Hellbender show navigation points with their objective text, tunnels and powerups. Powerups are named (Laser, Shield Restore, AfterBurner and so on, and Hellbender's own 31 types), and objects that always drop one are marked. Hellbender's sync points that the game inserted itself are marked "auto", and a tunnel whose level is not in the archive says so.
+- Hellbender's moving terrain (doors, lifts, crushers and switches) is marked from its QKE, with each one's height range.
 
 ### Terminal Velocity, Fury3 and Hellbender
 
-- Objects stand at their exact position within a terrain square, on the ground under them, at the size and proportions the game draws them, turned about their own origin.
+- Objects stand where the game puts them: Terminal Velocity and Fury3 set every surface object on the ground at its exact position, add its definition's offset and lift flyers by half their size; Hellbender keeps the stored height but raises an object to the floor or onto the ground box it is inside. Both at the size and proportions the game draws them, turned about their own origin.
+- Terminal Velocity and Fury3 tunnel levels open as their tube, built from the level's TNL and textured from its texture list, with the level's objects and powerups inside. They are listed after the surface levels, marked "(tunnel)", and open with the camera inside the tube's mouth, looking along it.
 - The sky is the game's flat textured ceiling above the world, recoloured for each level through its sky palette, or a star field on space levels. Fog fades the world into the level's horizon colour and follows the Distance slider. Sky and Fog have their own toggles.
 - Hellbender shows each world's planet and mission names.
 
@@ -222,8 +245,11 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 
 ### Test Drive physics
 
-- **Surfaces**: MTM1 and MTM2 give every terrain texture a ground type and depth (Default, Cement, Dirt, Water, Mud, Sand, Grass, Gravel, Ice, Snow, Metal, Wood or Rocks), and ground box tops take the type of their top texture. Road and metal grip best, dirt and grass a little less, gravel and sand are loose, mud and snow drag, ice barely steers, and water slows the truck the faster it goes. Deeper ground drags harder.
-- **Collisions**: objects with a model collide against the model itself, so a truck can pull up against a tree trunk and drive under its foliage. Light objects with a mass, such as cones, are knocked aside; CPR's cones and signs, which carry no mass, get Monster Truck Madness 2's weights. Camera-facing billboards are not solid, except MTM2's "Collide (facing)" objects. MTM1 and MTM2 Top Crush cars flatten gradually under the truck.
+See [the physics integration notes](docs/TEST_DRIVE_PHYSICS.md) for the shared simulation boundary and validation.
+
+- **Vehicle simulation**: Test Drive uses the same OpenPhotex MTM2 simulation as [OpenMTM2](https://github.com/juanputrerasm/OpenMTM2): solid-axle articulation, spring and damper suspension, load-dependent tire forces, four-wheel steering, the engine torque curve, three-speed gearing, hull contacts, and air/water drag. It advances at a fixed 120 Hz.
+- **Surfaces**: terrain and ground-box texture types feed MTM2's friction and tire-cut tables. Surface depth is tire sink in inches; submerged tires and bodywork add water drag. The viewer's terrain samplers also support its other game formats and preserve holes in Hellbender terrain.
+- **Collisions**: objects with a model collide against the model itself, so a truck can pull up against a tree trunk and drive under its foliage. Ground boxes and the steep sides of fixed scenery are met through the same OpenPhotex collision as OpenMTM2, and each truck rolls on its own tires' size. Light objects with a mass, such as cones, are knocked aside; CPR's cones and signs, which carry no mass, get Monster Truck Madness 2's weights. Camera-facing billboards are not solid, except MTM2's "Collide (facing)" objects. MTM1 and MTM2 Top Crush cars flatten gradually under the truck.
 - **Show hitboxes** draws a wireframe around everything the simulation can collide with.
 - Picking another truck swaps it in where you are, keeping speed, heading, gearbox and camera. Loading a different track parks the truck, which stays loaded for the next one.
 
@@ -240,6 +266,7 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 - The minimap shows the heightfield (or, for Fly!, the satellite imagery) and moves the camera where you click.
 - The Markers and View Options panels toggle each layer: terrain, textures, grid, wireframes, objects, ground boxes, collision boxes, water, backdrop, sky, fog and markers. Distance, sunlight and gamma have sliders. Panels collapse from their headings, and only the controls the loaded track uses appear.
 - Track Data and Stats list the track's metadata and statistics: textures, objects, courses, ground boxes, and CPR surface and wall types.
+- The **Models** and **Textures** buttons under Track Data open two floating boxes, after JSTraxx's (and Traxx's) boxes of the same names. Models lists every model in the track with how many objects place it, a 3D preview with turn, tilt and zoom, and its vertex and triangle counts; picking one flies the camera to the front of the first object using it and outlines that object in wireframe, and the arrows step through the others. Textures shows every terrain, CART road, model and sky texture in a grid of small tiles (24 to 128 px, 48 by default; a larger box shows more), and a click shows the texture's name, slot and size, and its ground type where the game gives one: Grass, Cement, Dirt and so on, with depth, from the .TTY in Monster Truck Madness and CART, Evo's .TEX (with its vegetation class), and CART's road surface types. Terminal Velocity, Fury3 and Hellbender store none. Both boxes can be moved and resized, and remember where they were.
 
 ## Architecture
 
@@ -250,7 +277,7 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 | OPFS | Isolated temporary storage for archives opened from disk or URL |
 | Three.js r169 | Terrain, model, water, backdrop, lighting, and overlay rendering |
 | fflate | ZIP extraction |
-| [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex) | Terminal Reality format parsing, vendored as plain ES modules in `src/vendor/openphotex/` |
+| [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex) | Terminal Reality format parsing and MTM2 vehicle simulation, vendored as plain ES modules in `src/vendor/openphotex/` |
 
 ```text
 src/
@@ -277,11 +304,11 @@ Archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex), 
 - CART Precision Racing absolute wall height is approximate.
 - CART Precision Racing catch fencing falls back to a synthesized panel unless `ART/CATCH3D.RAW` is reachable, since it ships in `STARTUP.POD` rather than in a track POD.
 - CART Precision Racing tree walls (`wallType` 7) are drawn as a tall textured panel, not as billboarded foliage.
-- Terminal Velocity, Fury3 and Hellbender tunnels are not supported.
-- Terminal Velocity and Fury3 chambers render as the hollow in the raised plateau that the level stores. Their ceiling is generated by the game at run time and is not reproduced.
+- Terminal Velocity and Fury3 tunnel segment types (doors, blockers) are not drawn; a door segment is drawn as plain tube. Hellbender ships no tunnel levels.
+- Terminal Velocity and Fury3 chambers are found per square (solid rock within seven squares in all four directions), which can also take in a deep enclosed pit open to the sky; the game decides from the camera's position instead.
+- Hellbender's moving terrain is marked, not animated.
 - Terminal Velocity and Fury3 fog distance is not read from the game; it follows the Distance slider.
 - Terminal Velocity and Fury3 powerup models ship in `STARTUP.POD`, not in a level archive, so loose powerups are drawn as named markers unless the opened archive carries the models.
-- The order of Hellbender's cavern floor and ceiling textures in CL1 is inferred; if it were the other way round, cavern floors and ceilings would swap textures.
 - 4x4 Evolution `.SDW` baked shadow overlays and `.RTD` grids are read but not drawn.
 - 4x4 Evolution 2 material stages beyond diffuse and alpha (bump, cubic reflection, gloss and projected shadows) are not reproduced.
 - 4x4 Evolution vegetation stands on the drawn terrain and is turned by a viewer convention, because a `.VEG` record carries no orientation; `treeBiasY` is read but not applied.
@@ -295,6 +322,7 @@ Archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex), 
 - [CART Precision Racing track layer analysis](docs/CPR_TRACK_LAYER_ANALYSIS.md)
 - [Terminal Velocity/Fury3 level format analysis](docs/TV_F3_LEVEL_FORMAT_ANALYSIS.md)
 - [Hellbender level format analysis](docs/HELLBENDER_LEVEL_FORMAT_ANALYSIS.md)
+- [Terminal Velocity executable analysis](docs/TV_GAME_EXE_ANALYSIS.md), [Fury3 executable analysis](docs/FURY3_EXE_ANALYSIS.md) and [Hellbender executable analysis](docs/HELLBENDER_EXE_ANALYSIS.md): engine rules, cheat codes and lineage
 - [CPREdit guide](docs/CPREDIT_GUIDE.md)
 - [CART Precision Racing racetrack layer implementation guide](docs/cpr-racetrack-layer-implementation-guide.md)
 - [Monster Truck Madness 2 physics notes](docs/MTM2_PHYSICS_NOTES.md)

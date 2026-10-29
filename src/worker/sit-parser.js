@@ -283,7 +283,8 @@ function resolveArtAsset(podIndex, name) {
 function parseTty(bytes, doc) {
   for (const { name, type, depth } of parseTtyEntries(bytes)) {
     const tex = doc.textures.find((t) => archiveTitle(t.name) === archiveTitle(name));
-    if (tex) { tex.type = type; tex.depth = depth; }
+    // `stated`: the track gives this texture a ground type, as the Textures box reports.
+    if (tex) { tex.type = type; tex.depth = depth; tex.groundStated = true; }
   }
 }
 

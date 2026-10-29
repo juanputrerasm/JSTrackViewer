@@ -21,8 +21,34 @@ export function createTerrain(heights, waterLevelFt = null) {
     }
     return { heights, waterLevelFt };
 }
+/**
+ * A terrain from corner heights in feet (see `Mtm2Terrain.heightsFt`): the same grid, cells and split. `fineFt`, a
+ * square grid of a multiple of 256 heights a side, is a finer grid over it (`Mtm2Terrain.fine`).
+ */
+export function createTerrainFt(heightsFt, waterLevelFt = null, fineFt = null) {
+    if (heightsFt.length !== TERRAIN_CELLS * TERRAIN_CELLS) {
+        throw new RangeError(`terrain needs ${TERRAIN_CELLS * TERRAIN_CELLS} heights, got ${heightsFt.length}`);
+    }
+    const t = { heights: new Uint8Array(0), heightsFt, waterLevelFt };
+    if (fineFt) {
+        const cells = Math.round(Math.sqrt(fineFt.length));
+        if (cells * cells !== fineFt.length || cells % TERRAIN_CELLS !== 0)
+            throw new RangeError(`a fine grid needs a square multiple of ${TERRAIN_CELLS} a side, got ${fineFt.length}`);
+        t.fine = { cells, cellFt: (CELL_FT * TERRAIN_CELLS) / cells, heightsFt: fineFt };
+    }
+    return t;
+}
+/** The four corners and fractions of the fine cell under (x, z), and whether it splits along its main diagonal. */
+function fineCell(f, x, z) {
+    const m = f.cells - 1, gx = x / f.cellFt, gz = z / f.cellFt;
+    const c = Math.floor(gx), r = Math.floor(gz);
+    const fx = gx - c, fz = gz - r;
+    const h = (rr, cc) => f.heightsFt[(rr & m) * f.cells + (cc & m)];
+    return { h00: h(r, c), h01: h(r, c + 1), h10: h(r + 1, c), h11: h(r + 1, c + 1), fx, fz, main: ((r ^ c) & 1) === 0 };
+}
 function corner(t, row, col) {
-    return t.heights[(row & MASK) * TERRAIN_CELLS + (col & MASK)] * HEIGHT_STEP_FT;
+    const i = (row & MASK) * TERRAIN_CELLS + (col & MASK);
+    return t.heightsFt ? t.heightsFt[i] : t.heights[i] * HEIGHT_STEP_FT;
 }
 /** The cell and in-cell fractions of a position, as the game computes them. */
 function locate(x, z) {
@@ -41,12 +67,20 @@ export function cellSplitsMainDiagonal(row, col) {
 }
 /** Bare terrain height in feet, without the Snow rule. */
 export function terrainHeightAt(t, x, z) {
+    if (t.fine) {
+        const { h00, h01, h10, h11, fx, fz, main } = fineCell(t.fine, x, z);
+        return triangleAt(h00, h01, h10, h11, fx, fz, main);
+    }
     const { row, col, fx, fz } = locate(x, z);
     const h00 = corner(t, row, col);
     const h01 = corner(t, row, col + 1);
     const h10 = corner(t, row + 1, col);
     const h11 = corner(t, row + 1, col + 1);
-    if (cellSplitsMainDiagonal(row, col)) {
+    return triangleAt(h00, h01, h10, h11, fx, fz, cellSplitsMainDiagonal(row, col));
+}
+/** Height inside a cell's triangle: corners h(row, col), fractions across it, and its split. */
+function triangleAt(h00, h01, h10, h11, fx, fz, main) {
+    if (main) {
         return fz < fx
             ? h00 + (h01 - h00) * fx + (h11 - h01) * fz
             : h00 + (h11 - h10) * fx + (h10 - h00) * fz;
@@ -73,14 +107,23 @@ export function groundNormalAt(t, x, z, out, snow = false) {
         out[2] = 0;
         return out;
     }
-    const { row, col, fx, fz } = locate(x, z);
-    const h00 = corner(t, row, col);
-    const h01 = corner(t, row, col + 1);
-    const h10 = corner(t, row + 1, col);
-    const h11 = corner(t, row + 1, col + 1);
-    // Slopes of the triangle's plane, dh/dx and dh/dz, per cell (32 ft).
+    let h00, h01, h10, h11, fx, fz, main, side = CELL_FT;
+    if (t.fine) {
+        ({ h00, h01, h10, h11, fx, fz, main } = fineCell(t.fine, x, z));
+        side = t.fine.cellFt;
+    }
+    else {
+        const at = locate(x, z);
+        ({ fx, fz } = at);
+        h00 = corner(t, at.row, at.col);
+        h01 = corner(t, at.row, at.col + 1);
+        h10 = corner(t, at.row + 1, at.col);
+        h11 = corner(t, at.row + 1, at.col + 1);
+        main = cellSplitsMainDiagonal(at.row, at.col);
+    }
+    // Slopes of the triangle's plane, dh/dx and dh/dz, per cell.
     let sx, sz;
-    if (cellSplitsMainDiagonal(row, col)) {
+    if (main) {
         if (fz < fx) {
             sx = h01 - h00;
             sz = h11 - h01;
@@ -98,9 +141,9 @@ export function groundNormalAt(t, x, z, out, snow = false) {
         sx = h11 - h10;
         sz = h11 - h01;
     }
-    const len = Math.hypot(sx, CELL_FT, sz);
+    const len = Math.hypot(sx, side, sz);
     out[0] = -sx / len;
-    out[1] = CELL_FT / len;
+    out[1] = side / len;
     out[2] = -sz / len;
     return out;
 }

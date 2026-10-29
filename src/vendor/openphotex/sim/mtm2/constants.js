@@ -13,6 +13,18 @@ export const INV_G = 0.031081;
 /** Air and water densities used for drag, slug/ft³ (§2.3). */
 export const AIR_DENSITY = 0.002377;
 export const WATER_DRAG_DENSITY = 0.15;
+export const MTM2_RULES = Object.freeze({
+    id: "mtm2", waterDragDensity: 0.15, deepWater: true, weatherGrip: true, crashDamage: true,
+    wheelImpact: "half", wheelSpinClimb: 0.05, wheelSpinNeedsGround: true,
+});
+export const MTM1_RULES = Object.freeze({
+    id: "mtm1", waterDragDensity: 1.0, deepWater: false, weatherGrip: false, crashDamage: false,
+    wheelImpact: "smaller", wheelSpinClimb: 0.1, wheelSpinNeedsGround: false,
+});
+/** The rules by name; an unknown name is MTM2's. */
+export function simRules(id) {
+    return id === "mtm1" ? MTM1_RULES : MTM2_RULES;
+}
 /** Terrain grid (§2.1): 256 × 256 cells of 32 ft, heights in 2 ft steps. */
 export const TERRAIN_CELLS = 256;
 export const CELL_FT = 32;

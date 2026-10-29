@@ -24,10 +24,21 @@ const CRC_TABLE = (() => {
  * The checksum POD2 uses for the archive and for each entry.
  */
 export function crc32Mpeg2(bytes) {
-    let crc = 0xffffffff;
+    return crc32Mpeg2Update(CRC32_MPEG2_INIT, bytes);
+}
+/** The CRC-32/MPEG-2 starting value, for `crc32Mpeg2Update`. */
+export const CRC32_MPEG2_INIT = 0xffffffff;
+/**
+ * Continue a CRC-32/MPEG-2 over the next chunk, so a large archive can be checksummed while it is
+ * streamed. Start from `CRC32_MPEG2_INIT`; since there is no final XOR, the running value after
+ * the last chunk is the checksum: `crc32Mpeg2Update(crc32Mpeg2Update(INIT, a), b)` equals
+ * `crc32Mpeg2(a + b)`.
+ */
+export function crc32Mpeg2Update(crc, bytes) {
+    let c = crc >>> 0;
     for (let i = 0; i < bytes.length; i++)
-        crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ bytes[i]) & 0xff]) >>> 0;
-    return crc >>> 0;
+        c = ((c << 8) ^ CRC_TABLE[((c >>> 24) ^ bytes[i]) & 0xff]) >>> 0;
+    return c >>> 0;
 }
 /**
  * Check a POD2's stored CRCs against the whole archive's bytes. Parsing never does this, so a
@@ -83,19 +94,32 @@ export function readPod2AuditTrail(bytes, archive) {
     if (start < payloadEnd) {
         throw new PodFormatError("ENTRY_OUT_OF_BOUNDS", `${count} audit records of ${AUDIT_RECORD_SIZE} bytes do not fit between the last payload (ends ${payloadEnd}) and EOF (${bytes.length}).`);
     }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return readPod2AuditRecords(bytes.subarray(start), start);
+}
+/**
+ * Decode audit records from the trail's own bytes, without the rest of the archive: the last
+ * `auditCount * 312` bytes of a POD2, which a caller can slice out of a large file. `baseOffset`
+ * is where the trail starts in the archive, so each record's `offset` stays absolute.
+ *
+ * @throws RangeError when `trail` is not a multiple of 312 bytes.
+ */
+export function readPod2AuditRecords(trail, baseOffset = 0) {
+    if (trail.length % AUDIT_RECORD_SIZE !== 0) {
+        throw new RangeError(`An audit trail is a multiple of ${AUDIT_RECORD_SIZE} bytes, not ${trail.length}.`);
+    }
+    const view = new DataView(trail.buffer, trail.byteOffset, trail.byteLength);
     const records = [];
-    for (let i = 0; i < count; i++) {
-        const at = start + i * AUDIT_RECORD_SIZE;
+    for (let i = 0; i < trail.length / AUDIT_RECORD_SIZE; i++) {
+        const at = i * AUDIT_RECORD_SIZE;
         const actionCode = view.getUint32(at + 0x24, true);
         records.push({
             index: i,
-            offset: at,
-            user: readString(bytes, at, 32),
+            offset: baseOffset + at,
+            user: readString(trail, at, 32),
             timestamp: view.getUint32(at + 0x20, true),
             actionCode,
             action: ACTIONS[actionCode] ?? null,
-            path: readString(bytes, at + 0x28, 256),
+            path: readString(trail, at + 0x28, 256),
             oldTimestamp: view.getUint32(at + 0x128, true),
             oldSize: view.getUint32(at + 0x12c, true),
             newTimestamp: view.getUint32(at + 0x130, true),

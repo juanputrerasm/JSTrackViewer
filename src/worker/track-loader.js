@@ -12,7 +12,7 @@ const LVL_KIND_TUNNEL = 1;
 /**
  * Lists available tracks in a POD index.
  * Returns [{name, index, format}]
- * For LVL-based (TV/F3/HB) PODs, filters out tunnel interior levels.
+ * For LVL-based (TV/F3/HB) PODs, lists every level, tunnel interiors included.
  */
 export function listTrackChoices(podIndex) {
   const sitEntries = findSitEntries(podIndex);
@@ -30,7 +30,8 @@ export function listTrackChoices(podIndex) {
 }
 
 /**
- * Async version that also filters tunnel LVL entries by reading their header.
+ * Async version that reads each LVL header to list the surface levels first and the tunnel
+ * interiors after them.
  */
 export async function listTrackChoicesAsync(podIndex, opfsPath) {
   if (podIndex.format === "epd") return listFlyChoices(podIndex);
@@ -58,15 +59,16 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
   const candidates = filtered.length ? filtered : lvlEntries;
 
   /*
-    Keep the surface levels and drop the tunnel interiors.
+    Surface levels first, then the tunnel interiors, marked as such.
 
     Line 0 of a TV-family LVL states which it is outright: 4 for a surface level, 1 for a
     tunnel. That is checked first because it is the file saying so rather than the loader
     inferring it. Line 2 remains the fallback, since it is a .TNL spine on a tunnel level and
     a .RAW heightfield on a surface one, and it also covers any level whose line 0 carries a
-    value neither game uses.
+    value neither game uses. Tunnel levels open as their tube (tunnel-builder.js).
   */
   const surface = [];
+  const tunnels = [];
   for (const e of candidates) {
     try {
       // Read only first 512 bytes - enough for the header lines
@@ -76,14 +78,15 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
         .replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
       const kind = parseInt(header[0]?.trim() ?? "", 10);
       const line2 = header[2]?.trim().toUpperCase() ?? "";
-      if (kind === LVL_KIND_TUNNEL || line2.endsWith(".TNL")) continue;
-      surface.push(e);
+      if (kind === LVL_KIND_TUNNEL || line2.endsWith(".TNL")) tunnels.push(e);
+      else surface.push(e);
     } catch {
       surface.push(e);  // include on read error
     }
   }
-  return surface.map((e, i) => ({
-    name: archiveTitle(e.name).replace(/\.LVL$/i, ""), fileName: archiveTitle(e.name), index: i, format: "LVL", entry: e,
+  return [...surface, ...tunnels].map((e, i) => ({
+    name: archiveTitle(e.name).replace(/\.LVL$/i, "") + (i >= surface.length ? " (tunnel)" : ""),
+    fileName: archiveTitle(e.name), index: i, format: "LVL", entry: e,
   }));
 }
 
@@ -256,8 +259,20 @@ function serializeCourse(course) {
   return { segments: (course?.segments ?? []).map((s) => ({ start: [...s.start], end: [...s.end], speedLimit: s.speedLimit, trackWidth: s.trackWidth })) };
 }
 
+/*
+  Scene units per height step, per game.
+
+  The TV-family engines are isotropic: one cell is 2^20 world units in Terminal Velocity and
+  Fury3 and 2^19 in Hellbender, one height step 2^15 in both, and models use the same world
+  units on every axis (docs/TV_GAME_EXE_ANALYSIS.md 3.5, docs/HELLBENDER_EXE_ANALYSIS.md 2). At
+  64 scene units per cell that is 2 units per step for TV/F3 and 4 for Hellbender, which draws
+  terrain, objects, ground boxes and caverns in their true proportions. The MTM family keeps
+  the requested Traxx scale, whose models carry the matching 0.75 stretch.
+*/
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
-  return origin === "HB" ? 3 : (requestedHeightScale ?? 4);
+  if (origin === "HB") return 4;
+  if (origin === "TV" || origin === "F3" || origin === "TV/F3") return 2;
+  return requestedHeightScale ?? 4;
 }
 
 /*

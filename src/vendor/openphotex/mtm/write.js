@@ -1,9 +1,10 @@
 import { MTM_WHEEL_KEYS } from "../truck/mtm-trk.js";
+import { encodeWindows1252 } from "../text.js";
 const CRLF = "\r\n";
 /*
-  An MTM2 .SIT. Ramps, cylinders and top-crush parts are written empty, the stadium off and the
-  backdrop empty; the truck records carry a zeroed race state and 20 empty laps of 20
-  checkpoint times each, as the stock files do.
+  An MTM2 .SIT. Unless the caller gives them, ramps, cylinders and top-crush parts are written
+  empty, the stadium off and the backdrop empty; the truck records carry a zeroed race state and
+  20 empty laps of 20 checkpoint times each, as the stock files do. Every line ends CRLF.
 */
 export function writeMtm2Sit(sit) {
     const out = [
@@ -11,10 +12,11 @@ export function writeMtm2Sit(sit) {
         "Track Longtitude, Latitude", sit.longitudeLatitude ?? "7947984,7947988", "Track Logo .BMP file", sit.pictureBmp,
         "Track Map .BMP file", sit.iconBmp, "Track Fly-By .AVI file", sit.flyByAvi ?? "Sonic", "Track Announcer .WAV file", sit.announcerWav ?? "Track",
         "Track Description .TXT file", sit.descriptionTxt, "Track Race Type", String(sit.raceType ?? 0), "@Redbook Audio Track", String(sit.redbookTrack ?? 2),
-        "!ambient sound,track length,weather mask", `${sit.ambientSound ?? 0},${num(sit.trackLength)},${sit.weatherMask ?? 0}`,
-        "viewmode,spotd,spotp,spoth,zoom", "0,16384,-16383,24832,98304", "$racetime, raceStartTime, dragDebugTimer", "0,0,0",
-        "controlflag, autoShift, autoStage, bothStaged, bothStagedPrev", "0,1,0,0,0", "stageComFlag, bonusLapFlag", "0,0",
     ];
+    if (sit.ambientLine ?? true) {
+        out.push("!ambient sound,track length,weather mask", `${sit.ambientSound ?? 0},${num(sit.trackLength)},${sit.weatherMask ?? 0}`);
+    }
+    out.push("viewmode,spotd,spotp,spoth,zoom", sit.viewState ?? "0,16384,-16383,24832,98304", "$racetime, raceStartTime, dragDebugTimer", sit.raceTimes ?? "0,0,0", "controlflag, autoShift, autoStage, bothStaged, bothStagedPrev", sit.controlFlags ?? "0,1,0,0,0", "stageComFlag, bonusLapFlag", sit.stageFlags ?? "0,0");
     out.push("*** Your Truck (Not used anymore) ***", "*********************************************");
     truck(out, sit.yourTruck);
     out.push("*** Vehicles ***", String(sit.vehicles.length));
@@ -22,40 +24,64 @@ export function writeMtm2Sit(sit) {
         out.push("*********************************************");
         truck(out, vehicle);
     }
-    out.push("*** Ramps ***", "0", "*** Boxes ***", String(sit.boxes.length));
+    const ramps = sit.ramps ?? [];
+    out.push("*** Ramps ***", String(ramps.length));
+    for (const ramp of ramps)
+        record(out, ramp);
+    out.push("*** Boxes ***", String(sit.boxes.length));
     for (const box of sit.boxes) {
-        out.push("*********************************************", "ipos", triple(box.position), "theta,phi,psi", triple(box.orient));
-        if (box.extents)
-            out.push("length,width,height", triple(box.extents));
-        else
-            out.push("model", box.modelName ?? "");
-        out.push("mass", typeof box.mass === "string" ? box.mass : (box.mass ?? 0).toFixed(6), "bvel", "0,0,0", "p,q,r", "0,0,0", "!type,flags", `${box.type},${box.flags ?? 0}`, "priority", "0", "@sound effect entries", "NULL.WAV", "NULL.WAV", "0,0");
+        record(out, box);
+        out.push("!type,flags", `${box.type},${box.flags ?? 0}`, "priority", String(box.priority ?? 0), "@sound effect entries", box.hitSound ?? "NULL.WAV", box.loopSound ?? "NULL.WAV", "0,0");
+        if (box.light)
+            out.push("Llight rad,hgt,r,g,b,glow,glowRad,coneLen,coneRim,coneBase,bright,aimOff", box.light.map(num).join(","));
     }
-    out.push("*** Cylinders ***", "0", "*** Top Crush ***", "0", "*** Course ***", "c1Count,course_direction");
-    course(out, sit.course);
+    out.push("*** Cylinders ***", String(sit.cylinders?.count ?? 0), ...(sit.cylinders?.lines ?? []));
+    const crushes = sit.topCrush ?? [];
+    out.push("*** Top Crush ***", String(crushes.length));
+    for (const car of crushes) {
+        out.push("*********************************************", "ipos", triple(car.position), "ipos2", triple(car.position2), "theta,phi,psi", triple(car.orient), "modelName", car.modelName || "NULL", "cabModelName", car.cabModelName || "NULL", "mass", mass(car.mass), "bvel", car.bvel ? triple(car.bvel) : "0,0,0", "p,q,r", car.rates ? triple(car.rates) : "0,0,0");
+    }
+    out.push("*** Course ***", "c1Count,course_direction");
+    course(out, sit.course, sit.courseDirection ?? 0);
     out.push("@*********** Extended Course Definitions *************", "4");
     for (let i = 0; i < 4; i++) {
         out.push(`[Course ${i + 1}] c1Count,course_direction`);
-        const segments = sit.extendedCourses[i];
-        if (!segments) {
-            out.push("0,0");
-            continue;
-        }
-        course(out, segments);
+        course(out, sit.extendedCourses[i] ?? [], sit.extendedCourseDirections?.[i] ?? 0);
     }
-    out.push("*** Stadium ***", "stadiumFlag,stadiumModelName", "0,none", "*** Backdrop ***", "backdropType,backdropCount", "0,0", "backdropModelName", "");
-    return text(out.join("\n"));
+    const stadium = sit.stadium;
+    if (!stadium)
+        out.push("*** Stadium ***", "stadiumFlag,stadiumModelName", "0,none");
+    else if (stadium.placed ?? true) {
+        out.push("*** Stadium ***", "!stadiumFlag,x,z,sx,sz,stadiumModelName", `${stadium.flag},${stadium.x ?? 0},${stadium.z ?? 0},${stadium.sx ?? 0},${stadium.sz ?? 0},${stadium.modelName}`);
+    }
+    else
+        out.push("*** Stadium ***", "stadiumFlag,stadiumModelName", `${stadium.flag},${stadium.modelName}`);
+    const backdrops = sit.backdrop?.modelNames ?? [];
+    out.push("*** Backdrop ***", "backdropType,backdropCount", `${sit.backdrop?.type ?? 0},${backdrops.length}`, "backdropModelName", ...(backdrops.length ? backdrops : [""]));
+    return text(out.map((line) => `${line}\n`).join(""));
+}
+/** The lines a ramp and a box share: placement, model or size, mass and motion. */
+function record(out, box) {
+    out.push("*********************************************", "ipos", triple(box.position), "theta,phi,psi", triple(box.orient));
+    if (box.extents)
+        out.push("length,width,height", triple(box.extents));
+    else
+        out.push("model", box.modelName ?? "");
+    out.push("mass", mass(box.mass), "bvel", box.bvel ? triple(box.bvel) : "0,0,0", "p,q,r", box.rates ? triple(box.rates) : "0,0,0");
+}
+function mass(value) {
+    return typeof value === "string" ? value : (value ?? 0).toFixed(6);
 }
 function truck(out, vehicle) {
     out.push("truckFile", vehicle.truckFile ?? "POWERBIG.TRK", "ipos", triple(vehicle.position), "bvel", "0,0,0", "theta,phi,psi", triple(vehicle.orient), "p,q,r", "0,0,0", "faxle.angle,faxle.steering_angle", "0,0", "faxle.rtire.on_gnd,faxle.ltire.on_gnd", "-1,1", "raxle.angle,raxle.steering_angle", "0,0", "raxle.rtire.on_gnd,raxle.ltire.on_gnd", "-1,1", "xm.gear", "4", "ap.autopilot,ap.cnumber", "0,1", "ap.speed_control,ap.course_control,ap.lasterror", "0,0,0", "!ap.courseToFollow", String(vehicle.courseToFollow ?? 2), "$heliTimer,heliTheta,heliPhi,heliPsi", "0,0,0,0", "heliPos", "0,0,0", "^segments,laps,staged,bonusLaps,finishedRace,nextcheckpoint", "0,0,0,0,0,0", "totalracetime,fastestLap,dragTimer", "0,0,0");
     for (let lap = 0; lap < 20; lap++)
         out.push("***Lap time***", "0", "*****Checkpoint times*****", ...Array(20).fill("0"));
 }
-function course(out, segments) {
-    out.push(`${segments.length},0`);
-    segments.forEach((segment, i) => out.push(`********************************************* ${2 * i + 1}`, "ctype,cspeed_type", "1,0", "cstart", triple(segment.start), "cend", triple(segment.end), 
+function course(out, segments, direction) {
+    out.push(`${segments.length},${direction}`);
+    segments.forEach((segment, i) => out.push(`********************************************* ${2 * i + 1}`, "ctype,cspeed_type", segment.types ?? "1,0", "cstart", triple(segment.start), "cend", triple(segment.end), 
     // Stock levels record 0 here (WAR's arena is the one exception at 16).
-    "cdec_point,cspeed,lastentry", "30,0,0", "&cSpeedLimit,cTrackWidth", `${num(segment.speedLimit)},${num(segment.trackWidth)}`));
+    "cdec_point,cspeed,lastentry", segment.speeds ?? "30,0,0", "&cSpeedLimit,cTrackWidth", `${num(segment.speedLimit)},${num(segment.trackWidth)}`));
 }
 export function writeMtm2Lvl(lvl) {
     return text([
@@ -69,6 +95,13 @@ export function writeMtm2Lvl(lvl) {
 /** A .TEX texture list: the count, then one name per line. */
 export function writeTexList(names) {
     return text(`${names.length}\n${names.join("\n")}\n`);
+}
+/**
+ * A .TTY texture type table: the count, then `name,value` per typed texture, where the value is
+ * the surface type * 100 + its depth (see parseTty). An empty list writes "0".
+ */
+export function writeTty(entries) {
+    return text(`${entries.length}\n${entries.map((e) => `${e.name},${Math.trunc(e.value)}\n`).join("")}`);
 }
 /** A count-prefixed side file with no records (.TTY, .PUP, .ANI, .TDF, .DEF, .NAV). */
 export function writeEmptyList() {
@@ -189,7 +222,7 @@ export function writeMtm2Trk(truck) {
         const { frontAxleY, rearAxleY, middleY } = truck.superiorAxlebarOffset;
         pair("superiorAxlebarOffset", `${six(frontAxleY)},${six(rearAxleY)},${six(middleY)}`);
     }
-    return new TextEncoder().encode(lines.join(CRLF) + CRLF);
+    return singleByte(lines.join(CRLF) + CRLF);
 }
 function filled(label, value) {
     const text = String(value ?? "");
@@ -212,5 +245,15 @@ function clean(value) {
     return String(value).replace(/[\r\n]/g, " ").slice(0, 80);
 }
 function text(value) {
-    return new TextEncoder().encode(value.replace(/\r?\n/g, CRLF));
+    return singleByte(value.replace(/\r?\n/g, CRLF));
+}
+/*
+  The games' text files are single-byte windows-1252, as the readers decode them ("latin1" is
+  windows-1252 to a TextDecoder): a name such as "Champs-Élysées" has to be one byte per letter.
+*/
+function singleByte(value) {
+    const bytes = encodeWindows1252(value);
+    if (typeof bytes === "number")
+        throw new RangeError(`"${value[bytes]}" cannot be written in a windows-1252 text file.`);
+    return bytes;
 }

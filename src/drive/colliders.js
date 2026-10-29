@@ -56,6 +56,9 @@ const TYPE_DRIVE_THROUGH = 7;
 const TYPE_NO_COLLIDE_FACING = 8;
 const TYPE_RAMP = 99;
 
+/** A face whose normal's upward part is under cos 50 degrees is a wall (OpenMTM2's line). */
+const WALL_NORMAL_Y = Math.cos((50 * Math.PI) / 180);
+
 /*
   How long a top-crush cab takes to go flat with a wheel on it, in seconds. Traxx's help says
   only that the game changes from one frame to the other "gradually the more an object is
@@ -131,8 +134,12 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
   const toFeetH = 1 / UNITS_PER_FOOT_H;
   const toFeetV = 1 / UNITS_PER_FOOT_V;
   const worldFeet = worldSize * toFeetH;
+  const terrainAt = typeof frame.terrainAtFeet === "function"
+    ? (x, z) => frame.terrainAtFeet(x, z)
+    : (x, z) => frame.heightAtFeet(x, z);
 
   const solids = [];
+  let wallFaceList = null;
   const boxes = [...(trackData?.boxes ?? []), ...flyObjectBoxes(trackData, worldSize, heightScale)];
   const evo = trackData?.origin === "EVO1" || trackData?.origin === "EVO2";
   const trunkModels = new Map();
@@ -242,8 +249,15 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
           to: keyframes[keyframes.length - 1].meshes.map((mesh) => asFloats(mesh.positions)),
         };
       }
-      addModelSolid(common, evo && isVegetationModel(box.modelName, box.sourceClass)
-        ? trunkOf(box.modelName, model) : model, box);
+      const trunk = evo && isVegetationModel(box.modelName, box.sourceClass);
+      /*
+        Fixed scenery is a wall for the truck as OpenMTM2 makes it one (OpenPhotex
+        collideTruckFace): its steep triangles become wall faces (wallFaces) and its tops stay
+        ground (supportAt). Objects that move, can be pushed or crushed, and Evo's tree trunks,
+        stay on this module's own contacts.
+      */
+      const wall = !common.movable && !common.moving && !common.crush && !trunk;
+      addModelSolid({ ...common, wall }, trunk ? trunkOf(box.modelName, model) : model, box);
       continue;
     }
     // Evo does not render model-less SIT boxes; their authored size is not a visible object.
@@ -763,10 +777,11 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
         const spin = Math.hypot(solid.spin.x, solid.spin.y, solid.spin.z);
         // A struck object can lose its speed at the top of an arc. It may sleep only after
         // its lowest point has reached the terrain; otherwise it hangs in mid air forever.
-        const restingGround = frame.heightAtFeet(
+        const restingGround = terrainAt(
           solid.centre.x + solid.offset.x, solid.centre.z + solid.offset.z);
         const restingBase = solid.centre.y + solid.offset.y + lowestOffset(solid);
         if (speed < 0.05 && spin < 0.02 &&
+            restingGround !== null &&
             restingBase <= restingGround + 0.05 &&
             (solid.fallen || isUpright(solid.tilt))) {
           solid.velocity.x = 0;
@@ -791,14 +806,14 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
             solid.tilt));
         }
 
-        const groundY = frame.heightAtFeet(
+        const groundY = terrainAt(
           solid.centre.x + solid.offset.x,
           solid.centre.z + solid.offset.z
         );
         const baseY = solid.centre.y + lowestOffset(solid);
-        const grounded = baseY + solid.offset.y <= groundY + 0.05;
+        const grounded = groundY !== null && baseY + solid.offset.y <= groundY + 0.05;
 
-        if (baseY + solid.offset.y <= groundY) {
+        if (groundY !== null && baseY + solid.offset.y <= groundY) {
           // Back onto the ground when it gets there, keeping its slide but losing the drop.
           solid.offset.y = groundY - baseY;
           if (solid.velocity.y < 0) solid.velocity.y = 0;
@@ -860,11 +875,13 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
       Only surfaces at or below the wheel are considered: a roof overhead is not something to
       stand on, and one just above the wheel would otherwise snap the truck up into it.
     */
-    supportAt(x, z, y, { probe = false } = {}) {
+    supportAt(x, z, y, { probe = false, truck = false } = {}) {
       let best = null;
       let bestItem = null;
       for (const item of near(x, z)) {
         if (item.top !== undefined) {
+          // The test truck meets ground boxes through OpenPhotex instead (openmtm2-sim.js).
+          if (truck) continue;
           // A ground column.
           if (x < item.minX || x > item.maxX || z < item.minZ || z > item.maxZ) continue;
           if (item.top <= y && (best === null || item.top > best)) { best = item.top; bestItem = null; }
@@ -901,6 +918,48 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
     },
 
     /**
+     * The ground column whose top is the highest at or below y at (x, z): its top in feet and
+     * its ground type, or null. For the test truck's surface lookups on ground box tops.
+     */
+    columnAt(x, z, y) {
+      let best = null;
+      for (const item of near(x, z)) {
+        if (item.top === undefined) continue;
+        if (x < item.minX || x > item.maxX || z < item.minZ || z > item.maxZ) continue;
+        if (item.top <= y && (best === null || item.top > best.top)) best = item;
+      }
+      return best ? { top: best.top, surface: best.surface } : null;
+    },
+
+    /*
+      The steep triangles of fixed scenery, as wall faces for OpenPhotex's collideTruckFace, in
+      feet in this module's axes: three corners and the way out. Steep is more than 50 degrees
+      from level, the line OpenMTM2 draws for 4x4 Evolution's rocks (evo-track-build.js
+      WALL_NORMAL_Y); the rest of a model is ground. A triangle whose facing is unknown is left
+      out. Built once, on first call.
+    */
+    wallFaces() {
+      if (wallFaceList) return wallFaceList;
+      wallFaceList = [];
+      for (const solid of solids) {
+        if (!solid.wall || solid.kind !== "mesh") continue;
+        const { tris, normals, facing, count } = solid.shape;
+        if (!facing) continue;
+        const c = solid.centre;
+        for (let i = 0; i < count; i++) {
+          if (!facing[i] || Math.abs(normals[i * 3 + 1]) >= WALL_NORMAL_Y) continue;
+          const corner = (k) => ({ x: c.x + tris[i * 9 + k * 3], y: c.y + tris[i * 9 + k * 3 + 1], z: c.z + tris[i * 9 + k * 3 + 2] });
+          const f = facing[i];
+          wallFaceList.push({
+            a: corner(0), b: corner(1), c: corner(2),
+            outward: { x: normals[i * 3] * f, y: normals[i * 3 + 1] * f, z: normals[i * 3 + 2] * f },
+          });
+        }
+      }
+      return wallFaceList;
+    },
+
+    /**
      * The ground type (.TTY value) of the ground box top a wheel at (x, y, z) stands on, or
      * null when it is not on one. Other objects have no ground type.
      */
@@ -924,9 +983,12 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
       @param {object} point      a hull point, in feet
       @param {object} [reference] a point inside the truck, normally its centre of gravity
     */
-    contactAt(point, reference = null) {
+    contactAt(point, reference = null, { truck = false } = {}) {
       const candidates = reference ? nearSegment(point, reference) : near(point.x, point.z);
       for (const item of candidates) {
+        // The test truck meets ground boxes and fixed scenery's walls through OpenPhotex
+        // (openmtm2-sim.js); this answers it for everything else.
+        if (truck && (item.top !== undefined || item.wall)) continue;
         if (item.top !== undefined) {
           if (point.x < item.minX || point.x > item.maxX) continue;
           if (point.z < item.minZ || point.z > item.maxZ) continue;

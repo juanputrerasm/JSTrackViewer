@@ -18,7 +18,7 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <h1><a href="https://github.com/juanputrerasm/JSTrackViewer">JSTrackViewer <span class="app-version">v1.0.0</span></a></h1>
+        <h1><a href="https://github.com/juanputrerasm/JSTrackViewer">JSTrackViewer <span class="app-version">v1.1.0</span></a></h1>
         <p>Online TRI Track viewer</p>
       </div>
       <div class="load-controls">
@@ -64,6 +64,7 @@
             <label><input type="checkbox" id="tog-navpoints" checked> Nav points</label>
             <label><input type="checkbox" id="tog-cpmarkers" checked> CP markers</label>
             <label><input type="checkbox" id="tog-tunnels" checked> Tunnels</label>
+            <label title="Hellbender's doors, lifts and crushers, from the level's .QKE"><input type="checkbox" id="tog-quakes" checked> Moving terrain</label>
             <label><input type="checkbox" id="tog-powerups" checked> Powerups</label>
           </div>
           <div id="course-toggles" hidden>
@@ -87,6 +88,7 @@
             <label><input type="checkbox" id="tog-textures" checked> Textures</label>
             <label><input type="checkbox" id="tog-smooth-textures" checked> Smooth textures</label>
             <label><input type="checkbox" id="tog-terrain-overlap" checked> 2px overlap</label>
+            <label title="Terminal Velocity and Fury3: the solid rock at altitude 255, which the game never draws. Hide it to look down into the chambers."><input type="checkbox" id="tog-rock-tops" checked> Rock tops</label>
             <label><input type="checkbox" id="tog-objects" checked> Objects</label>
             <label><input type="checkbox" id="tog-billboards" checked> Facing models</label>
             <label><input type="checkbox" id="tog-gboxes" checked> Ground boxes</label>
@@ -137,6 +139,10 @@
           <dl id="track-info" class="kv-list">
             <dt>Status</dt><dd>No track loaded.</dd>
           </dl>
+          <div class="box-buttons">
+            <button id="models-box-btn" type="button" title="Every model in the track; pick one to go to it" disabled>Models</button>
+            <button id="textures-box-btn" type="button" title="Every texture in the track" disabled>Textures</button>
+          </div>
         </section>
 
         <section class="panel" id="drive-panel">

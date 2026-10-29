@@ -71,6 +71,21 @@ export function createPaletteResolver(podIndex, getBytes, origin, trackPalette) 
     let bytes = null;
     let source = "none";
     const candidates = paletteCandidates(podIndex, { name: textureName, entry: rawEntry }, { origin, automatic: true, kind, trackPalette: !!trackAct });
+
+    /*
+      Hellbender is the exception to OpenPhotex's general same-stem-first ranking.
+
+      Its POD1 directory assigns almost every ART\\*.RAW to the level palette that the game
+      actually uses. A few source-art palettes were left beside their converted RAWs; all 48
+      MSTEAM/TRTEAM tiles in IOWAH are the clearest case. Reading those same-stem ACTs turns
+      the two developer photographs into false-colour noise, while the RAW metadata names
+      IOWA.ACT and restores both pictures. Prefer that explicit directory assignment for HB,
+      but retain the rest of the candidate chain if the named palette is absent or malformed.
+    */
+    if (origin === "HB") {
+      const metadataAt = candidates.findIndex((candidate) => candidate.source === "pod-metadata");
+      if (metadataAt > 0) candidates.unshift(...candidates.splice(metadataAt, 1));
+    }
     for (const candidate of candidates) {
       bytes = candidateBytes(candidate);
       if (bytes) {

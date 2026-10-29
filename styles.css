@@ -564,3 +564,80 @@ input[type="checkbox"] {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--surface); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ── Floating boxes: Models and Textures (src/ui/floating-panel.js) ── */
+.box-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.box-buttons button { flex: 1; }
+
+.fpanel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.fpanel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+.fpanel-close { padding: 0 6px; line-height: 1.2; }
+.fpanel-body { flex: 1; min-height: 0; padding: 8px; overflow: hidden; display: flex; }
+.fpanel-grip {
+  position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--border) 50%);
+  touch-action: none;
+}
+
+.box-window { display: flex; gap: 8px; flex: 1; min-height: 0; }
+.box-left { display: flex; flex-direction: column; gap: 6px; width: 42%; min-width: 0; }
+.box-filter { width: 100%; }
+.box-list {
+  flex: 1; min-height: 0; width: 100%;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 12px;
+}
+.box-right { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.box-view { display: flex; gap: 4px; flex: 1; min-height: 80px; }
+.box-preview { flex: 1; min-width: 0; width: 100%; height: 100%; border: 1px solid var(--border); background: var(--bg); }
+.box-vslider { writing-mode: vertical-lr; direction: rtl; width: 18px; }
+.box-field { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.box-field input[type=range] { flex: 1; }
+.box-counts { display: flex; gap: 10px; flex-wrap: wrap; }
+.box-count { color: var(--text); font-family: var(--mono); }
+.box-go { display: flex; align-items: center; gap: 6px; }
+.box-which { min-width: 52px; text-align: center; color: var(--text-dim); font-family: var(--mono); }
+.box-go .quiet { margin-left: auto; }
+.box-empty { color: var(--text-dim); padding: 8px; }
+
+.tex-window { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+.tex-tools { display: flex; align-items: center; gap: 6px; }
+.tex-tools button { width: 28px; flex: 0 0 auto; }
+.tex-info { flex: 1; min-width: 0; color: var(--text); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tex-grid { flex: 1; min-height: 0; overflow: auto; padding-right: 4px; }
+.tex-group { font-size: 12px; color: var(--text-dim); margin: 6px 0 4px; font-weight: 600; }
+.tex-tiles { display: flex; flex-wrap: wrap; gap: 2px; }
+.tex-grid { --tile: 48px; }
+/* The viewport stretches every canvas inside it (.viewport canvas); a tile keeps its own size. */
+.viewport .tex-tile {
+  width: var(--tile) !important; height: var(--tile) !important; flex: 0 0 auto;
+  image-rendering: pixelated; border: 1px solid var(--border); background: var(--bg); cursor: pointer;
+}
+.tex-tile:hover, .tex-tile:focus-visible { border-color: var(--accent-dim); outline: none; }
+.tex-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.tex-tile.missing { background: repeating-linear-gradient(45deg, var(--surface2) 0 6px, var(--bg) 6px 12px); }
+
+@media (max-width: 640px) {
+  .box-window { flex-direction: column; }
+  .box-left { width: 100%; max-height: 40%; }
+}

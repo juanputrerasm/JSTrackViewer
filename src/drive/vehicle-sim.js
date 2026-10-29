@@ -196,11 +196,15 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     With no colliders (a track with no objects, or the tests) this is exactly the terrain, so
     nothing else in the sim has to know whether a track has objects in it.
   */
+  const terrainUnder = typeof frame.terrainAtFeet === "function"
+    ? (x, z) => frame.terrainAtFeet(x, z)
+    : (x, z) => frame.heightAtFeet(x, z);
   const groundUnder = (x, z, y) => {
-    const terrain = frame.heightAtFeet(x, z);
+    const terrain = terrainUnder(x, z);
     if (!colliders) return terrain;
     const support = colliders.supportAt(x, z, y);
-    return support !== null && support > terrain ? support : terrain;
+    if (support === null) return terrain;
+    return terrain === null || support > terrain ? support : terrain;
   };
   /*
     How far a wheel's mount is from the ground it would touch, along the axis its suspension
@@ -224,8 +228,11 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
   */
   const FOOTPRINT_SAMPLES = [-0.95, -0.5, 0.5, 0.95];
   function wheelContact(wheel, mountWorld, up, forward, groundY, terrainY) {
-    const terrainNormal = frame.normalAtFeet(mountWorld.x, mountWorld.z);
-    const onTerrain = groundY <= terrainY + 1e-6;
+    if (!Number.isFinite(groundY)) return { distance: Infinity, normal: up, steep: false };
+    const onTerrain = terrainY !== null && groundY <= terrainY + 1e-6;
+    const terrainNormal = onTerrain
+      ? frame.normalAtFeet(mountWorld.x, mountWorld.z)
+      : v3(0, 1, 0);
     const steepTerrain = onTerrain && terrainNormal.y < 0.8;
     const contactAxis = steepTerrain ? dot(up, terrainNormal) : up.y;
     if (!(up.y > UPRIGHT_ENOUGH && contactAxis > UPRIGHT_ENOUGH)) {
@@ -240,7 +247,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         let footprint = terrainY;
         for (const k of FOOTPRINT_SAMPLES) {
           const d = k * r;
-          const h = frame.heightAtFeet(mountWorld.x + fx * d, mountWorld.z + fz * d);
+          const h = terrainUnder(mountWorld.x + fx * d, mountWorld.z + fz * d);
+          if (h === null) continue;
           footprint = Math.max(footprint, h + Math.sqrt(r * r - d * d) - r);
         }
         const fromFootprint = (mountWorld.y - footprint) / up.y;
@@ -400,7 +408,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
     for (const wheel of wheels) {
       // Where this wheel's mount is in the world, and where its contact would be.
       const mountWorld = add(state.ipos, rotate(q, sub(wheel.mount, cg)));
-      const terrainY = frame.heightAtFeet(mountWorld.x, mountWorld.z);
+      const terrainY = terrainUnder(mountWorld.x, mountWorld.z);
       const rawGround = groundUnder(mountWorld.x, mountWorld.z, mountWorld.y);
 
       /*
@@ -424,9 +432,10 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
       // Terrain is continuous. Delaying its rise lets an axle enter a steep hillside before
       // the support ray catches up, then the penetration correction lifts the whole truck.
       // Only an object's abrupt top edge needs the wheel climb limit.
-      if (rawGround <= terrainY + 1e-6) wheel.support = terrainY;
+      if (rawGround === null) wheel.support = null;
+      else if (terrainY !== null && rawGround <= terrainY + 1e-6) wheel.support = terrainY;
       else if (wheel.support === null || rawGround <= wheel.support) wheel.support = rawGround;
-      else wheel.support = Math.max(terrainY, Math.min(rawGround, wheel.support + climbLimit));
+      else wheel.support = Math.min(rawGround, wheel.support + climbLimit);
       const groundY = wheel.support;
 
       /*
@@ -461,7 +470,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         The ground type under the tire (surfaces.js): the terrain cell's, or the top of the
         ground box it stands on. Any other object top is firm, so it is Default.
       */
-      const onObject = groundY > terrainY + 1e-6;
+      const onObject = terrainY === null || groundY > terrainY + 1e-6;
       wheel.surface = surfaceOf(onObject
         ? (colliders?.surfaceAt?.(mountWorld.x, mountWorld.z, mountWorld.y) ?? 0)
         : (frame.surfaceAtFeet?.(mountWorld.x, mountWorld.z) ?? 0));
@@ -702,7 +711,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         continue;
       }
 
-      const groundY = frame.heightAtFeet(world.x, world.z);
+      const groundY = terrainUnder(world.x, world.z);
+      if (groundY === null) continue;
       const depth = groundY - world.y;
       if (depth <= 0) continue;
 
@@ -825,7 +835,8 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
         // point can leave the slope in that step; applying its old impulse afterwards gives
         // the airborne truck a spurious upward kick.
         const point = add(state.ipos, arm);
-        if (frame.heightAtFeet(point.x, point.z) <= point.y) continue;
+        const groundY = terrainUnder(point.x, point.z);
+        if (groundY === null || groundY <= point.y) continue;
         normal = frame.normalAtFeet(point.x, point.z);
       }
       /*
@@ -977,7 +988,7 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
           was buried and lifted it bodily.
         */
         const groundY = wheel.support ?? groundUnder(mountWorld.x, mountWorld.z, mountWorld.y);
-        const terrainY = frame.heightAtFeet(mountWorld.x, mountWorld.z);
+        const terrainY = terrainUnder(mountWorld.x, mountWorld.z);
         const contact = wheelContact(wheel, mountWorld, up, rotate(q, v3(0, 0, -1)), groundY, terrainY);
         if (!Number.isFinite(contact.distance)) continue;
         const axle = params.suspension[wheel.isFront ? "front" : "rear"];
@@ -991,8 +1002,10 @@ export function createVehicleSim(assembly, frame, params = MTM2_FEEL, colliders 
 
     for (const point of scrape) {
       const world = add(state.ipos, rotate(q, sub(point, cg)));
+      const groundY = terrainUnder(world.x, world.z);
+      if (groundY === null) continue;
       const normal = frame.normalAtFeet(world.x, world.z);
-      const depth = (frame.heightAtFeet(world.x, world.z) - world.y) * normal.y;
+      const depth = (groundY - world.y) * normal.y;
       if (depth > deepest) {
         deepest = depth;
         correctionNormal = normal;

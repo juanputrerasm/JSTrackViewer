@@ -1,7 +1,10 @@
 import { resolveAsset } from "./pod-format.js";
 import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 import { loadGroundBoxes } from "./gbox-loader.js";
-import { loadUndergroundLayers, HB_UNDERGROUND_BIAS } from "./hb-underground.js";
+import {
+  buildHbSurfaceMask, loadUndergroundLayers, maskHbUnderground, HB_UNDERGROUND_BIAS,
+} from "./hb-underground.js";
+import { settlePlacements } from "./engine-placement.js";
 import { loadDefObjects } from "./def-loader.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { podRawSide } from "./texture-decoder.js";
@@ -12,7 +15,7 @@ import { parseTunnelDefs } from "./tdf-parser.js";
 import { parsePowerups } from "./pup-parser.js";
 import { parseAnimations } from "./ani-parser.js";
 import {
-  SKY_PALETTE_FIRST_SLOT, isNullAssetName, parseTexList, parseTty as parseTtyEntries, parseTvLvl, skyGradient, skyHorizon,
+  SKY_PALETTE_FIRST_SLOT, isNullAssetName, parseTexList, parseTty as parseTtyEntries, parseTvLvl, parseTvTunnel, parseHbQuakes, skyGradient, skyHorizon,
   tvLvlFallbackName,
 } from "../vendor/openphotex/index.js";
 
@@ -45,12 +48,16 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
   /*
     Line 2: the RAW heightfield, or a .TNL spine when this is a tunnel level.
 
-    Tunnel interiors are not rendered: they are separate levels that only read as tunnels from
-    inside. A surface level's tunnels are surfaced instead as entrance and exit markers, from
-    the .TDF on line 9, which is the complete list including the ones the .NAV leaves out.
+    A tunnel level is its own level, flown from inside. Its .TNL is read by OpenPhotex
+    (parseTvTunnel) and built into a tube by tunnel-builder.js; its .DEF, .PUP and .NAV share
+    the tube's frame. A surface level's tunnels are also surfaced as entrance and exit markers,
+    from the .TDF on line 9, which is the complete list including the ones the .NAV leaves out.
   */
   const rawOrTnl = lvl.rawOrTnlName;
-  if (!isNullAssetName(rawOrTnl) && !rawOrTnl.endsWith(".TNL")) {
+  if (!isNullAssetName(rawOrTnl) && rawOrTnl.endsWith(".TNL")) {
+    const tnlEntry = resolveLvlDataAsset(podIndex, rawOrTnl);
+    if (tnlEntry) doc.tunnelInterior = parseTvTunnel(getBytes(tnlEntry));
+  } else if (!isNullAssetName(rawOrTnl)) {
     const rawEntry = resolveLvlDataAsset(podIndex, rawOrTnl);
     if (rawEntry) {
       doc.terrain.rawName = rawOrTnl;
@@ -182,7 +189,18 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     const tdfName = lvl.tdfName;
     if (!isNullAssetName(tdfName)) {
       const tdfEntry = resolveLvlDataAsset(podIndex, tdfName);
-      if (tdfEntry) doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize, doc.origin);
+      if (tdfEntry) {
+        doc.tunnels = parseTunnelDefs(getBytes(tdfEntry), doc.terrain.gridSize, doc.origin);
+        /*
+          Hellbender ships one archive, so a tunnel whose level is absent from it cannot be flown:
+          JURASIC and JURASIC3 name ARTIC-T1.LVL, a Terminal Velocity leftover (see
+          docs/HELLBENDER_EXE_ANALYSIS.md 7). TV and Fury3 levels can sit in another archive of a
+          mount, so they are not judged from this one.
+        */
+        for (const tunnel of doc.origin === "HB" ? doc.tunnels : []) {
+          tunnel.levelMissing = !(resolveAsset(podIndex, "LEVELS/" + tunnel.levelName) ?? resolveAsset(podIndex, tunnel.levelName));
+        }
+      }
     }
   }
   if (lvl.navName !== null) {
@@ -231,12 +249,30 @@ export function parseLvlTrack(podIndex, getBytes, lvlEntry, podComment) {
     */
     if (doc.origin === "HB") {
       doc.underground = loadUndergroundLayers(podIndex, getBytes, rawOrTnl, doc.terrain.gridSize);
+      // Openings between the two worlds, by the engine's per-sample rule; see hb-underground.js.
+      doc.terrain.cellMask = buildHbSurfaceMask(
+        doc.terrain.rawData, doc.terrain.gridSize, doc.underground?.ceilingHeights ?? null);
+      if (doc.underground && doc.terrain.cellMask) {
+        doc.underground = maskHbUnderground(doc.underground, doc.terrain.cellMask);
+      }
       if (doc.underground) {
         doc.undergroundBoxes = loadGroundBoxes(podIndex, getBytes, rawOrTnl, doc.terrain.gridSize,
           { lower: ".RA4", upper: ".RA5", faces: ".CL2", heightOffset: HB_UNDERGROUND_BIAS });
       }
+      // Moving terrain: doors, lifts and crushers, found by stem like the layers above.
+      const qkeEntry = resolveLvlDataAsset(podIndex, replaceExtension(rawOrTnl, ".QKE"));
+      if (qkeEntry) doc.quakes = parseHbQuakes(getBytes(qkeEntry));
     }
   }
+
+  /*
+    All three engines split each terrain cell on the checkerboard diagonals (TV GAME.EXE
+    0x3c940, Fury3 0x43e940, Hellbender 0x41adf0 and 0x41bda0); see cellSplit in
+    terrain-builder.js. Then every placement is settled the way its engine settles it, now that
+    the heightfield, the ground boxes and the cavern are all loaded; see engine-placement.js.
+  */
+  doc.terrain.cellSplit = "checkerboard";
+  settlePlacements(doc);
 
   return doc;
 }
@@ -274,15 +310,23 @@ function loadPowerupModels(podIndex, getBytes, doc) {
 function loadTexList(podIndex, getBytes, texEntry, doc) {
   for (const name of parseTexList(getBytes(texEntry))) {
     const dataEntry = resolveTerrainTextureAsset(podIndex, name);
-    const tex = { name, data: null, width: 64, height: 64, type: 0, depth: 0 };
+    const tex = { name, data: null, rawEntry: dataEntry ?? null, width: 64, height: 64, type: 0, depth: 0 };
     if (dataEntry) {
       tex.data = getBytes(dataEntry);
       // Any square power-of-two tile 32..1024, not just 64 and 256 (fork: Pod1RawSide).
       tex.width = podRawSide(tex.data.length) || 64;
       tex.height = tex.width;
     }
-    const texActEntry = resolveTerrainTextureAsset(podIndex, replaceExtension(name, ".ACT"));
-    if (texActEntry) tex.actData = getBytes(texActEntry);
+    /*
+      HB's POD metadata names the palette its already-converted RAW uses. Some files retain a
+      same-stem source palette as well (notably IOWAH's MSTEAM/TRTEAM photographs), so leave
+      HB palette selection to createPaletteResolver, which can see rawEntry.paletteName.
+      TV and Fury3 keep their existing direct same-stem path.
+    */
+    if (doc.origin !== "HB") {
+      const texActEntry = resolveTerrainTextureAsset(podIndex, replaceExtension(name, ".ACT"));
+      if (texActEntry) tex.actData = getBytes(texActEntry);
+    }
     doc.textures.push(tex);
   }
 }
@@ -306,7 +350,8 @@ function resolveLvlDataAsset(podIndex, name) {
 function parseTty(bytes, doc) {
   for (const { name, type, depth } of parseTtyEntries(bytes)) {
     const tex = doc.textures.find((t) => archiveTitle(t.name) === archiveTitle(name));
-    if (tex) { tex.type = type; tex.depth = depth; }
+    // `stated`: the track gives this texture a ground type, as the Textures box reports.
+    if (tex) { tex.type = type; tex.depth = depth; tex.groundStated = true; }
   }
 }
 

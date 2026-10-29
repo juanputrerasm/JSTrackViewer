@@ -67,6 +67,10 @@ export function decodeIndexedImage(indices, palette, width, height, options = {}
         Traxx_OnGoing_Updates OpenGLTerrainRenderer.cpp:9048
           BYTE a = (r == 0 && g == 0 && b == 0) ? 0 : 255;
   
+      "Black" is black as the game's 16-bit textures hold it, five bits a channel: a palette
+      entry below 8 in all three counts. AZTEC.POD's fences (AZ8FN2.RAW, AZ8FN3.RAW with their own
+      .ACT) key on index 205 = (7, 7, 7), with pure black elsewhere in the palette.
+  
       Two things follow:
   
         - `cutout` is opt-in per texture. It applies only to faces of type 0x11 / 0x33 (glass,
@@ -86,7 +90,7 @@ export function decodeIndexedImage(indices, palette, width, height, options = {}
         const ci = indices[i] * 3;
         const o = i * 4;
         const r = palette[ci], g = palette[ci + 1], b = palette[ci + 2];
-        const cut = cutout && r === 0 && g === 0 && b === 0;
+        const cut = cutout && (r | g | b) < 8;
         rgba[o] = cut ? 0 : r;
         rgba[o + 1] = cut ? 0 : g;
         rgba[o + 2] = cut ? 0 : b;

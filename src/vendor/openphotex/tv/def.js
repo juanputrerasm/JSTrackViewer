@@ -179,7 +179,7 @@ function findNextEnemyDefinitionHeaderLine(lines, start) {
 function parseEnemyDefinition(line, description) {
     const p = line.split(",");
     if (p.length < 2)
-        return { binForHydration: "", groundOffsetY: 0, description: "" };
+        return { binForHydration: "", groundOffsetY: 0, groundOffsetX: 0, groundOffsetZ: 0, description: "" };
     const complexAsset = p[p.length - 2].trim();
     const simpleAsset = p[p.length - 1].trim();
     const cu = complexAsset.toUpperCase();
@@ -192,12 +192,14 @@ function parseEnemyDefinition(line, description) {
     }
     // Only the canonical six-integer shape is trusted to carry the offset in a known slot.
     const canonical = prefix.length === 6;
+    const groundOffsetX = canonical ? prefix[3] : 0;
     const groundOffsetY = canonical ? prefix[4] : 0;
+    const groundOffsetZ = canonical ? prefix[5] : 0;
     const hitRadius = canonical ? prefix[2] : 0;
     const logic = canonical ? prefix[0] : -1;
     return {
         complexAsset, simpleAsset, binForHydration,
-        prefix, hitRadius, logic, groundOffsetY,
+        prefix, hitRadius, logic, groundOffsetY, groundOffsetX, groundOffsetZ,
         description: description ?? "",
     };
 }

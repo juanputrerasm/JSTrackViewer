@@ -7,6 +7,7 @@
   - On the terrain, the cell's `.CLR` word (bits 0-11) picks the texture. Ground at or below
     the water level reads 1300 (deep water), or 800 (ice) in Snow; the comparison has no
     "level has water" guard, so on a level without water, ground at exactly 0 ft reads deep water.
+    Monster Truck Madness 1 has no such rule (`deepWater` false): water is what the texture says.
   - Inside a ground box, the box's top texture is used, with no water rule (callers pass it).
 */
 import { AIR_DENSITY, CUT_FACTORS, DEEP_WATER_TYPE, FROZEN_WATER_TYPE, SURFACE_MU, TERRAIN_CELLS, TIRE_GRIP_K, WATER_DRAG_DENSITY, WATER_TYPES, weatherGrip, } from "../constants.js";
@@ -40,8 +41,8 @@ export function textureWordValue(map, word) {
  * The terrain's type value at (x, z): the cell texture, or water below the level. `waterLevelFt`
  * null is treated as the game's level 0.
  */
-export function terrainSurfaceValue(terrain, map, x, z, waterLevelFt, snow = false) {
-    if (terrainHeightAt(terrain, x, z) <= (waterLevelFt ?? 0)) {
+export function terrainSurfaceValue(terrain, map, x, z, waterLevelFt, snow = false, deepWater = true) {
+    if (deepWater && terrainHeightAt(terrain, x, z) <= (waterLevelFt ?? 0)) {
         return (snow ? FROZEN_WATER_TYPE : DEEP_WATER_TYPE) * 100;
     }
     const col = (Math.trunc(x * 256) >> 13) & (TERRAIN_CELLS - 1);
@@ -60,8 +61,8 @@ export function surfaceMu(type) {
     return SURFACE_MU[type] ?? 1;
 }
 /** Fluid density used for drag over a ground type, slug/ft³. */
-export function surfaceDragDensity(type) {
-    return WATER_TYPES.has(type) ? WATER_DRAG_DENSITY : AIR_DENSITY;
+export function surfaceDragDensity(type, waterDensity = WATER_DRAG_DENSITY) {
+    return WATER_TYPES.has(type) ? waterDensity : AIR_DENSITY;
 }
 /** Tire-cut factor: cut 0 shallow, 1 medium, 2 deep. */
 export function cutFactor(type, cut) {

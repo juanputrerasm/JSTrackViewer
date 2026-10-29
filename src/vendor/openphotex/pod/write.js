@@ -116,7 +116,8 @@ function encodeNameField(entry, index) {
     }
     return field;
 }
-function encodeText(text, what, index = null) {
+/** windows-1252 bytes of `text`, or PodWriteError BAD_TEXT. Shared with the POD2 writer. */
+export function encodeText(text, what, index = null) {
     const encoded = encodeWindows1252(text);
     if (typeof encoded === "number") {
         throw new PodWriteError("BAD_TEXT", `${what} contains ${JSON.stringify(text[encoded])}, which the archive's 8-bit text cannot store.`, index);

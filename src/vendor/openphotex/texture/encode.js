@@ -135,19 +135,58 @@ export function encodeRawTexture(rgba, width, height) {
             raw[i] = 0;
             continue;
         }
-        let best = first, distance = Infinity;
-        for (let index = 0; index < palette.length; index++) {
-            const [r, g, b] = palette[index];
-            const dr = r - rgba[at], dg = g - rgba[at + 1], db = b - rgba[at + 2];
-            const candidate = dr * dr + dg * dg + db * db;
-            if (candidate < distance) {
-                distance = candidate;
-                best = first + index;
-            }
-        }
-        raw[i] = best;
+        raw[i] = first + nearest(palette, rgba[at], rgba[at + 1], rgba[at + 2]);
     }
     return { raw, act };
+}
+/*
+  One RGBA image mapped onto an existing 768-byte .ACT, for art that must share a palette already
+  in an archive (MTM1, CPR, TV and Hellbender textures all share one; Evo pairs a .RAW with an
+  .ACT of the same stem). Each opaque texel takes the nearest palette colour by squared RGB
+  distance. Transparent texels (alpha under 128) take index 0, the colour key, and index 0 is then
+  left out of the search so no opaque texel becomes transparent; an image without alpha may use
+  all 256 entries. Any width and height: a caller that writes classic .RAW art checks squareness.
+*/
+export function quantizeToPalette(rgba, width, height, act) {
+    if (act.length < 768)
+        throw new RangeError(`A palette is 768 bytes, got ${act.length}`);
+    if (rgba.length < width * height * 4)
+        throw new RangeError(`${width}x${height} RGBA needs ${width * height * 4} bytes, got ${rgba.length}`);
+    const keyed = hasAlpha(rgba.subarray(0, width * height * 4));
+    const first = keyed ? 1 : 0;
+    const palette = [];
+    for (let i = first; i < 256; i++)
+        palette.push([act[i * 3], act[i * 3 + 1], act[i * 3 + 2]]);
+    const raw = new Uint8Array(width * height);
+    const memo = new Map();
+    for (let i = 0; i < raw.length; i++) {
+        const at = i << 2;
+        if (keyed && rgba[at + 3] < 128) {
+            raw[i] = 0;
+            continue;
+        }
+        const key = rgba[at] << 16 | rgba[at + 1] << 8 | rgba[at + 2];
+        let index = memo.get(key);
+        if (index === undefined) {
+            index = first + nearest(palette, rgba[at], rgba[at + 1], rgba[at + 2]);
+            memo.set(key, index);
+        }
+        raw[i] = index;
+    }
+    return raw;
+}
+function nearest(palette, r, g, b) {
+    let best = 0, distance = Infinity;
+    for (let index = 0; index < palette.length; index++) {
+        const p = palette[index];
+        const dr = p[0] - r, dg = p[1] - g, db = p[2] - b;
+        const candidate = dr * dr + dg * dg + db * db;
+        if (candidate < distance) {
+            distance = candidate;
+            best = index;
+        }
+    }
+    return best;
 }
 function hasAlpha(rgba) {
     for (let at = 3; at < rgba.length; at += 4)

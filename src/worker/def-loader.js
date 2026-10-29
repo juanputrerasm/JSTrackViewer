@@ -2,6 +2,8 @@ import { resolveAsset } from "./pod-format.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { TR_ANGLE_TO_RAD, defPlacementToEditor, parseDef } from "../vendor/openphotex/index.js";
 import { tvLogicName, tvPowerup, tvWeaponName } from "./tv-tables.js";
+import { hbPowerup } from "../vendor/openphotex/index.js";
+import { binCornerRadius } from "./engine-placement.js";
 
 /*
   Reading the .DEF (definitions, placements, and where a placement stands) is OpenPhotex's:
@@ -21,6 +23,17 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
 
   const boxes = [];
   const models = {};
+  // The engine's radius per simple model, which it writes over the DEF hit radius at load.
+  const radii = new Map();
+  const modelRadius = (def) => {
+    const name = (def.simpleAsset ?? "").toUpperCase();
+    if (!name.endsWith(".BIN")) return null;
+    if (!radii.has(name)) {
+      const simpleEntry = resolveAsset(podIndex, name);
+      radii.set(name, simpleEntry ? binCornerRadius(getBytes(simpleEntry)) : null);
+    }
+    return radii.get(name);
+  };
 
   for (let placementIndex = 0; placementIndex < parsed.placements.length; placementIndex++) {
     const pl = parsed.placements[placementIndex];
@@ -54,7 +67,16 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
       placementIndex,
       strength: pl.strength,
       description: def.description ?? "",
-      ...(origin === "HB" ? {} : tvDefinitionInfo(def)),
+      ...(origin === "HB" ? hbDefinitionInfo(def, modelRadius(def)) : tvDefinitionInfo(def, modelRadius(def))),
+      /*
+        What engine-placement.js needs to settle the placement the way the game does: the
+        header's X, Y, Z offsets (world units), the logic and the model radius.
+      */
+      engine: {
+        offset: [def.groundOffsetX ?? 0, def.groundOffsetY ?? 0, def.groundOffsetZ ?? 0],
+        logic: def.logic ?? -1,
+        modelRadius: modelRadius(def),
+      },
       /*
         A Hellbender placement below zero stands in the cavern under the level, not on the
         ground: 2,862 of the 2,950 such placements in the shipped game land between the cavern
@@ -70,14 +92,36 @@ export function loadDefObjects(podIndex, getBytes, defTitle, gridSize, origin) {
 
 /*
   What an object is, in words, for a TV/F3 placement: its behaviour, weapon and what it drops.
+
+  `hitRadius` is the radius the game uses: it recomputes it at load from the simple model
+  (engine-placement.js binCornerRadius) and writes it over the DEF's value, which is kept as
+  `editorHitRadius`.
 */
-function tvDefinitionInfo(def) {
-  const info = { logic: def.logic, logicName: tvLogicName(def.logic), hitRadius: def.hitRadius };
+function tvDefinitionInfo(def, engineRadius) {
+  const info = {
+    logic: def.logic, logicName: tvLogicName(def.logic),
+    hitRadius: engineRadius ?? def.hitRadius,
+    editorHitRadius: def.hitRadius,
+  };
   if (def.weapon !== undefined) info.weaponName = tvWeaponName(def.weapon);
   if (def.dropChance > 0) {
     info.dropChance = def.dropChance;
     info.dropType = def.dropType;
     info.dropName = def.dropType === -1 ? "Random" : (tvPowerup(def.dropType)?.name ?? "");
+  }
+  return info;
+}
+
+/*
+  The same, for a Hellbender placement: what it drops, named from Hellbender's own 31-type table
+  (HB_POWERUPS), and its hit radius, recomputed the same way (HELLBEND.EXE 0x404d40). Its logic numbers are not TVCAD's, so they are not named.
+*/
+function hbDefinitionInfo(def, engineRadius) {
+  const info = { hitRadius: engineRadius ?? def.hitRadius, editorHitRadius: def.hitRadius };
+  if (def.dropChance > 0) {
+    info.dropChance = def.dropChance;
+    info.dropType = def.dropType;
+    info.dropName = def.dropType === -1 ? "Random" : (hbPowerup(def.dropType)?.name ?? "");
   }
   return info;
 }

@@ -17,6 +17,28 @@
 */
 import { normalizePodPath } from "../pod/paths.js";
 import { LEGACY_ALTITUDE_DIVISOR } from "../terrain/height.js";
+/** The box types Community Patch 3 added: a static light, and a mover with no train sound, horn or light. */
+export const BOX_LIGHT = 12;
+export const BOX_MOVING = 13;
+const LIGHT_DEFAULTS = [64, 8, 1, 1, 1, 0, 6, 125, 10, 3.5, 1, 0];
+/**
+ * The `L` block's data line, read as the engine reads it: tolerantly, missing trailing fields keeping their defaults and
+ * surplus ones ignored; `bright` snapped to 0.25 steps within 0.25..3.75 and `rad` clamped to 4095.
+ */
+export function parseSitLight(line) {
+    const values = [...LIGHT_DEFAULTS];
+    if (line)
+        line.split(",").slice(0, values.length).forEach((part, i) => {
+            const v = Number.parseFloat(part);
+            if (Number.isFinite(v))
+                values[i] = v;
+        });
+    const [rad, hgt, r, g, b, glow, glowRad, coneLen, coneRim, coneBase, bright, aimOff] = values;
+    return {
+        rad: Math.min(4095, Math.max(0, rad)), hgt, color: [r, g, b], glow: Math.trunc(glow), glowRad, coneLen, coneRim, coneBase,
+        bright: Math.min(3.75, Math.max(0.25, Math.round(bright * 4) / 4)), aimOff,
+    };
+}
 /*
   Which game a SIT came from.
 
@@ -56,7 +78,8 @@ export function detectSitOrigin(lines, sitTitle = "") {
   are 4; California and Michigan 5; Gateway, Homestead, Milwaukee, Nazareth and Rio 6; Surfers
   Paradise, Long Beach, Cleveland, Toronto and Vancouver 7.
 */
-const MTM_TRACK_TYPES = { 1: "DRAG", 2: "CIRCUIT", 3: "RALLY", 4: "RUMBLE" };
+// Type 0 is the engine's free roam: no course is followed and no checkpoint tested (MTM1's HILLCLIM.SIT).
+const MTM_TRACK_TYPES = { 0: "FREE ROAM", 1: "DRAG", 2: "CIRCUIT", 3: "RALLY", 4: "RUMBLE" };
 const CPR_TRACK_TYPES = { 4: "ROAD", 5: "SPEEDWAY", 6: "SHORT OVAL", 7: "STREET" };
 export function sitTrackTypeName(code, origin) {
     return (origin === "CPR" ? CPR_TRACK_TYPES : MTM_TRACK_TYPES)[code] ?? "UNKNOWN";
@@ -121,22 +144,35 @@ export function parseMtmSit(input, sitTitle = "") {
         lvlName: normalizePodPath(lines[0]),
         lineCount: lines.length,
         trackName: valueAfter("!Race Track Name")?.trim() ?? null,
+        flyBy: valueAfter("Track Fly-By .AVI file")?.trim() ?? null,
+        sonicTrack: valueAfter("Track Fly-By .AVI file")?.trim() === "Sonic",
         localeName: valueAfter("Race Track Locale")?.trim() ?? null,
+        logoBmp: valueAfter("Track Logo .BMP file")?.trim() || null,
+        mapBmp: valueAfter("Track Map .BMP file")?.trim() || null,
+        descriptionTxt: valueAfter("Track Description .TXT file")?.trim() || null,
+        announcerWav: valueAfter("Track Announcer .WAV file")?.trim() || null,
+        dragParTime: null,
         trackTypeCode: null,
         redbookTrack: null,
         ambientSound: null,
+        trackLength: null,
         weatherMask: null,
         boxes: [],
         primaryCourse: null,
+        topCrush: [],
         extendedCourses: [],
         arena: parseArena(lines),
         backdropModelNames: parseBackdrop(lines),
         trucks: parseTrucks(lines),
+        cylinders: parseCylinders(lines),
+        longitudeLatitude: valueAfter("Track Longtitude, Latitude")?.trim() ?? null,
         warnings: [],
     };
     const trackType = valueAfter("Track Race Type");
     if (trackType !== null)
         sit.trackTypeCode = parseLeadingInt(trackType);
+    if (sit.trackTypeCode === 1 && sit.flyBy !== null && /^\d+(\.\d+)?$/.test(sit.flyBy))
+        sit.dragParTime = Number(sit.flyBy);
     /*
       @Redbook Audio Track: the CD audio track the game plays on this course. MTM1 and CPR have no
       ambient-sound field at all (that line is one of the two MTM2 markers), and carry this instead.
@@ -149,12 +185,14 @@ export function parseMtmSit(input, sitTitle = "") {
         const parts = ambient.split(",");
         if (parts.length >= 3) {
             sit.ambientSound = parseLeadingInt(parts[0]);
+            const length = parseFloat(parts[1]);
+            sit.trackLength = Number.isFinite(length) ? length : null;
             sit.weatherMask = parseLeadingInt(parts[2]);
         }
     }
     parseBoxSection(lines, "*** Ramps ***", sit.boxes, true, sit.warnings);
     parseBoxSection(lines, "*** Boxes ***", sit.boxes, false, sit.warnings);
-    parseTopCrushSection(lines, sit.boxes);
+    parseTopCrushSection(lines, sit.boxes, sit.topCrush);
     parseCourses(lines, sit);
     return sit;
 }
@@ -236,7 +274,25 @@ function parseBoxBlock(lines, blockStart, isRamp) {
     const massIdx = indexOfLinePrefix(lines, "mass", blockStart, endIndex);
     if (massIdx >= 0 && massIdx + 1 < lines.length)
         box.mass = parseFloat(lines[massIdx + 1]) || 0;
-    // Type 10 objects ("moving - use bvel" in Traxx's notes) travel along it: TPARK's train.
+    const soundIdx = indexOfLinePrefix(lines, "@sound effect entries", blockStart, endIndex);
+    if (soundIdx >= 0) {
+        const name = (row) => {
+            const v = (row ?? "").trim();
+            return v === "" || /^null\.wav$/i.test(v) ? null : v;
+        };
+        box.hitSound = name(lines[soundIdx + 1]);
+        box.loopSound = name(lines[soundIdx + 2]);
+    }
+    // The header line starts with the block's letter, "Llight rad,hgt,..."; the values are the line after it.
+    const lightIdx = indexOfLinePrefix(lines, "Llight", blockStart, endIndex);
+    if (lightIdx >= 0 && lightIdx + 1 < endIndex)
+        box.lightFields = lines[lightIdx + 1].split(",").map((v) => parseLeadingFloat(v));
+    if (box.type === BOX_LIGHT)
+        box.light = parseSitLight(lightIdx >= 0 ? lines[lightIdx + 1] : null);
+    const ratesIdx = indexOfLinePrefix(lines, "p,q,r", blockStart, endIndex);
+    if (ratesIdx >= 0 && ratesIdx + 1 < endIndex)
+        box.rates = parseFloatTriplet(lines[ratesIdx + 1]);
+    // Type 10 objects ("moving - use bvel" in Traxx's notes) travel along it: TPARK's train. Type 13 (Community Patch 3) too.
     const bvelIdx = indexOfLinePrefix(lines, "bvel", blockStart, endIndex);
     if (bvelIdx >= 0 && bvelIdx + 1 < lines.length)
         box.bvel = parseFloatTriplet(lines[bvelIdx + 1]);
@@ -250,7 +306,7 @@ function parseBoxBlock(lines, blockStart, isRamp) {
   Each part becomes a box of type BOXTYPE_CRUSH (98, Include/TrackPODBox.h).
 */
 const BOXTYPE_CRUSH = 98;
-function parseTopCrushSection(lines, boxes) {
+function parseTopCrushSection(lines, boxes, cars) {
     const section = indexOfLine(lines, "*** Top Crush ***");
     if (section < 0 || section + 1 >= lines.length)
         return;
@@ -283,9 +339,29 @@ function parseTopCrushSection(lines, boxes) {
             length: 64, width: 64, height: 64, mass: 0, type: BOXTYPE_CRUSH, flags: 0,
             checkpointSequence: -1, crushGroup: i,
         };
+        /*
+          The engine reads the record by position (0x551660): label and value lines after the
+          delimiter, ipos, ipos2, the angles, then either modelName and cabModelName (when the label
+          reads exactly "modelName") or the two size lines, then mass, bvel and p,q,r.
+        */
+        const value = (k) => (start + 2 + 2 * k < blockEnd ? lines[start + 2 + 2 * k].trim() : null);
+        const label = (k) => (start + 1 + 2 * k < blockEnd ? lines[start + 1 + 2 * k].trim() : null);
+        const modelForm = label(3) === "modelName";
+        const sizes = (k) => (modelForm ? null : parseFloatTriplet(value(k) ?? "0,0,0"));
         if (ipos) {
-            boxes.push({ ...common, position: sitWorldTriplet(ipos), positionFt: sitFeetTriplet(ipos), modelName: modelOf(valueAfter("modelName")), crushRole: "body" });
-            boxes.push({ ...common, position: sitWorldTriplet(ipos2), positionFt: sitFeetTriplet(ipos2), modelName: modelOf(valueAfter("cabModelName")), crushRole: "cab" });
+            const car = {
+                positionFt: sitFeetTriplet(ipos), position2Ft: sitFeetTriplet(ipos2),
+                theta: angles[0], phi: angles[1], psi: angles[2],
+                modelName: modelForm ? modelOf(value(3)) : "", cabModelName: modelForm ? modelOf(value(4)) : "",
+                sizeFt: sizes(3), size2Ft: sizes(4),
+                mass: parseLeadingFloat(value(5) ?? "0"),
+                bvel: parseFloatTriplet(value(6) ?? "0,0,0"),
+                rates: parseFloatTriplet(value(7) ?? "0,0,0"),
+            };
+            cars.push(car);
+            const sized = (sz) => (sz ? { length: sz[0], width: sz[1], height: sz[2], sizeFt: sz } : {});
+            boxes.push({ ...common, ...sized(car.sizeFt), mass: car.mass, position: sitWorldTriplet(ipos), positionFt: car.positionFt, modelName: modelOf(valueAfter("modelName")), crushRole: "body" });
+            boxes.push({ ...common, ...sized(car.size2Ft), mass: car.mass, position: sitWorldTriplet(ipos2), positionFt: car.position2Ft, modelName: modelOf(valueAfter("cabModelName")), crushRole: "cab" });
         }
         cursor = blockEnd;
     }
@@ -307,6 +383,7 @@ function parseCourses(lines, sit) {
                 direction: c + 1 < lines.length ? parseLeadingInt(lines[c + 1].split(",")[1]) : 0,
             };
             const segCount = c + 1 < lines.length ? parseLeadingInt(lines[c + 1]) : 0;
+            course.slot = i;
             c = parseCourseBlocks(lines, c + 2, segCount, course);
             if (course.segments.length)
                 sit.extendedCourses.push(course);
@@ -375,6 +452,15 @@ function parseCourseBlocks(lines, startCursor, count, course) {
         cursor++;
     return cursor;
 }
+function parseCylinders(lines) {
+    const section = indexOfLine(lines, "*** Cylinders ***");
+    if (section < 0 || section + 1 >= lines.length)
+        return null;
+    let end = section + 2;
+    while (end < lines.length && !lines[end].startsWith("*** "))
+        end++;
+    return { count: parseLeadingInt(lines[section + 1]), lines: lines.slice(section + 2, end) };
+}
 /*
   *** Stadium *** - the arena. An arena track carries its model here rather than in the Backdrop
   block, and the writer then emits backdropCount 0 (TrackPODFile.cpp:5288-5318). Two line
@@ -400,7 +486,7 @@ function parseArena(lines) {
         const modelName = normalizePodPath(fields[5]);
         if (!modelName)
             return null;
-        return { modelName, x: parseLeadingInt(fields[1]), y: parseLeadingInt(fields[2]), sx: parseLeadingInt(fields[3]), sy: parseLeadingInt(fields[4]) };
+        return { modelName, x: parseLeadingInt(fields[1]), y: parseLeadingInt(fields[2]), sx: parseLeadingInt(fields[3]), sy: parseLeadingInt(fields[4]), placed: true };
     }
     if (header.startsWith("stadiumFlag")) {
         if (fields.length < 2)
@@ -408,7 +494,7 @@ function parseArena(lines) {
         const modelName = normalizePodPath(fields[1]);
         if (!modelName)
             return null;
-        return { modelName, x: 0, y: 0, sx: 0, sy: 0 };
+        return { modelName, x: 0, y: 0, sx: 0, sy: 0, placed: false };
     }
     return null;
 }
@@ -468,6 +554,13 @@ function parseTruckBlock(lines, startIdx) {
         truck.phi = a[1];
         truck.psi = a[2];
     }
+    // Within this record: the next one starts at a delimiter or a section header.
+    let end = startIdx;
+    while (end < lines.length && !lines[end].startsWith("****"))
+        end++;
+    const followIdx = indexOfLinePrefix(lines, "!ap.courseToFollow", startIdx, end);
+    if (followIdx >= 0 && followIdx + 1 < lines.length)
+        truck.courseToFollow = parseLeadingInt(lines[followIdx + 1]);
     return truck;
 }
 /** Parse an MTM-family .LVL. Returns null when it has fewer than six lines. */
@@ -480,13 +573,21 @@ export function parseMtmLvl(input) {
     const lvl = {
         lineCount: lines.length,
         levelType: parseLeadingInt(lines[0]),
+        textName: at(1),
         rawName: normalizePodPath(lines[2]),
         clrName: normalizePodPath(lines[3]),
         actName: normalizePodPath(lines[4]),
         texName: normalizePodPath(lines[5]),
+        zeroRawName: at(6),
+        pupName: at(7),
+        aniName: at(8),
+        tdfName: at(9),
         skyRawName: skyRaw && !skyRaw.startsWith("NULL") && skyRaw.endsWith(".RAW") ? skyRaw : null,
         skyActName: lines.length > 11 ? normalizePodPath(lines[11]) : null,
+        defName: at(12),
+        navName: at(13),
         musicName: at(14),
+        fogName: at(15),
         lteName: lines.length > 16 ? normalizePodPath(lines[16]) : null,
         sunVector: lines.length > 17 ? parseIntTriplet(lines[17]) : null,
         shadowIntensity: lines.length > 18 ? parseLeadingInt(lines[18]) : null,

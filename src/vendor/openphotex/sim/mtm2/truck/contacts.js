@@ -7,7 +7,7 @@
   The game's two-contact split is the reverse of the lever rule, and its sliding friction uses
   |vt + v| rather than |vt|; both are kept (§14.12).
 */
-import { weatherGrip } from "../constants.js";
+import { groundWeatherGrip } from "../world/ground.js";
 import { surfaceMu, surfaceType } from "../world/surface.js";
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -44,8 +44,10 @@ function edgeCrossing(from, q, edgeFoot, u) {
         along = -along;
     return { qx, x: add(edgeFoot, scale(u, along)), fromQ: len(sub(q, from)) };
 }
-export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
+export function solveHullContacts(s, inertia, ground, external, mass, weight, dt, friction) {
     const out = { force: [0, 0, 0], moment: [0, 0, 0], count: 0 };
+    // This step's contact force only: a step with no contact has none, not the last one met.
+    s.impactForce = 0;
     if (s.contactCount === 0)
         return out;
     const m = s.matrix;
@@ -53,10 +55,11 @@ export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
     const toBody = (v) => [m[0] * v[0] + m[3] * v[1] + m[6] * v[2], m[1] * v[0] + m[4] * v[1] + m[7] * v[2], m[2] * v[0] + m[5] * v[1] + m[8] * v[2]];
     const pos = [s.pos[0], s.pos[1], s.pos[2]];
     const all = [];
-    for (let j = 0; j < 16; j++) {
+    for (let j = 0; j < s.depths.length; j++) {
         if (!(s.depths[j] >= -0.25))
             continue;
-        const body = [s.points[j * 3], s.points[j * 3 + 1], s.points[j * 3 + 2]];
+        const cp = s.contactPoints ?? s.points;
+        const body = [cp[j * 3], cp[j * 3 + 1], cp[j * 3 + 2]];
         const normal = [s.normals[j * 3], s.normals[j * 3 + 1], s.normals[j * 3 + 2]];
         const world = add(add(pos, toWorld(body)), scale(normal, s.depths[j]));
         all.push({ body, world, normal });
@@ -68,25 +71,32 @@ export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
     const G = toWorld(external);
     // Support shares (§14.12).
     let planeN;
-    let shares;
+    let shares = [1];
     const k = used.length;
     const [c1, c2, c3, c4] = used;
     if (k === 1) {
         planeN = c1.normal;
-        shares = [1];
     }
     else if (k === 2) {
         planeN = unit(add(c1.normal, c2.normal));
+    }
+    else {
+        planeN = unit(cross(sub(c2.world, c1.world), sub(c3.world, c1.world)));
+        if (planeN[1] < 0)
+            planeN = scale(planeN, -1);
+    }
+    if (k >= 2 && planeN[1] === 0) {
+        // A vertical plane has no point below the origin: the game gives every contact nothing.
+        shares = new Array(k).fill(0);
+    }
+    else if (k === 2) {
         const q = originOnPlane(pos, c1.world, planeN);
         const u = unit(sub(c2.world, c1.world));
         const a = Math.abs(dot(u, sub(q, c1.world)));
         const b = Math.abs(len(sub(c2.world, c1.world)) - a);
         shares = a + b === 0 ? [0.5, 0.5] : [a / (a + b), b / (a + b)];
     }
-    else {
-        planeN = unit(cross(sub(c2.world, c1.world), sub(c3.world, c1.world)));
-        if (planeN[1] < 0)
-            planeN = scale(planeN, -1);
+    else if (k >= 3) {
         const q = originOnPlane(pos, c1.world, planeN);
         const e12 = sub(c2.world, c1.world);
         const u12 = unit(e12), l12 = len(e12);
@@ -112,11 +122,11 @@ export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
     const N0 = Math.max(0, -dot(G, planeN));
     const N = shares.map((sh) => N0 * sh);
     // Recovery (§14.12).
-    const [pRoll, qPitch, rYaw] = s.rates;
+    const pRoll = s.rates[0], qPitch = s.rates[1], rYaw = s.rates[2];
     const omega = [qPitch, rYaw, pRoll];
     const speed = Math.hypot(s.bvel[0], s.bvel[1], s.bvel[2]);
     const vScale = Math.min(speed / 3, 1) * 0.75;
-    const [I1, I2, I3] = p.inertia;
+    const I1 = inertia[0], I2 = inertia[1], I3 = inertia[2];
     const sumN = () => N.reduce((a, n) => a + Math.abs(n), 0);
     const recovery = (c, share, total) => {
         const vp = scale(add([s.bvel[0], s.bvel[1], s.bvel[2]], cross(omega, c.body)), vScale);
@@ -150,7 +160,7 @@ export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
         apply(used[i], scale(used[i].normal, N[i]));
     // Friction (§14.12).
     const total = sumN();
-    const weather = weatherGrip(ground.weather);
+    const weather = groundWeatherGrip(ground);
     for (let i = 0; i < k; i++) {
         const c = used[i];
         const share = total !== 0 ? Math.abs(N[i]) / total : 1;
@@ -162,7 +172,9 @@ export function solveHullContacts(s, p, ground, external, mass, weight, dt) {
         const u = add(vt, v);
         // The game samples the surface at the truck position plus the unrotated body point.
         const type = surfaceType(ground.surface(pos[0] + c.body[0], pos[1] + c.body[1], pos[2] + c.body[2]));
-        let limit = N[i] * 0.5 * surfaceMu(type) * weather;
+        let limit = friction
+            ? N[i] * friction.factor * friction.mu(type) * weather
+            : N[i] * 0.5 * surfaceMu(type) * weather;
         if (limit < 0)
             limit = 0;
         const sp = len(u);

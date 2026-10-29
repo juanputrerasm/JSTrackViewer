@@ -246,6 +246,9 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     // the same way the mesh did.
     gridSize, cellSize, heightScale: hs, heightDivisor, heightUnitScale,
     cellSplit: checkerboard ? "checkerboard" : "fixed",
+    // Drive mode needs the same holes the renderer used. Copy it because the parsed TrackDoc
+    // remains worker-owned while the mesh buffers below are transferred to the main thread.
+    cellMask: cellMask ? cellMask.slice().buffer : null,
     positions: positions.buffer,
     normals: normals.buffer,
     uvs: uvs.buffer,

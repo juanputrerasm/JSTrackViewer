@@ -3,6 +3,8 @@ import { findAllTruckManifests } from "./truck/pod-lookup.js";
 import { listTrackChoicesAsync } from "./track-loader.js";
 import { collectMtmCheckpoints } from "./checkpoint-list.js";
 import { HB_UNDERGROUND_BIAS } from "./hb-underground.js";
+import { buildTvChambers } from "./tv-chambers.js";
+import { buildTunnelMesh } from "./tunnel-builder.js";
 import { createPaletteResolver, findHdSibling } from "./palette-resolver.js";
 import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
@@ -303,7 +305,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   for (const tex of doc.textures ?? []) {
     // An HD slot needs no palette; only the 8-bit path consults one.
     if (!tex?.data || tex.actData || tex.hdImage) continue;
-    tex.actData = palettes.paletteFor(tex.name, null, "terrain") ?? undefined;
+    tex.actData = palettes.paletteFor(tex.name, tex.rawEntry, "terrain") ?? undefined;
   }
   for (const tex of doc.raceTrackTextures ?? []) {
     if (!tex?.data || tex.actData) continue;
@@ -431,6 +433,16 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   let terrainMesh = null;
   let undergroundFloor = null;
   let undergroundCeiling = null;
+  let chamberCeiling = null;
+  let rockCells = null;
+  // A TV/F3 tunnel level's tube; see tunnel-builder.js.
+  const tunnelInterior = doc.tunnelInterior
+    ? buildTunnelMesh(doc.tunnelInterior, doc.textures, doc.palette, terrainHeightScale,
+      (doc.terrain.gridSize ?? 256) * (doc.terrain.cellSize ?? CELL_SIZE))
+    : null;
+  // Terminal Velocity and Fury3 chambers; see tv-chambers.js.
+  const tvFamily = doc.origin === "TV" || doc.origin === "F3" || doc.origin === "TV/F3";
+  const chambers = tvFamily && doc.terrain.rawData ? buildTvChambers(doc.terrain) : null;
   if (doc.terrain.rawData) {
     /*
       Hellbender draws three surfaces off one texture list: the ground, and the floor and
@@ -439,7 +451,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       cannot be handed to the main thread twice.
     */
     const { buildSharedAtlas } = await import("./terrain-builder.js");
-    const sharedAtlas = doc.underground
+    const sharedAtlas = doc.underground || chambers?.mask
       ? buildSharedAtlas(doc.textures, doc.palette, doc.origin)
       : null;
 
@@ -455,15 +467,38 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
         rawBytesPerCell: 1,
         clrBytesPerCell: 2,
         heightOffset: HB_UNDERGROUND_BIAS,
-        cellMask: cavern.mask,
+        // The cavern floor and ceiling split like the surface (HELLBEND.EXE 0x41bda0).
+        cellSplit: doc.terrain.cellSplit ?? "fixed",
         reusesAtlas: true,
       };
       undergroundFloor = buildTerrainMesh(
-        { ...base, rawData: cavern.floorHeights, clrData: cavern.floorClr },
+        { ...base, rawData: cavern.floorHeights, clrData: cavern.floorClr,
+          cellMask: cavern.floorMask ?? cavern.mask },
         doc.palette, doc.textures, terrainHeightScale, doc.origin, null, sharedAtlas);
       undergroundCeiling = buildTerrainMesh(
-        { ...base, rawData: cavern.ceilingHeights, clrData: cavern.ceilingClr, faceDown: true },
+        { ...base, rawData: cavern.ceilingHeights, clrData: cavern.ceilingClr,
+          cellMask: cavern.ceilingMask ?? cavern.mask, faceDown: true },
         doc.palette, doc.textures, terrainHeightScale, doc.origin, null, sharedAtlas);
+    }
+
+    if (chambers) {
+      rockCells = chambers.rockCells.buffer;
+      if (chambers.mask) {
+        chamberCeiling = buildTerrainMesh({
+          gridSize: doc.terrain.gridSize,
+          cellSize: doc.terrain.cellSize,
+          rawData: chambers.ceilingHeights,
+          rawBytesPerCell: 2,
+          heightDivisor: 1,
+          heightUnitScale: 1,
+          clrData: chambers.ceilingClr,
+          clrBytesPerCell: 2,
+          cellMask: chambers.mask,
+          cellSplit: doc.terrain.cellSplit ?? "fixed",
+          faceDown: true,
+          reusesAtlas: true,
+        }, doc.palette, doc.textures, terrainHeightScale, doc.origin, null, sharedAtlas);
+      }
     }
   }
 
@@ -572,6 +607,20 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       heightDivisor: doc.terrain.heightDivisor ?? null,
       heightUnitScale: doc.terrain.heightUnitScale ?? 1,
       cellSplit: doc.terrain.cellSplit ?? "fixed",
+      // TV/F3 rock tops (all four corners at 255), which the game never draws; see tv-chambers.js.
+      rockCells,
+      // The .TEX names in atlas slot order, for the Textures box (ui/textures-box.js).
+      textureNames: (doc.textures ?? []).map((t) => t?.name ?? ""),
+      /*
+        Each slot's ground value for the Textures box, `type * 100 + depth`: the .TTY's for the MTM,
+        CPR and TV families (Traxx's table), the .TEX record's first number for 4x4 Evolution
+        (`param0`, the same encoding plus type 14, train track). Null where the track says nothing,
+        which is every Terminal Velocity, Fury3 and Hellbender level: they ship no .TTY.
+        Evo's second number, the vegetation class, travels beside it.
+      */
+      textureGround: (doc.textures ?? []).map((t) => (Number.isFinite(t?.param0) ? t.param0
+        : t?.groundStated ? (t.type ?? 0) * 100 + (t.depth ?? 0) : null)),
+      textureVegetation: (doc.textures ?? []).map((t) => (Number.isFinite(t?.param1) ? t.param1 : null)),
     } : null,
     skyTexture: skyTextureDecoded,
     // MTM1's own sky, the same flat ceiling as TV/F3; see parseLvlSection in sit-parser.js.
@@ -589,11 +638,18 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     groundBoxes: doc.groundBoxes,
     undergroundFloor,
     undergroundCeiling,
+    chamberCeiling,
+    tunnelInterior,
+    // A tunnel level opens inside its tube (tunnel-builder.js); nav.js reads startView.
+    startView: tunnelInterior?.startView ?? null,
     undergroundBoxes: doc.undergroundBoxes ?? [],
+    undergroundSunlit: doc.underground?.sunlit === true,
     briefing: doc.briefing ?? null,
     checkpoints,
     navPoints: doc.navPoints ?? [],
     tunnels: doc.tunnels ?? [],
+    // Hellbender's moving terrain, from its .QKE; see quakeMarkers in scene.js.
+    quakes: doc.quakes ?? null,
     powerups: doc.powerups ?? [],
     modelTextureAnimations,
     raceTrackTextures,
@@ -722,8 +778,20 @@ function readTxvRecord(podIndex, getBytes, choice) {
   }
 }
 
+/*
+  Scene units per height step, per game.
+
+  The TV-family engines are isotropic: one cell is 2^20 world units in Terminal Velocity and
+  Fury3 and 2^19 in Hellbender, one height step 2^15 in both, and models use the same world
+  units on every axis (docs/TV_GAME_EXE_ANALYSIS.md 3.5, docs/HELLBENDER_EXE_ANALYSIS.md 2). At
+  64 scene units per cell that is 2 units per step for TV/F3 and 4 for Hellbender, which draws
+  terrain, objects, ground boxes and caverns in their true proportions. The MTM family keeps
+  the requested Traxx scale, whose models carry the matching 0.75 stretch.
+*/
 function effectiveTerrainHeightScale(origin, requestedHeightScale) {
-  return origin === "HB" ? 3 : (requestedHeightScale ?? 3);
+  if (origin === "HB") return 4;
+  if (origin === "TV" || origin === "F3" || origin === "TV/F3") return 2;
+  return requestedHeightScale ?? 3;
 }
 
 /*

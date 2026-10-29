@@ -147,6 +147,9 @@ export function updateStuck(s, p, ground, rc, speed, contacts, atRest, dt) {
     return atRest ? atRestAction(s, p, ground, rc, contacts) : null;
 }
 function atRestAction(s, p, ground, rc, contacts) {
+    // The caller (0x46da30) acts only in the racing state (4), not through the countdown.
+    if (!rc.racing)
+        return null;
     if (rc.player)
         return resetTruck(s, rc, contacts) ? "reset" : null;
     if (rc.difficulty < DIFFICULTY.PROFESSIONAL || rc.proLift)

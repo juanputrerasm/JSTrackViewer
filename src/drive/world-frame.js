@@ -68,6 +68,22 @@ export function createWorldFrame(trackData) {
   const raw = terrain?.rawData
     ? (terrain.rawData instanceof Uint8Array ? terrain.rawData : new Uint8Array(terrain.rawData))
     : null;
+  const cellMask = terrain?.cellMask
+    ? (terrain.cellMask instanceof Uint8Array ? terrain.cellMask : new Uint8Array(terrain.cellMask))
+    : null;
+
+  /** Whether the rendered terrain has a quad under this point. */
+  function hasCellAtFeet(xFt, zFt) {
+    if (!cellMask) return true;
+    const gx = xFt * UNITS_PER_FOOT_H / cellSize;
+    const gz = gridSize - zFt * UNITS_PER_FOOT_H / cellSize;
+    // A point on the outer border belongs to the final cell, just as the mesh's final edge does.
+    let cx = Math.floor(gx), cz = Math.floor(gz);
+    if (cx === gridSize) cx--;
+    if (cz === gridSize) cz--;
+    if (cx < 0 || cz < 0 || cx >= gridSize || cz >= gridSize) return false;
+    return cellMask[cx + cz * gridSize] !== 0;
+  }
 
   /**
    * One raw sample, in height steps, with its fraction: the same shared decode the mesh
@@ -89,7 +105,7 @@ export function createWorldFrame(trackData) {
 
   /** The ground type under a point, as its .TTY value; 0 (Default) off the grid or untyped. */
   function surfaceAtFeet(xFt, zFt) {
-    if (!surface) return 0;
+    if (!surface || !hasCellAtFeet(xFt, zFt)) return 0;
     const cx = Math.floor(xFt * UNITS_PER_FOOT_H / cellSize);
     // The same cell convention as terrainHeightAtFeet: row cz is laid at (gridSize - cz).
     const cz = Math.floor(gridSize - zFt * UNITS_PER_FOOT_H / cellSize);
@@ -218,13 +234,22 @@ export function createWorldFrame(trackData) {
   const road = (trackData?.raceTrackSurfaces?.length ?? 0) >= 2 ? createRaceTrackSupport(trackData) : null;
   const roadTopAt = (xFt, zFt) => (road ? road.supportAt(xFt, zFt, Infinity) : null);
 
-  function heightAtFeet(xFt, zFt) {
+  /** Effective terrain height, or null where the terrain mesh has no quad. */
+  function terrainAtFeet(xFt, zFt) {
+    if (!hasCellAtFeet(xFt, zFt)) return null;
     const ground = terrainHeightAtFeet(xFt, zFt);
     const top = roadTopAt(xFt, zFt);
     return top !== null && ground > top - ROAD_GROUND_CLEARANCE_FT ? top - ROAD_GROUND_CLEARANCE_FT : ground;
   }
 
+  // Kept numeric for cameras, map markers and older callers. Physics uses terrainAtFeet so
+  // zero altitude and absent terrain remain different things.
+  function heightAtFeet(xFt, zFt) {
+    return terrainAtFeet(xFt, zFt) ?? 0;
+  }
+
   function normalAtFeet(xFt, zFt) {
+    if (!hasCellAtFeet(xFt, zFt)) return { x: 0, y: 1, z: 0 };
     const top = roadTopAt(xFt, zFt);
     if (top !== null && terrainHeightAtFeet(xFt, zFt) > top - ROAD_GROUND_CLEARANCE_FT) return { x: 0, y: 1, z: 0 };
     return terrainNormalAtFeet(xFt, zFt);
@@ -242,6 +267,7 @@ export function createWorldFrame(trackData) {
     hasTerrain: !!raw || !!feetGrid,
 
     heightAtFeet,
+    terrainAtFeet,
     normalAtFeet,
     surfaceAtFeet,
 

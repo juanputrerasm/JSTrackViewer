@@ -1,0 +1,13 @@
+JSTrackViewer 1.1.0
+Changes since 1.0.0
+
+- Added a Models window with 3D previews, model statistics, and controls to find and step through placed objects.
+- Added a Textures window with adjustable thumbnails, texture dimensions, ground types and depths, and road surface details.
+- Test Drive now uses the OpenPhotex MTM2 simulation shared with OpenMTM2, including solid axles, suspension, tire grip, gearing, and air and water drag.
+- Improved truck wheel and axle animation, tire sizing, ground-box and scenery collisions, analog gamepad input, and truck switching.
+- Added explorable Terminal Velocity and Fury3 tunnel interiors, listed separately after surface levels, with the camera starting inside the entrance.
+- Added Terminal Velocity and Fury3 chamber ceilings and a Rock tops toggle for viewing rooms inside solid terrain.
+- Corrected terrain proportions, triangle sampling, and object placement in Terminal Velocity, Fury3, and Hellbender.
+- Fixed Hellbender cavern heights, surface openings, underground visibility and lighting, and texture palette selection.
+- Added Hellbender moving-terrain markers with height ranges, named powerups, automatic navigation-point labels, and warnings for missing tunnel levels. Moving terrain is marked but not animated.
+- Updated the shared OpenPhotex library and expanded regression tests and documentation for driving physics and game-specific level behavior.

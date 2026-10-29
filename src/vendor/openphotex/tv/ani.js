@@ -81,3 +81,15 @@ export function parseAnimations(bytes) {
     }
     return animations;
 }
+/**
+ * A .ANI: the count, then for each animation its base texture, `frameCount,rate` and the frame
+ * names, CRLF. The same layout MTM2 levels use (`DATA\\<stem>.ANI`).
+ */
+export function writeAnimations(animations) {
+    const lines = [String(animations.length)];
+    for (const animation of animations) {
+        lines.push(animation.baseName, `${animation.frames.length},${Math.trunc(animation.rate)}`, ...animation.frames);
+    }
+    const text = lines.map((line) => `${line}\r\n`).join("");
+    return Uint8Array.from(text, (c) => c.charCodeAt(0) & 0xff);
+}

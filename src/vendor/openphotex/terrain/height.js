@@ -98,3 +98,37 @@ export function heightAtCell(terrain, raw, cx, cz) {
     const bytesPerCell = terrain?.rawBytesPerCell ?? 1;
     return decodeHeightSample(raw, (x + z * gridSize) * bytesPerCell, bytesPerCell, terrain?.heightDivisor ?? null, terrain?.heightUnitScale ?? 1);
 }
+/**
+ * The height at fractions (fx, fz) in [0, 1] of a cell with corner heights h00 (cx, cz),
+ * h10 (cx + 1, cz), h11 (cx + 1, cz + 1) and h01 (cx, cz + 1), on its triangle. `otherDiagonal`
+ * is true for a cell split from (cx + 1, cz) to (cx, cz + 1).
+ */
+export function cellTriangleHeight(h00, h10, h11, h01, fx, fz, otherDiagonal) {
+    if (!otherDiagonal) {
+        return fx >= fz
+            ? h00 + fx * (h10 - h00) + fz * (h11 - h10)
+            : h00 + fz * (h01 - h00) + fx * (h11 - h01);
+    }
+    return fx + fz <= 1
+        ? h00 + fx * (h10 - h00) + fz * (h01 - h00)
+        : h11 + (1 - fx) * (h01 - h11) + (1 - fz) * (h10 - h11);
+}
+/** True when cell (cx, cz) is split along (cx + 1, cz) to (cx, cz + 1) under `split`. */
+export function cellUsesOtherDiagonal(cx, cz, split) {
+    return split === "checkerboard" && ((cx + cz) & 1) === 1;
+}
+/**
+ * The legacy height at a point (x, z) in cells, on the triangles of its cell. Corners are
+ * clamped to the grid, as heightAtCell does.
+ */
+export function heightAtPoint(terrain, raw, x, z, split = "fixed") {
+    if (!raw)
+        return 0;
+    const cx = Math.floor(x);
+    const cz = Math.floor(z);
+    const h00 = heightAtCell(terrain, raw, cx, cz);
+    const h10 = heightAtCell(terrain, raw, cx + 1, cz);
+    const h11 = heightAtCell(terrain, raw, cx + 1, cz + 1);
+    const h01 = heightAtCell(terrain, raw, cx, cz + 1);
+    return cellTriangleHeight(h00, h10, h11, h01, x - cx, z - cz, cellUsesOtherDiagonal(cx, cz, split));
+}

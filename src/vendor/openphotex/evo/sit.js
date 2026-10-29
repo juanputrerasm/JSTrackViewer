@@ -45,6 +45,7 @@ export function parseEvoSit(bytes, sourceName) {
         boxes: [],
         vehicles: [],
         courses: [],
+        paths: [],
         warnings: [],
     };
     const boxesAt = lines.findIndex((line) => line.trim() === "*** Boxes ***");
@@ -64,7 +65,75 @@ export function parseEvoSit(bytes, sourceName) {
     const courseAt = lines.findIndex((line) => line.trim() === "*** Course ***");
     if (courseAt >= 0)
         sit.courses = parseCourses(lines, courseAt);
+    const pathsAt = lines.findIndex((line) => line.trim() === "#*** Paths ***");
+    if (pathsAt >= 0)
+        sit.paths = parsePaths(lines, pathsAt);
     return sit;
+}
+/*
+  The object paths: `pathCount`, then per path `Path N of M` and label/value lines (pointCount, type, direction, cycles,
+  time, pauseTimeElapsed, t, tension, stopFlag, collisionType, object), then per point `Point N of M` and its own (wPos,
+  wOrient, vel, time, pauseTime, segmentFlag, orientFlag, velFlag, followTerrainFlag, animationFlag, lightFlag, AIFlag,
+  pointWavName, continuousWavName). The game reads the integers with %d and the rest with %f (0x4f2840); an unused path
+  (object 0) may carry anything in its integers. `wOrient` is the boxes' order (pitch, roll, heading).
+*/
+const PATH_INTS = new Set(["pointCount", "type", "direction", "cycles", "stopFlag", "collisionType", "object"]);
+const POINT_INTS = new Set(["segmentFlag", "orientFlag", "velFlag", "followTerrainFlag", "animationFlag", "lightFlag", "AIFlag"]);
+function parsePaths(lines, start) {
+    const paths = [];
+    let path = null;
+    let point = null;
+    const int = (value) => { const n = Number.parseInt(value.trim(), 10); return Number.isFinite(n) ? n : 0; };
+    const real = (value) => { const n = Number.parseFloat(value.trim()); return Number.isFinite(n) ? n : 0; };
+    const wav = (value) => { const v = value.trim(); return /^NULL\.WAV$/i.test(v) ? "" : v; };
+    for (let i = start + 1; i < lines.length; i++) {
+        const label = evoLabel(lines[i]);
+        if (!label || label === "pathCount") {
+            if (label === "pathCount")
+                i++;
+            continue;
+        }
+        if (/^Path \d+ of \d+/.test(label)) {
+            path = { type: 0, direction: 0, cycles: 0, time: 0, pauseTimeElapsed: 0, t: 0, tension: 0, stopFlag: 0, collisionType: 0, object: 0, points: [] };
+            paths.push(path);
+            point = null;
+            continue;
+        }
+        if (/^Point \d+ of \d+/.test(label)) {
+            if (!path)
+                continue;
+            point = {
+                position: [0, 0, 0], orient: [0, 0, 0], vel: 0, time: 0, pauseTime: 0, segmentFlag: 0, orientFlag: 0, velFlag: 0,
+                followTerrainFlag: 0, animationFlag: 0, lightFlag: 0, AIFlag: 0, pointWavName: "", continuousWavName: "",
+            };
+            path.points.push(point);
+            continue;
+        }
+        if (!path)
+            continue;
+        const value = lines[i + 1] ?? "";
+        i++;
+        if (point) {
+            if (label === "wPos")
+                point.position = triple(value);
+            else if (label === "wOrient")
+                point.orient = triple(value);
+            else if (label === "vel" || label === "time" || label === "pauseTime")
+                point[label] = real(value);
+            else if (POINT_INTS.has(label))
+                point[label] = int(value);
+            else if (label === "pointWavName" || label === "continuousWavName")
+                point[label] = wav(value);
+        }
+        else if (label === "pointCount") {
+            // The points follow; their count is the list's own.
+        }
+        else if (PATH_INTS.has(label))
+            path[label] = int(value);
+        else if (label === "time" || label === "pauseTimeElapsed" || label === "t" || label === "tension")
+            path[label] = real(value);
+    }
+    return paths;
 }
 /*
   `*** Vehicles ***`: the starting grid.

@@ -144,9 +144,12 @@ export function cprTextureU(fixed) {
   art\catch3d.raw and art\catch.raw directly, both ship in STARTUP.POD, and neither ever
   appears in a .TTX. The fence is implied by the wall type (see CPR_CATCH_FENCE_NAMES).
 
-  The guide's only statement about tree walls is that one is "about three times higher than
-  the tall wall", hence 9 units against the tall wall's 3.
+  A tree "wall" is a card 60 ft tall (CART.EXE 0x449de0, 0x3c of the 256ths of a 256 ft unit):
+  15 panels of 4 ft. It is never solid (makeWallList 0x44be30 leaves types 0 and 7 out; OpenMTM2
+  docs/CPR_PHYSICS.md 10.1, 10.3).
 */
+/** The tree wall type: a 60 ft card, never solid. */
+export const CPR_TREE_WALL = 7;
 export const CPR_WALL_LAYERS = {
     1: [{ part: 0, units: 1 }],
     2: [{ part: 0, units: 1 }, { part: 1, units: 1 }, { part: 2, units: 1 }],
@@ -154,7 +157,7 @@ export const CPR_WALL_LAYERS = {
     4: [{ part: 0, units: 1 }, { part: 1, units: 1 }, { part: 2, units: 1 }, { part: 3, units: 1 }],
     5: [{ part: 0, units: 1 }, { fence: true, units: 2 }, { part: 1, units: 1 }],
     6: [{ part: 0, units: 1 }, { part: 1, units: 1 }],
-    7: [{ part: 0, units: 9 }],
+    7: [{ part: 0, units: 15 }],
 };
 /*
   The catch fence texture, in preference order. CATCH3D is the 256x256 hardware-accelerated
@@ -397,6 +400,12 @@ function parseSurface(lines, cursor) {
     if (lines[index] !== "wallType")
         return null;
     surface.wallTypes = readIntList(lines, index + 1, pointCount);
+    // The game's reader (CART.EXE 0x4473b0) keeps only a tree on the two tree points (2, "Left tree", and
+    // pointCount - 3, "Right tree"): any other wall type there is cleared.
+    for (const tree of [2, pointCount - 3]) {
+        if (tree >= 0 && tree < surface.wallTypes.length && surface.wallTypes[tree] !== CPR_TREE_WALL)
+            surface.wallTypes[tree] = 0;
+    }
     index += 1 + pointCount;
     if (lines[index] !== "wallTexture")
         return null;

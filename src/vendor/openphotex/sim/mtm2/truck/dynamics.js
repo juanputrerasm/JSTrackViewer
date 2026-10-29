@@ -9,7 +9,7 @@
 import { DIFFICULTY, ENGINE, G, INV_G, LATERAL_TABLE, MPH_10, TRUCK } from "../constants.js";
 import { eulerToMatrix, matrixToEuler, wrapPi, wrapTwoPi } from "../math.js";
 import { cutFactor, surfaceMu, surfaceSinkFt, surfaceType } from "../world/surface.js";
-import { weatherGrip } from "../constants.js";
+import { groundWeatherGrip } from "../world/ground.js";
 import { deliveredTorque, gearRatio, stepGearbox } from "./drivetrain.js";
 import { solveHullContacts } from "./contacts.js";
 import { fluidAreas } from "./water-drag.js";
@@ -63,13 +63,13 @@ export function tireGeometry(s, p, i) {
     t.velocity[2] = vz;
 }
 /** The hold rule shared by both tire forces (§14.4). */
-function holdRule(current, slope, hold) {
+export function holdRule(current, slope, hold) {
     const f = slope + hold;
     if (hold === 0)
         return Math.abs(f) <= Math.abs(current) && current !== 0 ? f : current;
     return hold > 0 ? Math.min(current, f) : Math.max(current, f);
 }
-function tireFrame(s, t, steer) {
+export function tireFrame(s, t, steer) {
     const nb = toBody(s.matrix, t.normal[0], t.normal[1], t.normal[2]);
     t.pitchG = Math.atan2(nb[2], nb[1]);
     t.rollG = Math.atan2(nb[0], nb[1]);
@@ -92,6 +92,7 @@ export function stepTruck(s, p, ctx, dt) {
     }
     const m = s.matrix;
     eulerToMatrix(s.euler[0], s.euler[1], s.euler[2], m);
+    s.prevMatrix.set(m);
     const c = s.controls;
     for (let i = 0; i < 4; i++)
         tireGeometry(s, p, i);
@@ -111,7 +112,7 @@ export function stepTruck(s, p, ctx, dt) {
         force[k] += drag[k];
     }
     // Tires (§14.3-§14.6).
-    const weather = weatherGrip(ctx.ground.weather);
+    const weather = groundWeatherGrip(ctx.ground);
     for (let i = 0; i < 4; i++) {
         const t = s.tires[i];
         const axleIdx = i < 2 ? 0 : 1;
@@ -120,12 +121,16 @@ export function stepTruck(s, p, ctx, dt) {
         if (t.onGround) {
             const nLoad = t.load * (t.normal[0] * m[1] + t.normal[1] * m[4] + t.normal[2] * m[7]);
             const w = toWorld(m, t.hub[0], t.hub[1], t.hub[2]);
-            const type = surfaceType(ctx.ground.surface(s.pos[0] + w[0], s.pos[1] + w[1] + 100, s.pos[2] + w[2]));
-            t.grip = gripK * surfaceMu(type) * weather * cutFactor(type, p.tireCut) * nLoad;
+            t.surface = ctx.ground.surface(s.pos[0] + w[0], s.pos[1] + w[1] + 100, s.pos[2] + w[2]);
+            const type = surfaceType(t.surface);
+            t.mu = gripK * surfaceMu(type) * weather * cutFactor(type, p.tireCut);
+            t.grip = t.mu * nLoad;
         }
         else {
             t.grip = 0;
+            t.surface = -1;
         }
+        t.lateral = 0;
         t.load = Math.max(0, t.load - damper * t.extensionRate);
     }
     const human = ctx.human;
@@ -210,6 +215,7 @@ export function stepTruck(s, p, ctx, dt) {
             alpha = Math.atan2(f.vLat, f.vFwd);
         }
         const C = lateralCoefficient(alpha);
+        t.lateral = C;
         const share = totalGrip !== 0 ? t.grip / totalGrip : 1;
         const tL = toWorld(m, f.nb[1], -f.nb[0], f.nb[2]);
         const slope = tL[1] * W * share;
@@ -255,10 +261,10 @@ export function stepTruck(s, p, ctx, dt) {
         -0.2 * pRoll * AREA[0] * L * qbar,
     ];
     // Hull contacts (§14.12), from gravity and drag so far.
-    const contacts = solveHullContacts(s, p, ctx.ground, force, mass, W, dt);
-    // Sums (§14.8).
+    const contacts = solveHullContacts(s, p.inertia, ctx.ground, force, mass, W, dt);
+    // Sums (§14.8), with the pair forces of the last pair tests (§14.17).
     for (let k = 0; k < 3; k++)
-        force[k] += contacts.force[k] + tireSum[k];
+        force[k] += contacts.force[k] + tireSum[k] + s.extForce[k];
     const fMag = Math.hypot(force[0], force[1], force[2]);
     if (fMag > 500000) {
         const sc = 500000 / fMag;
@@ -271,7 +277,9 @@ export function stepTruck(s, p, ctx, dt) {
     moment[1] += cg[0] * drag[2] - cg[2] * drag[0];
     moment[2] += cg[1] * drag[0] - cg[0] * drag[1];
     for (let k = 0; k < 3; k++)
-        moment[k] += contacts.moment[k];
+        moment[k] += contacts.moment[k] + s.extMoment[k];
+    s.extForce.fill(0);
+    s.extMoment.fill(0);
     for (let i = 0; i < 4; i++) {
         const t = s.tires[i];
         const [fx, fy, fz] = t.force;
@@ -299,8 +307,12 @@ export function stepTruck(s, p, ctx, dt) {
     s.bvel[0] += ax * dt;
     s.bvel[1] += ay * dt;
     s.bvel[2] += az * dt;
+    // The forward acceleration the autopilot's time estimate counts on (+0x8c4, §14.24).
+    s.ap.accel = az;
     let ivel = toWorld(m, s.bvel[0], s.bvel[1], s.bvel[2]);
     const iv = Math.hypot(ivel[0], ivel[1], ivel[2]);
+    // Collision rays start from here (§14.14); kept before the stuck checks, as in the game.
+    s.prevPos.set(s.pos);
     const atRest = iv < 0.1 || (iv < 0.5 && contacts.count >= 3);
     if (atRest) {
         s.bvel.fill(0);
@@ -318,8 +330,8 @@ export function stepTruck(s, p, ctx, dt) {
     probeContacts(s, p, ctx.ground);
     return contacts;
 }
-/** Euler angle rates and the gimbal guard (§9.4). */
-function integrateOrientation(s, dt) {
+/** Euler angle rates and the gimbal guard (§9.4); a box uses it too (§14.16). */
+export function integrateOrientation(s, dt) {
     const [p, q, r] = s.rates;
     let [theta, phi, psi] = s.euler;
     let guard = null;
@@ -381,7 +393,7 @@ export function probeGround(s, ground, px, py, pz, offset) {
     return { depth, normal, water, point: [x, y, z] };
 }
 /** Contact probing at the end of the step (§14.10): tire contact points 13-16. */
-function probeContacts(s, p, ground) {
+export function probeContacts(s, p, ground) {
     const m = s.matrix;
     let sign = 1;
     for (let i = 0; i < 4; i++) {
@@ -398,6 +410,8 @@ function probeContacts(s, p, ground) {
         s.points.set(toBody(m, point[0] - s.pos[0], point[1] - s.pos[1], point[2] - s.pos[2]), (12 + i) * 3);
         sign = -sign;
     }
+    // Every point into its contact-point slot (+0x670), where edge contacts may replace it (§14.26.6).
+    s.contactPoints.set(s.points);
     for (let j = 0; j < 16; j++) {
         s.depths[j] = -9999;
         if (j < 12)
@@ -421,8 +435,9 @@ export function postStepTruck(s, p, ground, dt) {
     s.axles[1].travel = p.hubs[2][1];
     // Push-out (§14.11.2).
     s.contactCount = 0;
+    const cp = s.contactPoints;
     for (let j = 0; j < 16; j++) {
-        const pr = probeGround(s, ground, s.points[j * 3], s.points[j * 3 + 1], s.points[j * 3 + 2], 0);
+        const pr = probeGround(s, ground, cp[j * 3], cp[j * 3 + 1], cp[j * 3 + 2], 0);
         s.waterDepths[j] = pr.water;
         let push;
         if (pr.depth * pr.normal[1] <= s.depths[j] || j >= 12) {
@@ -487,13 +502,14 @@ export function postStepTruck(s, p, ground, dt) {
     const corr = [0, 0, 0];
     for (const i of [1, 0, 3, 2]) {
         const t = s.tires[i];
-        if (TRUCK.bumpTravelFt > t.compression)
+        if ((p.bumpTravelFt?.[i < 2 ? 0 : 1] ?? TRUCK.bumpTravelFt) > t.compression)
             continue;
         const vn = dot(t.normal, iv);
         if (vn < 0)
             for (let k = 0; k < 3; k++)
                 corr[k] += t.normal[k] * vn * 0.25;
     }
+    s.bottoming = Math.hypot(corr[0], corr[1], corr[2]);
     if (corr[0] !== 0 || corr[1] !== 0 || corr[2] !== 0) {
         const b = toBody(m, -corr[0], -corr[1], -corr[2]);
         for (let k = 0; k < 3; k++)
@@ -505,7 +521,8 @@ function solveAxle(s, p, axleIdx, carry, dt) {
     const axle = s.axles[axleIdx];
     const R = s.tires[axleIdx * 2], Lt = s.tires[axleIdx * 2 + 1];
     const anchorY = p.hubs[axleIdx * 2][1];
-    const bump = TRUCK.bumpTravelFt, limit = TRUCK.articulationLimit;
+    const bump = p.bumpTravelFt?.[axleIdx] ?? TRUCK.bumpTravelFt, limit = p.articulationLimit?.[axleIdx] ?? TRUCK.articulationLimit;
+    const arm = p.springArmFt ?? 5;
     R.penetration -= carry;
     Lt.penetration -= carry;
     const oldR = R.compression, oldL = Lt.compression;
@@ -531,9 +548,9 @@ function solveAxle(s, p, axleIdx, carry, dt) {
         axle.articulation = art;
     }
     const sa = Math.sin(axle.articulation);
-    // Each tire's lateral offset for the compression is +5 ft (right) and -5 ft (left) (§14.13).
-    R.compression = 5 * sa - anchorY + axle.travel;
-    Lt.compression = -5 * sa - anchorY + axle.travel;
+    // Each tire's lateral offset for the compression is +arm (right) and -arm (left): 5 ft in MTM2 (§14.13).
+    R.compression = arm * sa - anchorY + axle.travel;
+    Lt.compression = -arm * sa - anchorY + axle.travel;
     const overBump = (t, other) => {
         if (t.compression <= bump)
             return;

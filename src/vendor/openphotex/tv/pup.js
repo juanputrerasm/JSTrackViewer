@@ -1,5 +1,5 @@
 import { placementToEditor, toDataLines } from "./coords.js";
-import { tvPowerup } from "./tables.js";
+import { hbPowerup, tvPowerup } from "./tables.js";
 export function parsePowerups(bytes, gridSize, origin) {
     if (!bytes || !bytes.length)
         return [];
@@ -19,13 +19,13 @@ export function parsePowerups(bytes, gridSize, origin) {
         const values = parts.slice(0, 4).map((v) => parseInt(v.trim(), 10));
         if (values.some((v) => !Number.isFinite(v)))
             break;
-        const known = origin === "HB" ? null : tvPowerup(values[3]);
+        const known = origin === "HB" ? hbPowerup(values[3]) : tvPowerup(values[3]);
         powerups.push({
             index: n,
             position: placementToEditor(values[0], values[1], values[2], gridSize, origin),
             type: values[3],
             name: known?.name ?? "",
-            furyName: known?.furyName ?? "",
+            furyName: origin === "HB" ? "" : (tvPowerup(values[3])?.furyName ?? ""),
             modelName: known?.model ?? "",
         });
     }

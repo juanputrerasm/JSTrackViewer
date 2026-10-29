@@ -23,13 +23,16 @@ const CELL = 64;
 const FLAT_STEPS = 50; // 100 ft of ground, well clear of zero
 
 /** A world frame over a heightfield built from a (cx, cz) -> steps function. */
-function frameFrom(fn) {
+function frameFrom(fn, terrainOptions = {}) {
   const raw = new Uint8Array(GRID * GRID);
   for (let cz = 0; cz < GRID; cz++) {
     for (let cx = 0; cx < GRID; cx++) raw[cx + cz * GRID] = fn(cx, cz);
   }
   return createWorldFrame({
-    terrain: { gridSize: GRID, cellSize: CELL, heightScale: 3, rawBytesPerCell: 1, rawData: raw },
+    terrain: {
+      gridSize: GRID, cellSize: CELL, heightScale: 3, rawBytesPerCell: 1, rawData: raw,
+      ...terrainOptions,
+    },
   });
 }
 
@@ -78,6 +81,21 @@ function settledSim(frame, extraHeight = 0) {
   sim.reset({ x: 200, y: ground + 6.8 + extraHeight, z: 200 }, 0);
   return { sim, ground };
 }
+
+test("a truck falls through a masked-out terrain cell", () => {
+  const frame = frameFrom(() => FLAT_STEPS, { cellMask: new Uint8Array(GRID * GRID) });
+  assert.equal(frame.terrainAtFeet(200, 200), null);
+  // Numeric legacy sampling remains safe for cameras and map overlays.
+  assert.equal(frame.heightAtFeet(200, 200), 0);
+
+  const sim = createVehicleSim(bigfootAssembly(), frame);
+  sim.reset({ x: 200, y: 120, z: 200 }, 0);
+  const before = sim.readState().ipos.y;
+  const state = run(sim, 0.5);
+
+  assert.ok(state.ipos.y < before - 2, `fell only ${(before - state.ipos.y).toFixed(2)} ft`);
+  assert.ok(state.wheels.every((wheel) => !wheel.on_gnd));
+});
 
 test("a parked truck settles and stays put", () => {
   const frame = frameFrom(() => FLAT_STEPS);

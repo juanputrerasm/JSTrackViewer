@@ -198,6 +198,16 @@ export class TrackCamera {
     this._applyToCamera();
   }
 
+  /** Puts the camera at `position` looking at `target` (both THREE.Vector3, scene units). */
+  lookFrom(position, target) {
+    this.position.copy(position);
+    const d = target.clone().sub(position);
+    const length = d.length() || 1;
+    this.yaw = ((Math.atan2(d.x, -d.z) / DEG2RAD) % 360 + 360) % 360;
+    this.pitch = Math.max(-85, Math.min(85, Math.asin(d.y / length) / DEG2RAD));
+    this._applyToCamera();
+  }
+
   moveToWorldPosition(x, z) {
     const worldSize = this._trackGridSize * this._trackCellSize;
     this.position.x = Math.max(0, Math.min(worldSize, x));

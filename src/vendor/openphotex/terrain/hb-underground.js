@@ -26,36 +26,34 @@
 
   All eleven are exactly these sizes in all 26 shipped levels, with no exceptions.
 
-  THE BIAS. The cavern grids are byte heightfields like the surface one, but they are biased
-  down by a full byte: an altitude of `value - 256`. That is measured, not assumed. Of the
-  2,950 .DEF placements Hellbender authors at a negative altitude - the ones the viewer used
-  to hide outright - 2,862, or 97%, land between `RA2 - 256` and `RA3 - 256` at their own
-  cell, with 21 below the floor, 7 above the ceiling and 60 in cells the layer says are solid.
-  The 105 underground .NAV points agree at 104 of 105. Nothing else fits: against the raw
-  unbiased grids the same placements miss by a median of 255 altitude steps.
+  THE BIAS. The cavern grids are byte heightfields like the surface one, biased so that byte
+  255 is altitude 0, the surface datum: an altitude of `value - 255`. HELLBEND.EXE's level
+  loader (0x412c3e) stores every .RA2, .RA3, .RA4 and .RA5 byte as `(byte - 255) << 7`, against
+  `byte << 7` for the surface grids, so the value is the engine's own. The data agrees: of the
+  2,950 .DEF placements Hellbender authors at a negative altitude, 97% land between the floor
+  and the ceiling of their own cell, and the 105 underground .NAV points agree at 104 of 105.
+  An earlier reading measured the bias as 256, one step off, within that test's tolerance.
 
   HOLLOW CELLS. RA3 equals RA2 wherever there is no cavern, and that is most of the map:
   160,630 of 426,008 cells across the game are hollow, and KREASH has none at all while FLOAT,
   ROID, ROID2, ROID3 and SHIP are hollow everywhere. So the floor and ceiling meshes are
-  masked to the hollow cells rather than covering the grid.
+  masked to the hollow cells rather than covering the grid. The engine's cavern floor renderer
+  (0x418d70) likewise skips a cell whose RA3 equals its RA2 at all four corners.
 
-  WHICH HALF OF CL1 IS WHICH. CL1 holds two of the same 2-byte texture words the .CLR uses,
-  and the file does not label them. Three independent signals put the floor first:
+  WHICH HALF OF CL1 IS WHICH. CL1 holds two of the same texture words the .CLR uses. The
+  engine settles the order: its cavern floor renderer (0x418d70) draws with the first word and
+  its ceiling renderer (0x419230) with the second. The data agreed before the code was read:
+  every texture whose name says ceiling or roof is in the second field (76 uses to 0), and the
+  second field repeats the cell's own surface texture far more often than the first, as a
+  shallow cavern roofed by the underside of the ground above it should.
 
-    - every texture whose name says ceiling or roof is in the second field, 76 uses to 0;
-    - textures whose name says floor lean the other way, 2,451 uses in the first field to
-      1,976 in the second;
-    - the second field repeats that cell's own SURFACE texture in 54,281 of 160,630 hollow
-      cells, against 10,453 for the first, which is what a shallow cavern roofed by the
-      underside of the ground above it should look like.
-
-  A fourth test, whether each field is better predicted by the floor height or the ceiling
-  height, came out too close to call either way and is not counted. So this is a strong
-  reading rather than a proven one, and swapping the two would cost a texture swap and
-  nothing structural.
+  ONE OR TWO BYTES PER WORD. The loader decides each texture grid's width by its size: a .CLR
+  of 0x4000 bytes on the 128 grid (one byte per cell), a .CL0/.CL2 of 0x18000 (one byte per
+  face) or a .CL1 of 0x8000 (one byte per word) is read a byte at a time, each byte becoming a
+  word with no mirror or rotation. No shipped level uses the narrow form, but it is legal.
 */
 /** Altitude bias on the cavern grids, in heightfield steps. */
-export const HB_UNDERGROUND_BIAS = -256;
+export const HB_UNDERGROUND_BIAS = -255;
 /** Bytes per cell in each companion grid. */
 const CL1_BYTES_PER_CELL = 4;
 const CLR_BYTES_PER_CELL = 2;
@@ -70,7 +68,9 @@ export function decodeHbUnderground(ra2, ra3, cl1, gridSize) {
     const grid = (bytes, bytesPerCell) => (bytes && bytes.length >= cells * bytesPerCell ? bytes : null);
     const floorHeights = grid(ra2, 1);
     const ceilingHeights = grid(ra3, 1);
-    const colours = grid(cl1, CL1_BYTES_PER_CELL);
+    // Two texture words per cell, each two bytes wide or, in the narrow form, one.
+    const colourWidth = cl1 && cl1.length >= cells * CL1_BYTES_PER_CELL ? 2 : (cl1 && cl1.length >= cells * 2 ? 1 : 0);
+    const colours = colourWidth ? cl1 : null;
     if (!floorHeights || !ceilingHeights)
         return null;
     /*
@@ -128,7 +128,7 @@ export function decodeHbUnderground(ra2, ra3, cl1, gridSize) {
     // so they are split here rather than teaching it a second layout.
     const floorClr = new Uint8Array(cells * CLR_BYTES_PER_CELL);
     const ceilingClr = new Uint8Array(cells * CLR_BYTES_PER_CELL);
-    if (colours) {
+    if (colours && colourWidth === 2) {
         for (let i = 0; i < cells; i++) {
             const src = i * CL1_BYTES_PER_CELL;
             const dst = i * CLR_BYTES_PER_CELL;
@@ -136,6 +136,12 @@ export function decodeHbUnderground(ra2, ra3, cl1, gridSize) {
             floorClr[dst + 1] = colours[src + 1];
             ceilingClr[dst] = colours[src + 2];
             ceilingClr[dst + 1] = colours[src + 3];
+        }
+    }
+    else if (colours) {
+        for (let i = 0; i < cells; i++) {
+            floorClr[i * CLR_BYTES_PER_CELL] = colours[i * 2];
+            ceilingClr[i * CLR_BYTES_PER_CELL] = colours[i * 2 + 1];
         }
     }
     return { gridSize, hollowCellCount: hollow, mask, floorHeights, ceilingHeights, floorClr, ceilingClr };

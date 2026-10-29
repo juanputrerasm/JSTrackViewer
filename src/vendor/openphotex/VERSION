@@ -1,3 +1,3 @@
-openphotex 1.0.0 (aed20fb)
+openphotex 1.4.0 (9f7ccb6-dirty)
 Vendored build of https://github.com/juanputrerasm/OpenPhotex. Do not edit these files;
 change OpenPhotex and re-run its 'npm run vendor -- <this folder>'.

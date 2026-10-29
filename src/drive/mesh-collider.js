@@ -73,10 +73,10 @@ export function buildMeshShape(model, box, trackData) {
   // (see traxxTrueOrigin there); every other game keeps the recentred mesh plus baseZ.
   const tvFamily = origin === "TV" || origin === "F3" || origin === "TV/F3";
   const anchored = !evo && origin !== "HB";
-  // scene.js modelZStretch: TV-family models keep their true proportions, the rest keep 0.75.
-  const zStretch = tvFamily ? 1 : 0.75;
+  // scene.js modelZStretch: TV-family and Hellbender models keep their true proportions, the rest keep 0.75.
+  const zStretch = tvFamily || origin === "HB" ? 1 : 0.75;
   const [ax, ay, az] = anchored ? [model.anchor?.x ?? 0, model.anchor?.y ?? 0, model.anchor?.z ?? 0] : [0, 0, 0];
-  const posY = evo ? wz * heightScale : origin === "HB" ? wz * 3 : anchored ? wz * heightScale : wz * heightScale + (model.baseZ ?? 0) * 0.75;
+  const posY = evo ? wz * heightScale : origin === "HB" ? wz * heightScale : anchored ? wz * heightScale : wz * heightScale + (model.baseZ ?? 0) * 0.75;
   const posZ = worldSize - wy;
 
   const [r0, r1, r2] = traxxRotationRows(box.psi ?? 0, box.theta ?? 0, box.phi ?? 0);
@@ -93,17 +93,28 @@ export function buildMeshShape(model, box, trackData) {
     if (!positions || positions.length < 9) continue;
     const raw = mesh.indices;
     const indices = raw ? (ArrayBuffer.isView(raw) ? raw : new Uint32Array(raw)) : null;
-    sources.push({ positions, indices });
+    const rawNormals = mesh.normals ? (ArrayBuffer.isView(mesh.normals) ? mesh.normals : new Float32Array(mesh.normals)) : null;
+    sources.push({ positions, indices, rawNormals });
     count += Math.floor((indices?.length ?? positions.length / 3) / 3);
   }
   if (!count) return null;
 
   const tris = new Float64Array(count * 9);
   const normals = new Float64Array(count * 3);
+  /*
+    Which way each triangle's normal faces: +1 out of the model, -1 into it, 0 unknown. It decides
+    the open side of a wall face (openmtm2-sim.js, OpenPhotex collideTruckFace). A BIN model's
+    triangles are wound to face in: the scene draws them BackSide, and over the stock MTM1, MTM2
+    and Hellbender models the normals point at the model's middle on 146 of 152. A 4x4 Evolution
+    .SMF states its facing in its vertex normals, as OpenMTM2 reads it (evo-track-build.js
+    steepFace). The placement is a rotation with positive scales, so the sign found on the raw
+    vertices holds for the placed triangle.
+  */
+  const facing = new Int8Array(count);
   const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
 
   let n = 0;
-  for (const { positions, indices } of sources) {
+  for (const { positions, indices, rawNormals } of sources) {
     const vertexCount = indices?.length ?? positions.length / 3;
     for (let i = 0; i + 2 < vertexCount; i += 3) {
       const base = n * 9;
@@ -142,6 +153,19 @@ export function buildMeshShape(model, box, trackData) {
       // Degenerate slivers have no plane to be pushed out of.
       if (!(length > 1e-9)) continue;
 
+      if (!evo) facing[n] = -1;
+      else if (rawNormals) {
+        const v = [0, 1, 2].map((k) => (indices ? indices[i + k] : i + k));
+        const p = (k, c) => positions[v[k] * 3 + c];
+        const ux = p(1, 0) - p(0, 0), uy = p(1, 1) - p(0, 1), uz = p(1, 2) - p(0, 2);
+        const wx = p(2, 0) - p(0, 0), wy = p(2, 1) - p(0, 1), wz = p(2, 2) - p(0, 2);
+        let along = 0;
+        for (let k = 0; k < 3; k++) {
+          along += (uy * wz - uz * wy) * rawNormals[v[k] * 3] + (uz * wx - ux * wz) * rawNormals[v[k] * 3 + 1]
+            + (ux * wy - uy * wx) * rawNormals[v[k] * 3 + 2];
+        }
+        facing[n] = along > 0 ? 1 : along < 0 ? -1 : 0;
+      }
       normals[n * 3] = nx / length;
       normals[n * 3 + 1] = ny / length;
       normals[n * 3 + 2] = nz / length;
@@ -161,6 +185,7 @@ export function buildMeshShape(model, box, trackData) {
     count: n,
     tris,
     normals,
+    facing,
     bounds,
     // Dedupe marks for triangles that span several grid cells.
     marks: new Uint32Array(n),

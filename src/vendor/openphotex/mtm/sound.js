@@ -49,6 +49,24 @@ export function parseKlp(input) {
         loops.push({ start: tokens[3 + i * 2], end: endOf(tokens[2 + i * 2]) });
     return { type, mode: type > 4 ? 2 : 1, flag: (type & 1) === 0, loops };
 }
+/**
+ * The inverse of parseKlp: the tokens of a .KLP, space-separated, CRLF. Types 1 and 2 hold one
+ * loop as `start end+1`; types 3 to 6 a count and `end start` pairs; an open end is 0.
+ */
+export function writeKlp(klp) {
+    const tokens = [klp.type];
+    if (klp.type === 1 || klp.type === 2) {
+        const loop = klp.loops[0] ?? { start: 0, end: null };
+        tokens.push(loop.start, loop.end === null ? 0 : loop.end + 1);
+    }
+    else if (klp.type >= 3) {
+        tokens.push(klp.loops.length);
+        for (const loop of klp.loops)
+            tokens.push(loop.end ?? 0, loop.start);
+    }
+    const text = `${tokens.join(" ")}\r\n`;
+    return Uint8Array.from(text, (c) => c.charCodeAt(0));
+}
 /** Read a SOUNDnnn.TXT. */
 export function parseMtmAmbientSounds(input) {
     const rows = lines(input).map((l) => l.trim()).filter((l) => l.length > 0);

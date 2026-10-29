@@ -4,6 +4,8 @@ import { removePath, resetSessionFolder, writeBytesToFile } from "./shared/opfs.
 import { extractFirstPodFromZipBytes, extractPodsFromZipBytes } from "./zip-utils.js";
 import { UNITS_PER_FOOT_H } from "./drive/world-frame.js";
 import { flySetsFromFolder, looseArchives } from "./folder-contents.js";
+import { ModelsBox } from "./ui/models-box.js";
+import { TexturesBox } from "./ui/textures-box.js";
 
 const APP_TITLE = "JSTrackViewer";
 const DRIVE_CONTROLS = "↑/W Throttle · ↓/S Brake · ←→/A D Steer · Space Handbrake · M Manual (A/Z Shift) · L Lights · V Camera · R Reset";
@@ -35,8 +37,8 @@ export class TrackViewerApp {
       objects: true, gboxes: true,
       cboxes: false, water: true, backdrop: true, sunlight: true, shadows: true,
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
-      navpoints: true, cpmarkers: true, tunnels: true, powerups: true, animate: true,
-      racetrack: true, underground: true, terrainOverlap: true, lensflare: true,
+      navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
+      racetrack: true, underground: true, terrainOverlap: true, rockTops: true, lensflare: true,
       sky: true, fog: true, movingObjects: true,
     };
   }
@@ -63,6 +65,12 @@ export class TrackViewerApp {
       if (this._scene.drive?.isActive) this._scene.drive.teleport(x / UNITS_PER_FOOT_H, z / UNITS_PER_FOOT_H);
     });
     this._scene.setNavigationChangeCallback((nav) => this._minimap.updateCamera(nav));
+
+    // The Models and Textures boxes, floating over the viewport; see ui/models-box.js.
+    this._modelsBox = new ModelsBox(viewport, this._scene);
+    this._texturesBox = new TexturesBox(viewport, this._scene);
+    doc.getElementById("models-box-btn").addEventListener("click", () => this._modelsBox.toggle());
+    doc.getElementById("textures-box-btn").addEventListener("click", () => this._texturesBox.toggle());
     this._scene.setFlyDetailProvider((folder, chunkX, chunkZ) => this._worker.call("flyDetail", { folder, chunkX, chunkZ }));
 
     // File input
@@ -184,6 +192,7 @@ export class TrackViewerApp {
       "tog-terrain":   "terrain",
       "tog-textures":  "textures",
       "tog-terrain-overlap": "terrainOverlap",
+      "tog-rock-tops": "rockTops",
       "tog-grid":      "grid",
       "tog-objects":   "objects",
       "tog-billboards": "billboards",
@@ -204,6 +213,7 @@ export class TrackViewerApp {
       "tog-navpoints": "navpoints",
       "tog-cpmarkers": "cpmarkers",
       "tog-tunnels":   "tunnels",
+      "tog-quakes":    "quakes",
       "tog-powerups":  "powerups",
       "tog-animate":   "animate",
       "tog-moving":    "movingObjects",
@@ -641,6 +651,10 @@ export class TrackViewerApp {
     }
     this._minimap.setTrack(result);
     this._minimap.updateCamera(this._scene.nav);
+    this._modelsBox.setTrack();
+    this._texturesBox.setTrack();
+    this._doc.getElementById("models-box-btn").disabled = !Object.keys(result.models ?? {}).length;
+    this._doc.getElementById("textures-box-btn").disabled = false;
     this._updateTrackInfo(result);
     this._applyLayerAvailability(this._scene.layerPresence());
     this._buildCourseToggles();
@@ -758,7 +772,7 @@ export class TrackViewerApp {
     const old = this._scene.drive;
     if (!trackData || !old) return;
     const state = old.sim.readState();
-    const velocity = { ...old.sim.state.vel };
+    const velocity = { ...old.sim.velocity };
     const manual = old.sim.manual;
     const lightsOn = old.lightsOn;
     const viewId = old.cameras.view?.id;
@@ -772,7 +786,8 @@ export class TrackViewerApp {
         (pose) => this._minimap.updateTruck(pose));
       if (!drive || requestId !== this._driveRequestId) return;
       drive.placeAt(state.ipos.x, state.ipos.z, state.psi ?? 0);
-      drive.sim.state.vel = velocity;
+      drive.sim.setVelocity(velocity);
+      drive.sim.setGear(state.gear);
       drive.setManual(manual);
       drive.setLights(lightsOn);
       if (viewId) drive.cameras.select(viewId);

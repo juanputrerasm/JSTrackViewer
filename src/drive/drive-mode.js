@@ -12,7 +12,7 @@
   fitting this plan ends in.
 */
 import * as THREE from "three";
-import { createVehicleSim } from "./vehicle-sim.js";
+import { createOpenMtm2Sim, simGroundBoxes } from "./openmtm2-sim.js";
 import { createColliders } from "./colliders.js";
 import { createCheckpoints } from "./checkpoints.js";
 import { createDriveInput } from "./drive-input.js";
@@ -31,7 +31,7 @@ const STEP = 1 / 120;
 */
 const MAX_FRAME = 0.25;
 
-export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, onPose, trackData, onObjectsMoved, lights = null, movers = null }) {
+export function createDriveMode({ camera, element, frame, assembly, truckObject, spawn, onStatus, onPose, trackData, onObjectsMoved, lights = null, movers = null, weather = "clear" }) {
   /*
     The track's solid objects, if there are any.
 
@@ -43,7 +43,11 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
   const colliders = trackData ? createColliders(trackData, frame, { movers }) : null;
   // null on a track with no checkpoints, which is every drag strip and stadium.
   const checkpoints = trackData ? createCheckpoints(trackData) : null;
-  const sim = createVehicleSim(assembly, frame, undefined, colliders);
+  const sim = createOpenMtm2Sim(assembly, frame, {
+    colliders, weather, groundBoxes: simGroundBoxes(trackData),
+    waterLevelFt: trackData?.waterLevel > 0
+      ? trackData.waterLevel * (trackData.terrain?.heightScale ?? 3) / UNITS_PER_FOOT_V : null,
+  });
   const input = createDriveInput(element);
   const cameras = createDriveCameras(camera);
 
@@ -181,9 +185,14 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
       time; only the drawing was in the wrong place.
     */
     const groundAt = (p) => {
-      const terrain = frame.heightAtFeet(p.x, p.z);
+      const terrain = typeof frame.terrainAtFeet === "function"
+        ? frame.terrainAtFeet(p.x, p.z)
+        : frame.heightAtFeet(p.x, p.z);
       const support = colliders?.supportAt(p.x, p.z, p.y, { probe: true }) ?? null;
-      return support !== null && support > terrain && support <= p.y ? support : terrain;
+      if (support !== null && (terrain === null || support > terrain) && support <= p.y) return support;
+      // With nothing under it, draw altitude directly instead of measuring it above an
+      // imaginary zero-height plane through which the simulation is falling.
+      return terrain ?? p.y;
     };
 
     /*
@@ -209,7 +218,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
     }
 
     truckObject.setPose(scenePosition, quaternion);
-    truckObject.setWheelState(sim.wheelCompression(), sim.wheelSteer(), sim.wheelSpin());
+    truckObject.setWheelState(sim.wheelCompression(), sim.wheelSteer(), sim.wheelSpin(), sim.wheelPoses(), sim.axlePoses());
     // Where the truck is on the map: scene units across, and a heading in degrees clockwise
     // from north, which is the fly camera's own convention, so the minimap draws either.
     onPose?.({
@@ -321,7 +330,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
         accumulator -= STEP;
         // A hard ceiling as well as the frame clamp: if a step ever costs more than a step of
         // simulated time, this is what stops the loop chasing its own tail.
-        if (++steps > 16) {
+        if (++steps >= 30) {
           accumulator = 0;
           break;
         }
@@ -342,14 +351,10 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
 
       const state = render();
 
-      /*
-        Brake lights with the brake, reverse lights in reverse. In the automatic's reverse the
-        pedals swap (see resolveReverse in vehicle-sim.js), so there it is the throttle key
-        that slows the truck and lights the brakes.
-      */
+      // Lamps follow resolved brake pressure and gear, including automatic reverse.
       if (lights) {
         const reversing = state.gear < 0;
-        const slowing = reversing && !sim.manual ? controls.throttle > 0 : controls.brake > 0;
+        const slowing = state.braking;
         lights.setDriving({ braking: slowing || controls.handbrake === true, reversing });
       }
 
@@ -413,6 +418,7 @@ export function createDriveMode({ camera, element, frame, assembly, truckObject,
 
     dispose() {
       active = false;
+      unbindPointer();
       input.dispose();
     },
   };

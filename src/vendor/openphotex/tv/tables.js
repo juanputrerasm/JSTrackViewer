@@ -32,6 +32,36 @@ export const TV_POWERUPS = [
 export function tvPowerup(type) {
     return Number.isInteger(type) && type >= 0 && type < TV_POWERUPS.length ? TV_POWERUPS[type] : null;
 }
+export const HB_POWERUPS = [
+    { model: "F6RFL.BIN", name: "Rapid-Fire Lasers" },
+    { model: "POWERPLA.BIN", name: "ServoKinetic Lasers (Not used)" },
+    { model: "F6DC.BIN", name: "Dispersion Cannon 14" },
+    { model: "F6DOM.BIN", name: "Dead-On Missiles" },
+    { model: "F6VIP.BIN", name: "Vipers" },
+    { model: "POWERSUP.BIN", name: "Bion Fury Missiles (Not used)" },
+    { model: "POWERSHE.BIN", name: "Shield Restore (not used)" },
+    { model: "POWERVIS.BIN", name: "Cloak (Multi only)" },
+    { model: "POWERINV.BIN", name: "Invincibility" },
+    { model: "F6GMV.BIN", name: "Guided MIRV" },
+    { model: "POWERZAP.BIN", name: "Turbo Thrust (Not used)" },
+    { model: "POWERCAN.BIN", name: "Energy Can (Not used)" },
+    { model: "F6CRU.BIN", name: "Cruise" },
+    { model: "F6CLS.BIN", name: "Cluster" },
+    { model: "F6MIRV.BIN", name: "MIRV" },
+    { model: "F6MINE.BIN", name: "MINE" },
+    { model: "F6DAM1.BIN", name: "Damage 25%" },
+    { model: "F6DAM2.BIN", name: "Damage 50%" },
+    { model: "F6DAM3.BIN", name: "Damage 100%" },
+    { model: "F6ENG1.BIN", name: "Energy 25%" },
+    { model: "F6ENG2.BIN", name: "Energy 50%" },
+    { model: "F6ENG3.BIN", name: "Energy 100%" },
+    { model: "POWERCAN.BIN", name: "Message Pod" },
+    ...Array.from({ length: 8 }, (_, i) => ({ model: "F6SWEP.BIN", name: `Super Weapon Piece ${i + 1}` })),
+];
+/** The Hellbender powerup entry for a type index, or null. */
+export function hbPowerup(type) {
+    return Number.isInteger(type) && type >= 0 && type < HB_POWERUPS.length ? HB_POWERUPS[type] : null;
+}
 /** Enemy logic names by .DEF header slot 0 (TVCAD.INI [Logic]). */
 export const TV_LOGIC_NAMES = [
     "Ground/Static", "Ground/Targeting (Smart)", "Flying (Dumb)", "Ground/Targeting (Dumb)",

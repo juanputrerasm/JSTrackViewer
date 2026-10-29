@@ -123,6 +123,7 @@ export function createDriveInput(element) {
       let handbrake = anyHeld(HANDBRAKE_KEYS);
 
       const pad = enabled ? readPad() : null;
+      let analog = false;
       if (pad) {
         // A pad only overrides an axis the driver is actually using, so a keyboard and a pad
         // can be mixed without one zeroing the other.
@@ -138,6 +139,8 @@ export function createDriveInput(element) {
         if (padSteer !== 0) steer = padSteer;
         if (pad.buttons[PAD_HANDBRAKE_BUTTON]?.pressed) handbrake = true;
 
+        analog = padThrottle > 0.02 || padBrake > 0.02 || padSteer !== 0;
+
         // Buttons are polled, so the edge has to be found here rather than in a listener.
         const viewDown = !!pad.buttons[PAD_VIEW_BUTTON]?.pressed;
         if (viewDown && !padViewWasDown) pressed.push("nextView");
@@ -152,6 +155,7 @@ export function createDriveInput(element) {
       pressed.length = 0;
       return {
         throttle,
+        analog,
         brake: Math.max(brake, handbrake ? 1 : 0),
         steer: Math.max(-1, Math.min(1, steer)),
         handbrake,

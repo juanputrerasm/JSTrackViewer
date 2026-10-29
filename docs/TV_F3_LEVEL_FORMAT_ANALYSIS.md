@@ -17,6 +17,18 @@ Source material:
 Every claim below is measured against those three archives, not inferred from the manual
 alone. The manual supplied the vocabulary; the PODs supplied the proof.
 
+> **Later corrections from the executables.** Reading `GAME.EXE` and Fury3's `TF.EXE` settled
+> several points this document left open or read differently. Details in
+> [TV_GAME_EXE_ANALYSIS.md](TV_GAME_EXE_ANALYSIS.md) and [FURY3_EXE_ANALYSIS.md](FURY3_EXE_ANALYSIS.md);
+> the viewer now follows them.
+>
+> | Here | Correction |
+> |---|---|
+> | 5.1, 10.3: placement Y "equals the terrain" | The engine never reads a surface placement's Y: it puts the object on the terrain (sampled on the cell's checkerboard triangles), adds the definition's X, Y, Z offsets and lifts flyers (logics 2, 4, 7, 8) by half the model radius. The file's Y is the editor's copy, which is why it matches best under the triangle sampler. |
+> | 10.2: hit radius is the model radius times 1.0 to 1.4 | It is the radius of the simple model's bounding-box corner, recomputed at load over the DEF value. |
+> | 10.2: terrain drawn at height scale 3 | True proportion is 2 scene units per step; the viewer now draws TV/F3 at 2. |
+> | 8: tunnel interiors and chamber ceilings out of scope | Both are fully determined by the data (a `.TNL` segment is one terrain cell long; a chamber ceiling is `510 - h`, textured from ten cells along), and the viewer now draws both. |
+
 ## Scope
 
 JSTrackViewer is a 3D map viewer, not the game and not a level editor. This document is
@@ -25,9 +37,9 @@ scoped accordingly:
 - **In scope**: content that exists on the map and can be shown or marked there. Objects,
   powerups, navigation points, tunnel entrances and exits, terrain, textures.
 - **Out of scope**: reproducing engine behaviour (edge wrapping, gameplay logic, in-cockpit
-  instrumentation), editor affordances (coordinate entry, altitude painting), and interior
-  spaces that cannot be understood from an exterior view (tunnels, chambers). Section 8
-  records these and why.
+  instrumentation) and editor affordances (coordinate entry, altitude painting). Section 8
+  records these and why. Tunnels and chambers were listed here too, until the executables
+  showed both are fully determined by the data (see the corrections above).
 
 ---
 
@@ -462,8 +474,8 @@ Recorded with reasons so the question does not come back.
 | Mission briefing text and planet | Game presentation, not map content |
 | Editor coordinate and altitude readout | Editor affordance. Possibly worth revisiting if the viewer ever grows editing features |
 | Compass and heading readout | In-game instrumentation |
-| Tunnel interior geometry | Tunnels are separate levels with their own `.TNL` spine. Marking the entrance and exit on the surface map conveys everything a map view can convey; the interior needs to be flown to be understood |
-| Chamber ceilings | Same reasoning. A chamber only reads as a chamber from inside it. The one useful residue is the TDF chamber flag, which lets a tunnel marker be labelled as leading into a chamber |
+| Tunnel interior geometry | *Superseded:* the `.TNL` layout is now known (TV_GAME_EXE_ANALYSIS.md 4) and tunnel levels open as their tube |
+| Chamber ceilings | *Superseded:* the ceiling is the floor mirrored about 255 (TV_GAME_EXE_ANALYSIS.md 2.3) and the viewer draws it |
 
 ---
 
@@ -662,7 +674,7 @@ editor units. The viewer's old divisor (10922.667, the height-step scale) drew e
 divisor (4096) exactly, which is the check that the rule holds across the family.
 
 Vertically, a terrain step is 2^15 world units, so true proportion is 2 scene units per step.
-The terrain is drawn at the user's height scale (3 by default), but models are drawn in their
+The terrain was drawn at the user's height scale (3 by default; now 2, the true proportion), and models are drawn in their
 true proportions with no vertical stretch: the hit radius is a sphere, so the engine's world is
 isotropic, and the height scale is a display exaggeration of the ground only. Stretching models
 by `heightScale / 2` was tried and visibly elongated them (FIRSMALL.BIN at 2.5:1 against its
