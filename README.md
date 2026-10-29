@@ -31,8 +31,6 @@ Changes since 1.0.0:
 - Added Hellbender moving-terrain markers with height ranges, named powerups, automatic navigation-point labels, and warnings for missing tunnel levels. Moving terrain is marked but not animated.
 - Updated the shared OpenPhotex library and expanded regression tests and documentation for driving physics and game-specific level behavior.
 
-Release notes: [plain text](docs/releases/1.1.0.txt) · [phpBB list](docs/releases/1.1.0-phpbb.txt).
-
 ## Features
 
 - **Opens archives from disk, URL or a whole folder**: POD, EPD and ZIP files, with every track of every archive in one list.
