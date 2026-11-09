@@ -55,6 +55,12 @@ const TYPE_CHECKPOINT = 6;
 const TYPE_DRIVE_THROUGH = 7;
 const TYPE_NO_COLLIDE_FACING = 8;
 const TYPE_RAMP = 99;
+/*
+  Community Patch 4's fog volume. It is a region of fog the renderer draws, not a solid: the CP4
+  engine registers its box as a fog volume and leaves it out of the surface meshes (OpenMTM2
+  docs/CP4_EXE_ANALYSIS.md 4 and 5). That it is never a classic collision box is INFERRED.
+*/
+const TYPE_FOG = 14;
 
 /** A face whose normal's upward part is under cos 50 degrees is a wall (OpenMTM2's line). */
 const WALL_NORMAL_Y = Math.cos((50 * Math.PI) / 180);
@@ -177,6 +183,8 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
     const box = boxes[boxIndex];
     const type = box.type ?? 0;
     if (PASS_THROUGH.has(type)) continue;
+    // OpenPhotex fills `fog` only on an MTM2 type 14 box, so no other game's type 14 is caught here.
+    if (type === TYPE_FOG && box.fog) continue;
     /*
       A billboard turns to face the camera, so no fixed collider can match what is drawn, and
       MTM2's own camera-facing type (8, "No collide (facing)") is pass-through. CPR's trees and

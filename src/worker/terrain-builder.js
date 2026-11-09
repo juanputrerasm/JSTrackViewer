@@ -87,6 +87,35 @@ export function buildTerrainMesh(terrain, palette, textures, heightScale, origin
     animations, textures, decodedSlots,
     { atlasCols, atlasTileSize, sourceTileSize, atlasPadding });
 
+  /*
+    Community Patch 4's 8 ft grid (Spline and Full Map tracks; sit-parser.js applyCp4Heights).
+    The .CLR, .LTE and ground boxes stay on the 32 ft grid, so each 32 ft cell keeps its one
+    texture tile, stretched over the cell's 4 x 4 finer quads. See buildFineCells.
+  */
+  const fine = terrain.fine ?? null;
+  if (fine && fine.heights?.length === (gridSize * fine.subdivisions) ** 2) {
+    const textureSurfaces = (textures ?? []).map((tex) => (tex?.type ?? 0) * 100 + (tex?.depth ?? 0));
+    const lteData = origin === "MTM1" || origin === "MTM2" ? terrain.lteData : null;
+    const built = buildFineCells({
+      gridSize, cellSize, hs, heightOffset, cellMask, faceDown, fine, clrData, clrBytesPerCell,
+      textureCount, uvRects, atlasWidth, atlasHeight, decodedSlots, sourceTileSize, origin,
+      textureSurfaces, lteData: lteData && lteData.length >= gridSize * gridSize * LTE_BYTES_PER_POINT ? lteData : null,
+    });
+    return {
+      gridSize, cellSize, heightScale: hs, heightDivisor, heightUnitScale,
+      cellSplit: checkerboard ? "checkerboard" : "fixed",
+      cellMask: cellMask ? cellMask.slice().buffer : null,
+      ...built,
+      textureSurfaces,
+      atlas: terrain.reusesAtlas === true ? null : {
+        rgba: atlas.buffer, width: atlasWidth, height: atlasHeight,
+        textureCount, tileCount, atlasCols, atlasRows, atlasTileSize, atlasPadding, sourceTileSize,
+        slotLegacySides: (decodedSlots ?? []).map((slot) => slot?.legacySide ?? sourceTileSize),
+        animations: atlasAnimations,
+      },
+    };
+  }
+
   // Allocate buffers: 4 unique vertices per cell (to allow per-cell UV)
   const cellCount = gridSize * gridSize;
   const vertexCount = cellCount * 4;
@@ -317,6 +346,141 @@ function buildAtlasAnimations(animations, textures, decodedSlots, layout) {
     });
   }
   return out;
+}
+
+/*
+  The terrain mesh on Community Patch 4's 8 ft grid.
+
+  `fine` is { heights, subdivisions, divisor }: a (gridSize * subdivisions)^2 grid in file order
+  (rows along the level's z), and the divisor that turns a sample into legacy 2 ft steps (256 for
+  the 1/128 ft samples of OpenPhotex decodeMtm2Heights). Each 32 ft cell becomes a
+  (subdivisions + 1)^2 block of its own vertices, so it still carries its own texture's UVs: the
+  four corner UVs (after the .CLR word's mirror and rotation) are blended across the block,
+  which stretches the one 256 x 256 tile over the whole cell exactly as the coarse quad does.
+  The .LTE light is blended the same way from the cell's four grid points.
+
+  Fine cells split on the checkerboard of their own indices, `(row ^ col) & 1`: the CP4 ground
+  query does (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 1.6), and so does drive mode's sampler
+  (drive/world-frame.js), so the wheels meet the triangles that are drawn.
+
+  Vertex k of cell c is `c * (s + 1)^2 + j * (s + 1) + i`, with i along +x and j along the row
+  (cz) direction; `subdivisions` travels with the mesh so the scene can find a cell's corners.
+*/
+function buildFineCells(o) {
+  const { gridSize, cellSize, hs, heightOffset, cellMask, faceDown, fine, clrData, clrBytesPerCell,
+    textureCount, uvRects, atlasWidth, atlasHeight, decodedSlots, sourceTileSize, origin,
+    textureSurfaces, lteData } = o;
+  const s = fine.subdivisions;
+  const side = gridSize * s;
+  const divisor = fine.divisor ?? 256;
+  const heights = fine.heights;
+  const row = s + 1;
+  const perCell = row * row;
+  const trisPerCell = 2 * s * s;
+  const cellCount = gridSize * gridSize;
+  const vertexCount = cellCount * perCell;
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const uvs = new Float32Array(vertexCount * 2);
+  const uvsOverlap = new Float32Array(vertexCount * 2);
+  const lights = lteData ? new Float32Array(vertexCount) : null;
+  const indices = new Uint32Array(cellCount * trisPerCell * 3);
+  const surface = textureSurfaces.some((value) => value > 0) ? new Uint16Array(cellCount) : null;
+  const step = cellSize / s;
+  const facing = faceDown ? -1 : 1;
+
+  const at = (fx, fz) => {
+    const x = fx < 0 ? 0 : fx > side - 1 ? side - 1 : fx;
+    const z = fz < 0 ? 0 : fz > side - 1 ? side - 1 : fz;
+    return heights[x + z * side] / divisor + heightOffset;
+  };
+  const light = (cx, cz) => lteData[(Math.min(gridSize - 1, cx) + Math.min(gridSize - 1, cz) * gridSize) * LTE_BYTES_PER_POINT] / 255;
+  const cU = new Float32Array(4), cV = new Float32Array(4), oU = new Float32Array(4), oV = new Float32Array(4);
+
+  for (let cz = 0; cz < gridSize; cz++) {
+    for (let cx = 0; cx < gridSize; cx++) {
+      const cell = cx + cz * gridSize;
+      const vBase = cell * perCell;
+      const iBase = cell * trisPerCell * 3;
+      if (cellMask && !cellMask[cell]) {
+        indices.fill(vBase, iBase, iBase + trisPerCell * 3);
+        continue;
+      }
+
+      // The cell's corner UVs, turned and mirrored as the coarse builder turns them.
+      const { texIdx, rot, mirror } = readCell(clrData, cell, clrBytesPerCell, textureCount);
+      if (surface) surface[cell] = textureSurfaces[texIdx] ?? 0;
+      const rect = uvRects[texIdx] ?? uvRects[0];
+      const legacySide = decodedSlots[texIdx]?.legacySide ?? sourceTileSize;
+      const inset = TERRAIN_OVERLAP_PIXELS * sourceTileSize / legacySide;
+      const baseU = [rect.x / atlasWidth, (rect.x + rect.w) / atlasWidth];
+      const baseV = [rect.y / atlasHeight, (rect.y + rect.h) / atlasHeight];
+      const insetU = [(rect.x + inset) / atlasWidth, (rect.x + rect.w - inset) / atlasWidth];
+      const insetV = [(rect.y + inset) / atlasHeight, (rect.y + rect.h - inset) / atlasHeight];
+      const effectiveRot = isTvFamilyOrigin(origin) ? (rot + 3) & 3 : rot;
+      for (let vi = 0; vi < 4; vi++) {
+        let result = vi;
+        if (mirror & 1) result = (3 - result) & 3;
+        if (mirror & 2) result = (1 - result) & 3;
+        const ci = (effectiveRot + result) & 3;
+        // Corner order BL, BR, TR, TL as in the coarse loop: u0 u1 u1 u0, v1 v1 v0 v0.
+        const ui = ci === 1 || ci === 2 ? 1 : 0;
+        const vj = ci === 0 || ci === 1 ? 1 : 0;
+        cU[vi] = baseU[ui]; cV[vi] = baseV[vj];
+        oU[vi] = insetU[ui]; oV[vi] = insetV[vj];
+      }
+      const l00 = lights ? light(cx, cz) : 0, l10 = lights ? light(cx + 1, cz) : 0;
+      const l11 = lights ? light(cx + 1, cz + 1) : 0, l01 = lights ? light(cx, cz + 1) : 0;
+
+      for (let j = 0; j <= s; j++) {
+        for (let i = 0; i <= s; i++) {
+          const v = vBase + j * row + i;
+          const fx = cx * s + i, fz = cz * s + j;
+          const a = i / s, b = j / s;
+          const w0 = (1 - a) * (1 - b), w1 = a * (1 - b), w2 = a * b, w3 = (1 - a) * b;
+          positions[v * 3] = fx * step;
+          positions[v * 3 + 1] = at(fx, fz) * hs;
+          positions[v * 3 + 2] = (side - fz) * step;
+          const dx = (at(fx + 1, fz) - at(fx - 1, fz)) * 0.5 * hs;
+          const dz = (at(fx, fz + 1) - at(fx, fz - 1)) * 0.5 * hs;
+          const len = Math.hypot(dx, step, dz) || 1;
+          normals[v * 3] = (-dx / len) * facing;
+          normals[v * 3 + 1] = (step / len) * facing;
+          normals[v * 3 + 2] = (dz / len) * facing;
+          uvs[v * 2] = w0 * cU[0] + w1 * cU[1] + w2 * cU[2] + w3 * cU[3];
+          uvs[v * 2 + 1] = w0 * cV[0] + w1 * cV[1] + w2 * cV[2] + w3 * cV[3];
+          uvsOverlap[v * 2] = w0 * oU[0] + w1 * oU[1] + w2 * oU[2] + w3 * oU[3];
+          uvsOverlap[v * 2 + 1] = w0 * oV[0] + w1 * oV[1] + w2 * oV[2] + w3 * oV[3];
+          if (lights) lights[v] = w0 * l00 + w1 * l10 + w2 * l11 + w3 * l01;
+        }
+      }
+
+      let k = iBase;
+      for (let j = 0; j < s; j++) {
+        for (let i = 0; i < s; i++) {
+          const q0 = vBase + j * row + i, q1 = q0 + 1, q3 = q0 + row, q2 = q3 + 1;
+          const other = ((cx * s + i + cz * s + j) & 1) === 1;
+          const tris = other ? [q0, q1, q3, q1, q2, q3] : [q0, q1, q2, q0, q2, q3];
+          for (let t = 0; t < 6; t += 3) {
+            indices[k++] = tris[t];
+            indices[k++] = faceDown ? tris[t + 2] : tris[t + 1];
+            indices[k++] = faceDown ? tris[t + 1] : tris[t + 2];
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    subdivisions: s,
+    positions: positions.buffer,
+    normals: normals.buffer,
+    uvs: uvs.buffer,
+    uvsOverlap: uvsOverlap.buffer,
+    surface: surface ? surface.buffer : null,
+    lights: lights ? lights.buffer : null,
+    indices: indices.buffer,
+  };
 }
 
 function textureTitle(name) {

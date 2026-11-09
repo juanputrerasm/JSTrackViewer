@@ -38,6 +38,26 @@ export function createTerrainFt(heightsFt, waterLevelFt = null, fineFt = null) {
     }
     return t;
 }
+/** Give a terrain Community Patch 4 lakes: the .WTR's tile map and each lake id's surface in feet (index 0 unused). */
+export function setTerrainLakes(t, tileMap, levelFt) {
+    if (tileMap.length !== TERRAIN_CELLS * TERRAIN_CELLS)
+        throw new RangeError("a lake tile map has 65536 tiles");
+    t.lakes = { tileMap, levelFt };
+    return t;
+}
+/** The lake id (0 none) of the 32 ft tile under (x, z). */
+export function terrainLakeAt(t, x, z) {
+    if (!t.lakes)
+        return 0;
+    const col = (Math.trunc(x * UNITS_PER_FT) >> 13) & MASK;
+    const row = (Math.trunc(z * UNITS_PER_FT) >> 13) & MASK;
+    return t.lakes.tileMap[row * TERRAIN_CELLS + col];
+}
+/** The water level at (x, z): a lake's surface on its tiles, else the track's water (null for none). */
+export function terrainWaterLevelAt(t, x, z, trackLevelFt = t.waterLevelFt) {
+    const id = terrainLakeAt(t, x, z);
+    return id ? t.lakes.levelFt[id] ?? trackLevelFt : trackLevelFt;
+}
 /** The four corners and fractions of the fine cell under (x, z), and whether it splits along its main diagonal. */
 function fineCell(f, x, z) {
     const m = f.cells - 1, gx = x / f.cellFt, gz = z / f.cellFt;

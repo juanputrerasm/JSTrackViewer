@@ -9,10 +9,13 @@
 */
 import { G, MTM2_RULES } from "../mtm2/constants.js";
 export const EVO1_RULES = Object.freeze({
-    ...MTM2_RULES, id: "evo1", airborneG: G, defaultCgZ: 0, steerRearGripCut: false, hullFrictionFactor: 0.5,
+    ...MTM2_RULES, id: "evo1", airborneG: G, defaultCgZ: 0, steerRearGripCut: false, hullFrictionFactor: 0.5, twoWayCheckpoints: false, rollPitchDamping: null,
 });
 export const EVO2_RULES = Object.freeze({
     ...MTM2_RULES, id: "evo2", airborneG: 56.3045, defaultCgZ: 2, steerRearGripCut: true, hullFrictionFactor: 1.5,
+    // A checkpoint counts driven through either way (EVO2_PHYSICS.md 12); Evo 1's only forwards.
+    twoWayCheckpoints: true,
+    rollPitchDamping: -0.05,
 });
 /** The rules by name: "evo1" or "evo2" (anything else is Evo 2's). */
 export function evoRules(id) {

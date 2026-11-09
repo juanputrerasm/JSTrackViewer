@@ -3,6 +3,7 @@
   inertia, gearbox, wheelspin, centre split and axle differentials. Gear numbers are MTM2's.
 */
 import { GEAR } from "../mtm2/constants.js";
+import { holdAfterShift } from "../mtm2/truck/drivetrain.js";
 const TWO_PI = Math.PI * 2;
 const MPH_PER_FT_S = 0.681818;
 /** Ratio of a gear number (0 in Park and Neutral and past the table). */
@@ -45,8 +46,15 @@ export function stepEvoGearbox(box, spec, rpm, forwardSpeed, finalRatio, tireRad
         return ratio !== 0 ? ((circumference * at) / ratio) * MPH_PER_FT_S : Infinity;
     };
     const mph = forwardSpeed * MPH_PER_FT_S;
+    // A request in automatic (`autoOverride`, the port's): taken as the manual box would, then held to the redline.
+    const taken = autoShift && !!box.autoOverride && box.shiftRequest !== 0;
+    if (taken)
+        autoShift = false;
+    const gearBefore = box.gear;
+    // Held: up only at the limiter, which keeps the rpm at redline - 250 at most (step.ts).
+    const upRpm = box.shiftHold ? Math.max(spec.upshiftRpm, spec.redline - 250) : spec.upshiftRpm;
     const up = autoShift
-        ? rpm >= spec.upshiftRpm && box.gear >= GEAR.FIRST && box.gear < spec.maxGear && shiftSpeed(box.gear, spec.upshiftRpm) < mph
+        ? rpm >= upRpm && box.gear >= GEAR.FIRST && box.gear < spec.maxGear && shiftSpeed(box.gear, upRpm) < mph
         : box.shiftRequest > 0 && box.gear < spec.maxGear;
     if (up)
         box.gear++;
@@ -55,6 +63,7 @@ export function stepEvoGearbox(box, spec, rpm, forwardSpeed, finalRatio, tireRad
         : box.shiftRequest < 0 && box.gear > GEAR.PARK;
     if (down)
         box.gear--;
+    holdAfterShift(box, taken, autoShift, gearBefore);
     box.shiftRequest = 0;
     if (box.gear === GEAR.PARK) {
         box.brakeFront = 1;

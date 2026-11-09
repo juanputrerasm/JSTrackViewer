@@ -57,26 +57,28 @@ export function evoSpecFromTrk(trk) {
 const unit = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : null);
 /** The springs `CVehicle::setSprings` (`0x5ecba0`) gives for setting `s`: per axle rate and damping (EVO2_PHYSICS.md 2). */
 export function evoSprings(spec, s, defaultCgZ) {
-    const sag = Math.min(spec.maxCompr[0], spec.maxCompr[1]) * (0.5 - 0.4 * (0.5 - s));
+    // The slider's soft-to-hard is turned round first (p = 1 - s): a harder setting sags less (EVO2_PHYSICS.md 2).
+    const p = 1 - s;
+    const sag = Math.min(spec.maxCompr[0], spec.maxCompr[1]) * (0.5 - 0.4 * (0.5 - p));
     const sprung = spec.dryWeightLb + spec.axleWeightLb[0] + spec.axleWeightLb[1];
     const zFront = spec.wheelAnchors[0][2], zRear = spec.wheelAnchors[2][2];
     const zCg = spec.cgOffset ? spec.cgOffset[2] : defaultCgZ + spec.cgModifier[2];
     const base = zFront - zRear;
     if (!(sag > 0) || !(Math.abs(base) > 1e-6))
-        return { springRate: [...spec.springRate], damping: [...spec.damping] };
+        return { springRate: [...spec.springRate], damping: [...spec.damping], sagFt: spec.sagFt ?? 0 };
     const front = (sprung * (zCg - zRear)) / base * 0.5 / sag;
     const rear = (sprung * (zFront - zCg)) / base * 0.5 / sag;
     const springRate = [Math.max(1, front), Math.max(1, rear)];
-    return { springRate, damping: [DAMPER_FACTOR * Math.sqrt(springRate[0]), DAMPER_FACTOR * Math.sqrt(springRate[1])] };
+    return { springRate, damping: [DAMPER_FACTOR * Math.sqrt(springRate[0]), DAMPER_FACTOR * Math.sqrt(springRate[1])], sagFt: sag };
 }
 /** A vehicle's figures with the garage's settings applied, as the game's setters change them (EVO2_PHYSICS.md 2.2). */
 export function applyEvoGarage(spec, garage, defaultCgZ) {
-    if (!garage)
-        return spec;
     const out = { ...spec, tireCF: [...spec.tireCF], torquePct: [...spec.torquePct] };
-    const springs = unit(garage.springs);
-    if (springs !== null)
-        Object.assign(out, evoSprings(spec, springs, defaultCgZ));
+    // setSprings runs for every vehicle at the start (0x508cd0), the computer's too, at the default 0.5 unless the garage
+    // says otherwise: the .TRK's spring_rate is always replaced, and the rest sits at half the travel.
+    Object.assign(out, evoSprings(spec, unit(garage?.springs) ?? 0.5, defaultCgZ));
+    if (!garage)
+        return out;
     const axle = unit(garage.axleRatio);
     if (axle !== null)
         out.finalDrive = spec.finalDrive * ((1 - axle) * 1.5 + 0.25);

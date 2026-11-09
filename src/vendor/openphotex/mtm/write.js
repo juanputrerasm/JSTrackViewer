@@ -1,5 +1,6 @@
 import { MTM_WHEEL_KEYS } from "../truck/mtm-trk.js";
 import { encodeWindows1252 } from "../text.js";
+import { SIT_FOG_HEADER, formatSitFogLine } from "./sit.js";
 const CRLF = "\r\n";
 /*
   An MTM2 .SIT. Unless the caller gives them, ramps, cylinders and top-crush parts are written
@@ -34,6 +35,8 @@ export function writeMtm2Sit(sit) {
         out.push("!type,flags", `${box.type},${box.flags ?? 0}`, "priority", String(box.priority ?? 0), "@sound effect entries", box.hitSound ?? "NULL.WAV", box.loopSound ?? "NULL.WAV", "0,0");
         if (box.light)
             out.push("Llight rad,hgt,r,g,b,glow,glowRad,coneLen,coneRim,coneBase,bright,aimOff", box.light.map(num).join(","));
+        if (box.fog)
+            out.push(SIT_FOG_HEADER, formatSitFogLine(box.fog));
     }
     out.push("*** Cylinders ***", String(sit.cylinders?.count ?? 0), ...(sit.cylinders?.lines ?? []));
     const crushes = sit.topCrush ?? [];
@@ -73,9 +76,168 @@ function mass(value) {
     return typeof value === "string" ? value : (value ?? 0).toFixed(6);
 }
 function truck(out, vehicle) {
-    out.push("truckFile", vehicle.truckFile ?? "POWERBIG.TRK", "ipos", triple(vehicle.position), "bvel", "0,0,0", "theta,phi,psi", triple(vehicle.orient), "p,q,r", "0,0,0", "faxle.angle,faxle.steering_angle", "0,0", "faxle.rtire.on_gnd,faxle.ltire.on_gnd", "-1,1", "raxle.angle,raxle.steering_angle", "0,0", "raxle.rtire.on_gnd,raxle.ltire.on_gnd", "-1,1", "xm.gear", "4", "ap.autopilot,ap.cnumber", "0,1", "ap.speed_control,ap.course_control,ap.lasterror", "0,0,0", "!ap.courseToFollow", String(vehicle.courseToFollow ?? 2), "$heliTimer,heliTheta,heliPhi,heliPsi", "0,0,0,0", "heliPos", "0,0,0", "^segments,laps,staged,bonusLaps,finishedRace,nextcheckpoint", "0,0,0,0,0,0", "totalracetime,fastestLap,dragTimer", "0,0,0");
-    for (let lap = 0; lap < 20; lap++)
-        out.push("***Lap time***", "0", "*****Checkpoint times*****", ...Array(20).fill("0"));
+    const s = vehicle.state;
+    if (!s || s.damageCode === null) {
+        // The stock grid slot: at rest unless a parsed slot (state with no damage code) says otherwise.
+        const g = (vs, fallback) => (vs ? vs.map((v) => String(Number(v || 0))).join(",") : fallback);
+        out.push("truckFile", vehicle.truckFile ?? "POWERBIG.TRK", "ipos", triple(vehicle.position), "bvel", g(s?.bvel, "0,0,0"), "theta,phi,psi", triple(vehicle.orient), "p,q,r", g(s?.rates, "0,0,0"), "faxle.angle,faxle.steering_angle", g(s?.frontAxle, "0,0"), "faxle.rtire.on_gnd,faxle.ltire.on_gnd", g(s?.frontOnGround, "-1,1"), "raxle.angle,raxle.steering_angle", g(s?.rearAxle, "0,0"), "raxle.rtire.on_gnd,raxle.ltire.on_gnd", g(s?.rearOnGround, "-1,1"), "xm.gear", g(s && [s.gear], "4"), "ap.autopilot,ap.cnumber", g(s && [s.autopilot, s.cnumber], "0,1"), "ap.speed_control,ap.course_control,ap.lasterror", g(s?.apControl, "0,0,0"), "!ap.courseToFollow", String(vehicle.courseToFollow ?? 2), "$heliTimer,heliTheta,heliPhi,heliPsi", g(s?.heli, "0,0,0,0"), "heliPos", g(s?.heliPos, "0,0,0"), "^segments,laps,staged,bonusLaps,finishedRace,nextcheckpoint", g(s && [s.segments, s.laps, s.staged, s.bonusLaps, s.finished, s.nextCheckpoint], "0,0,0,0,0,0"), "totalracetime,fastestLap,dragTimer", g(s && [s.totalRaceTime, s.fastestLap, s.dragTimer], "0,0,0"));
+        for (let lap = 0; lap < 20; lap++) {
+            out.push("***Lap time***", String(Number(s?.lapTimes[lap] || 0)), "*****Checkpoint times*****", ...Array.from({ length: 20 }, (_, k) => String(Number(s?.checkpointTimes[lap]?.[k] || 0))));
+        }
+        return;
+    }
+    // As 0x4c0360 prints a live truck: floats with six decimals (`%f`), the damage code unsigned (`%u`).
+    const f = (v) => Number(v || 0).toFixed(6);
+    const fs = (vs) => vs.map(f).join(",");
+    const i = (v) => String(Math.trunc(Number(v || 0)));
+    out.push("truckFile", vehicle.truckFile ?? "POWERBIG.TRK", "ipos", fs(vehicle.position.map(Number)), "bvel", fs(s.bvel), "theta,phi,psi", fs(vehicle.orient.map(Number)), "p,q,r", fs(s.rates), "faxle.angle,faxle.steering_angle", fs(s.frontAxle ?? [0, 0]), "faxle.rtire.on_gnd,faxle.ltire.on_gnd", (s.frontOnGround ?? [-1, 1]).map(i).join(","), "raxle.angle,raxle.steering_angle", fs(s.rearAxle ?? [0, 0]), "raxle.rtire.on_gnd,raxle.ltire.on_gnd", (s.rearOnGround ?? [-1, 1]).map(i).join(","), "xm.gear", i(s.gear), "ap.autopilot,ap.cnumber", `${i(s.autopilot)},${i(s.cnumber)}`, "ap.speed_control,ap.course_control,ap.lasterror", fs(s.apControl ?? [0, 0, 0]), "!ap.courseToFollow", String(vehicle.courseToFollow ?? 2), "@damageCode", String(s.damageCode >>> 0), "$heliTimer,heliTheta,heliPhi,heliPsi", fs(s.heli ?? [0, 0, 0, 0]), "heliPos", fs(s.heliPos ?? [0, 0, 0]), "^segments,laps,staged,bonusLaps,finishedRace,nextcheckpoint", [s.segments, s.laps, s.staged, s.bonusLaps, s.finished, s.nextCheckpoint].map(i).join(","), "totalracetime,fastestLap,dragTimer", fs([s.totalRaceTime, s.fastestLap, s.dragTimer]));
+    for (let lap = 0; lap < 20; lap++) {
+        out.push("***Lap time***", f(s.lapTimes[lap]), "*****Checkpoint times*****", ...Array.from({ length: 20 }, (_, k) => f(s.checkpointTimes[lap]?.[k])));
+    }
+}
+/**
+ * A parsed MTM2 SIT (`parseMtmSit`) as `writeMtm2Sit` input, for an editor that reads a level, changes its data and
+ * writes it back: `writeMtm2Sit(mtm2SitFromParsed(parseMtmSit(bytes)))` reads back as the same level.
+ *
+ * Positions are taken in feet as the game loader keeps them (`positionFt`, `startFt`), so a negative x or z comes back
+ * wrapped by +8192, which the game reads as the same place. A course segment gets the game's track width
+ * (`trackWidthFt`, 32 when the file had no `&` line). Numbers are written in the stock layout (two decimals, six for
+ * mass, speeds and lengths), and the header lines no reader interprets are carried over as written.
+ *
+ * Throws on what `writeMtm2Sit` cannot express: a SIT that is not MTM2, or a top-crush car in the size form, which no
+ * stock MTM2 level uses.
+ */
+export function mtm2SitFromParsed(sit) {
+    if (sit.origin !== "MTM2")
+        throw new Error(`mtm2SitFromParsed: a ${sit.origin} SIT cannot be written as MTM2`);
+    if (sit.topCrush.some((car) => car.sizeFt || car.size2Ft))
+        throw new Error("mtm2SitFromParsed: a top-crush car in the size form cannot be written");
+    const f6 = (v) => Number(v || 0).toFixed(6);
+    // Two decimals where they hold the value, as community editors write; six where they do not, as TRI's editor wrote.
+    const exact = (v) => {
+        const n = Number(v || 0);
+        for (const digits of [2, 6])
+            if (Number(n.toFixed(digits)) === n)
+                return n.toFixed(digits);
+        return String(n);
+    };
+    const feet = (v) => [exact(v?.[0]), exact(v?.[1]), exact(v?.[2])];
+    const angles = (a, b, c) => [exact(a), exact(b), exact(c)];
+    const truckOf = (t) => {
+        const s = t?.state;
+        return {
+            truckFile: t?.name || undefined,
+            position: feet(t?.positionFt),
+            orient: angles(t?.theta ?? 0, t?.phi ?? 0, t?.psi ?? 0),
+            courseToFollow: t?.courseToFollow,
+            // With no @damageCode line (a level's own grid slot) the writer keeps the stock grid layout.
+            state: s ?? undefined,
+        };
+    };
+    const placement = (b) => ({
+        position: feet(b.positionFt),
+        orient: angles(b.theta, b.phi, b.psi),
+        ...(b.modelName ? { modelName: b.modelName } : { extents: feet(b.sizeFt ?? [b.length, b.width, b.height]) }),
+        mass: b.mass,
+        bvel: feet(b.bvel ?? [0, 0, 0]),
+        rates: feet(b.rates ?? [0, 0, 0]),
+    });
+    const courseOf = (c) => (c?.segments ?? []).map((seg) => ({
+        start: feet(seg.startFt), end: feet(seg.endFt),
+        speedLimit: f6(seg.speedLimit), trackWidth: f6(seg.trackWidthFt),
+        types: `${seg.ctype},${seg.cspeedType}`,
+        speeds: `${f6(seg.cdecPoint)},${f6(seg.cspeed)},${seg.lastEntry}`,
+    }));
+    const player = sit.trucks.find((t) => t.playerSlot);
+    const extended = [null, null, null, null];
+    const directions = [0, 0, 0, 0];
+    sit.extendedCourses.forEach((c, i) => {
+        const slot = c.slot ?? i;
+        if (slot < 0 || slot > 3)
+            return;
+        extended[slot] = courseOf(c);
+        directions[slot] = c.direction;
+    });
+    return {
+        lvlName: sit.lvlName,
+        trackName: sit.trackName ?? "",
+        localeName: sit.localeName ?? "",
+        longitudeLatitude: sit.longitudeLatitude ?? undefined,
+        ambientLine: sit.ambientSound !== null,
+        viewState: sit.viewState ?? undefined,
+        raceTimes: sit.raceTimes ? sit.raceTimes.map(f6).join(",") : undefined,
+        controlFlags: sit.controlFlags ?? undefined,
+        stageFlags: sit.stageFlags ?? undefined,
+        pictureBmp: sit.logoBmp ?? "",
+        iconBmp: sit.mapBmp ?? "",
+        flyByAvi: sit.flyBy ?? undefined,
+        announcerWav: sit.announcerWav ?? undefined,
+        descriptionTxt: sit.descriptionTxt ?? "",
+        raceType: sit.trackTypeCode ?? undefined,
+        redbookTrack: sit.redbookTrack ?? undefined,
+        ambientSound: sit.ambientSound ?? undefined,
+        trackLength: f6(sit.trackLength),
+        weatherMask: sit.weatherMask ?? undefined,
+        yourTruck: truckOf(player),
+        vehicles: sit.trucks.filter((t) => !t.playerSlot).map(truckOf),
+        ramps: sit.boxes.filter((b) => b.type === 99).map(placement),
+        boxes: sit.boxes.filter((b) => b.type !== 99 && b.type !== 98).map((b) => ({
+            ...placement(b), type: b.type, flags: b.flags, priority: b.priority ?? 0,
+            hitSound: b.hitSound ?? undefined, loopSound: b.loopSound ?? undefined,
+            light: b.lightFields,
+            fog: b.fog,
+        })),
+        cylinders: sit.cylinders ?? undefined,
+        topCrush: sit.topCrush.map((car) => ({
+            position: feet(car.positionFt), position2: feet(car.position2Ft), orient: angles(car.theta, car.phi, car.psi),
+            modelName: car.modelName || undefined, cabModelName: car.cabModelName || undefined,
+            mass: car.mass, bvel: feet(car.bvel), rates: feet(car.rates),
+        })),
+        course: courseOf(sit.primaryCourse),
+        courseDirection: sit.primaryCourse?.direction ?? 0,
+        extendedCourses: extended,
+        extendedCourseDirections: directions,
+        stadium: sit.arena
+            ? { placed: sit.arena.placed, flag: 1, x: sit.arena.x, z: sit.arena.y, sx: sit.arena.sx, sz: sit.arena.sy, modelName: sit.arena.modelName }
+            : undefined,
+        backdrop: { type: sit.backdropType ?? 0, modelNames: sit.backdropModelNames ?? [] },
+    };
+}
+/**
+ * The lines of one SIT truck record (after its delimiter), as `writeMtm2Sit` writes it: for a caller that rewrites
+ * the vehicles of an existing SIT (`replaceSitVehicles`).
+ */
+export function sitTruckLines(vehicle) {
+    const out = [];
+    truck(out, vehicle);
+    return out;
+}
+const RECORD_DELIMITER = "*********************************************";
+/**
+ * An existing SIT's text with its `*** Vehicles ***` section put in place of `vehicles`, and, when given, its
+ * `$racetime, raceStartTime, dragDebugTimer` line: what MONSTER.EXE's "Save situation" writer (0x553230) changes in a
+ * level's SIT, the live trucks and the race clock. The rest is kept line for line. Lines end CRLF.
+ */
+export function replaceSitVehicles(sitText, vehicles, { raceTimes } = {}) {
+    const lines = sitText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    const start = lines.findIndex((line) => line.trim() === "*** Vehicles ***");
+    if (start < 0)
+        throw new Error("The SIT has no *** Vehicles *** section");
+    let end = start + 1;
+    while (end < lines.length && !/^\*\*\* \S/.test(lines[end].trim()))
+        end++;
+    const section = ["*** Vehicles ***", String(vehicles.length)];
+    for (const vehicle of vehicles)
+        section.push(RECORD_DELIMITER, ...sitTruckLines(vehicle));
+    lines.splice(start, end - start, ...section);
+    if (raceTimes) {
+        const label = lines.findIndex((line) => line.trim().startsWith("$racetime"));
+        if (label >= 0 && label + 1 < lines.length)
+            lines[label + 1] = raceTimes.map((v) => Number(v || 0).toFixed(6)).join(",");
+    }
+    while (lines.length && lines[lines.length - 1] === "")
+        lines.pop();
+    return lines.join(CRLF) + CRLF;
 }
 function course(out, segments, direction) {
     out.push(`${segments.length},${direction}`);

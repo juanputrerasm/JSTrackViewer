@@ -42,3 +42,16 @@ export function writeTxv(lines) {
     const text = lines.map((line) => `${"key" in line ? `${line.key}=${line.value}` : line.text}\r\n`).join("");
     return Uint8Array.from(text, (c) => c.charCodeAt(0) & 0xff);
 }
+export function readTxvInfo(input) {
+    const lines = Array.isArray(input) ? input : parseTxv(input);
+    const str = (k) => txvValue(lines, k);
+    const int = (k) => { const v = str(k); if (v == null)
+        return null; const n = Number.parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+    const bool = (k) => { const n = int(k); return n == null ? null : n !== 0; };
+    return {
+        formatVersion: int("formatVersion"), tool: str("tool"), toolVersion: str("toolVersion"), built: str("built"),
+        legacyFallback: bool("legacyFallback"), hdTextures: bool("hdTextures"), fogVolumes: int("fogVolumes"),
+        vegetation: bool("vegetation"), vegTrees: int("vegTrees"), vegClumps: int("vegClumps"),
+        terrainGrid: str("terrainGrid"), terrainHeights: str("terrainHeights"),
+    };
+}

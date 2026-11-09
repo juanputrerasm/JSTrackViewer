@@ -17,6 +17,11 @@
 
   A joystick or wheel (MONSTER_EXE_ANALYSIS.md §7, routine 0x5853b0) sets the controls directly,
   with no ramps, after the keyboard routine and once per sub-step: see `applyJoystick`.
+
+  Community Patch 3 (OpenMTM2's CP3_EXE_ANALYSIS.md, "Steering model") keeps that routine as its
+  "Original (1998)" steering model and adds an "Expo" one, with a steering range (the share of the
+  stick's throw that reaches full lock, 90 % in both) and, for Expo, a cubic blend and an ease-off
+  with speed. Its steering response reaches 2, where the game's INI stops at 1.
 */
 import { CONTROLS, DIFFICULTY, GEAR } from "../constants.js";
 /** The routine's frame-time scale: a 16.16 multiply by 0x7fff. */
@@ -113,19 +118,36 @@ function deadZoned(v, n) {
     }
     return out / (1 - n);
 }
+/** Community Patch 3's steering defaults (its INI and its Reset Steering & Feedback). */
+export const CP3_STEER = Object.freeze({ range: 90, speedSens: 35, easeOff: 0.6, easeSpeed: 88 });
+/**
+ * The shaped steering of a stick at `x` (-1..1, dead zone already out), 0..1 of full lock: the
+ * game's power curve, or Community Patch 3's Expo curve (`steerCurveMode` 1).
+ */
+export function joystickSteer(x, ctx) {
+    const speedFactor = Math.min(1.1, Math.max(1, Math.abs(ctx.forwardSpeed * 0.025)));
+    const range = ctx.steerRange !== undefined && ctx.steerRange > 4 && ctx.steerRange < 101 ? 100 / ctx.steerRange : 1.11;
+    const m = Math.min(1, Math.abs(x) * range);
+    if (ctx.steerCurveMode === 1) {
+        const expo = Math.min(1, Math.max(0, (ctx.steerExpo ?? 0) / 100));
+        const sens = Math.min(1, Math.max(0, (ctx.steerSpeedSens ?? CP3_STEER.speedSens) / 100));
+        const speed = Math.min(1, Math.abs(ctx.forwardSpeed) / CP3_STEER.easeSpeed);
+        return (1 - speed * sens * CP3_STEER.easeOff) * (m * m * m * expo + (1 - expo) * m);
+    }
+    const e = ((ctx.steeringResponse ?? 1) * 2 + 1) * speedFactor;
+    return Math.pow(m, e);
+}
 /**
  * Apply one sub-step of joystick or wheel input (MONSTER_EXE_ANALYSIS.md §7). Steering follows
- * the stick through a steep power curve; the pedal axis sets the throttle or the brakes
- * directly, selecting Reverse or first gear as the keyboard does with autoShift.
+ * the stick through a steep power curve (`joystickSteer`); the pedal axis sets the throttle or the
+ * brakes directly, selecting Reverse or first gear as the keyboard does with autoShift.
  */
 export function applyJoystick(c, j, ctx) {
     const n = j.deadZone ?? 0;
-    const speedFactor = Math.min(1.1, Math.max(1, Math.abs(ctx.forwardSpeed * 0.025)));
-    const e = ((ctx.steeringResponse ?? 1) * 2 + 1) * speedFactor;
     let x = deadZoned(Math.max(-1, Math.min(1, j.x)), n);
     if ((ctx.difficulty ?? DIFFICULTY.INTERMEDIATE) === DIFFICULTY.ROOKIE && !ctx.dragMode)
         x *= 0.75;
-    const s = Math.pow(Math.min(1, Math.abs(x) * 1.11), e);
+    const s = joystickSteer(x, ctx);
     c.steer = (x < 0 ? -s : s) * CONTROLS.steerLock;
     c.rearSteer = rearSteer(c.steer, ctx.dragMode);
     if (j.shiftUp)

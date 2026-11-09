@@ -10,7 +10,9 @@ export function createEvoParams(spec, rules, geometry = {}, setup = {}) {
     const weightLb = body + 2 * axleWeight;
     const cg = spec.cgOffset
         ? [spec.cgOffset[0], spec.cgOffset[1], spec.cgOffset[2]]
-        : [spec.cgModifier[0], 0.5 + spec.cgModifier[1], rules.defaultCgZ + spec.cgModifier[2]];
+        // The CG's height (setSprings, 0x5ecba0): the front right wheel's full-droop height, the rest sag, the modifier and a
+        // quarter foot (EVO2_PHYSICS.md 2). Without a sag (setSprings not run) the earlier half foot over the origin.
+        : [spec.cgModifier[0], spec.sagFt !== undefined ? hubs[0][1] + spec.sagFt + spec.cgModifier[1] + 0.25 : 0.5 + spec.cgModifier[1], rules.defaultCgZ + spec.cgModifier[2]];
     const frontShare = hubs[0][2] !== hubs[2][2] ? (cg[2] - hubs[2][2]) / (hubs[0][2] - hubs[2][2]) : 0.5;
     return {
         bodyWeightLb: body,

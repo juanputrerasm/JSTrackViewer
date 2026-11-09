@@ -39,7 +39,7 @@ export class TrackViewerApp {
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
       racetrack: true, underground: true, terrainOverlap: true, rockTops: true, lensflare: true,
-      sky: true, fog: true, movingObjects: true,
+      sky: true, fog: true, movingObjects: true, vegetation: true, fogVolumes: true,
     };
   }
 
@@ -202,6 +202,8 @@ export class TrackViewerApp {
       "tog-racetrack": "racetrack",
       "tog-underground": "underground",
       "tog-water":     "water",
+      "tog-vegetation": "vegetation",
+      "tog-fog-volumes": "fogVolumes",
       "tog-backdrop":  "backdrop",
       "tog-sky":       "sky",
       "tog-fog":       "fog",
@@ -1044,6 +1046,9 @@ export class TrackViewerApp {
       if (version.hdTextures) pairs.push(["HD textures", version.hdTextures]);
       if (version.legacyFallback) pairs.push(["Legacy fallback", version.legacyFallback]);
     }
+    // Community Patch 4's 16-bit terrain, by the mode its height file and .TXV resolve to.
+    const terrainMode = CP4_TERRAIN_MODES[data.terrain?.cp4Mode];
+    if (terrainMode) pairs.push(["Terrain grid", terrainMode]);
     dl.innerHTML = pairs.map(([k, v]) =>
       `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`
     ).join("");
@@ -1088,6 +1093,12 @@ export class TrackViewerApp {
       if (s.tunnelCount) statsPairs.push(["Tunnels", s.tunnelCount]);
       if (s.powerupCount) statsPairs.push(["Powerups", s.powerupCount]);
       if (s.animationCount) statsPairs.push(["Animated textures", s.animationCount]);
+      // Community Patch 4 world layers; see worker/cp4-world.js.
+      if (s.lakeCount) statsPairs.push(["Lakes", s.lakeCount]);
+      if (s.cp4TreeCount) statsPairs.push(["Trees", s.cp4TreeCount]);
+      if (s.cp4ClumpCount) statsPairs.push(["Grass clumps", s.cp4ClumpCount]);
+      if (s.fogVolumeCount) statsPairs.push(["Fog volumes", s.fogVolumeCount]);
+      if (s.srfModelCount) statsPairs.push(["Surface models", s.srfModelCount]);
       /*
         CPR tracks carry a second geometry layer the other games have no equivalent for. The
         names are the track editor's own, so this reads the way CPREdit would have shown it.
@@ -1107,6 +1118,36 @@ export class TrackViewerApp {
       statsDl.innerHTML = "<dt>Status</dt><dd>No stats.</dd>";
       if (statsPanel) statsPanel.hidden = false;
     }
+    this._updateFogVolumeList(data.fogVolumes ?? []);
+  }
+
+  /*
+    Community Patch 4 fog volumes, one button each under the stats: its size and look, and a
+    click flies the camera to it and outlines it (scene.focusFogVolume). Hidden without any.
+  */
+  _updateFogVolumeList(volumes) {
+    const list = this._doc.getElementById("fog-volume-list");
+    if (!list) return;
+    list.replaceChildren();
+    list.hidden = volumes.length === 0;
+    if (!volumes.length) return;
+    const heading = this._doc.createElement("h3");
+    heading.className = "subhead";
+    heading.textContent = "Fog volumes";
+    list.append(heading);
+    volumes.forEach((volume, index) => {
+      const button = this._doc.createElement("button");
+      button.type = "button";
+      button.className = "quiet";
+      const { title, detail } = describeFogVolume(volume, index);
+      const detailEl = this._doc.createElement("span");
+      detailEl.className = "fog-volume-detail";
+      detailEl.textContent = detail;
+      button.append(this._doc.createTextNode(title), detailEl);
+      button.disabled = !volume.drawn;
+      button.addEventListener("click", () => this._scene.focusFogVolume(index));
+      list.append(button);
+    });
   }
 
   /** The browser tab names the track being viewed, since several are usually open at once. */
@@ -1550,4 +1591,30 @@ function formatLatitude(degrees) {
 /** A longitude as 122.34°W. */
 function formatLongitude(degrees) {
   return `${Math.abs(degrees).toFixed(2)}°${degrees < 0 ? "W" : "E"}`;
+}
+
+/** Community Patch 4 height modes (OpenPhotex decodeMtm2Heights), as the Track Data panel names them. */
+const CP4_TERRAIN_MODES = {
+  classic16: "16-bit, 32 ft",
+  spline: "Spline, 8 ft",
+  fine: "Full Map, 8 ft",
+};
+
+/** A fog volume's button text in the Stats panel: its size, then the rest of its F block. */
+export function describeFogVolume(volume, index) {
+  const f = volume.fog;
+  const round = (v) => String(Math.round(v * 100) / 100);
+  const hex = (c) => Math.round(Math.max(0, Math.min(1, c)) * 255).toString(16).padStart(2, "0");
+  const weathers = (f.wmask & 0x1ff) === 0x1ff ? "all weathers"
+    // The wmask bits are the weather ids, the order of WEATHER_NAMES (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 4).
+    : WEATHER_NAMES.filter((_, bit) => (f.wmask >> bit) & 1).join(", ") || "no weather";
+  const title = `Fog ${index + 1}: ${round(volume.w)} x ${round(volume.l)} x ${round(volume.h)} ft`
+    + (volume.drawn ? "" : " (not drawn: a side of 0.5 ft or less)");
+  const detail = [
+    `base ${round(f.base)} ft, visibility ${round(f.vis)} ft, colour #${f.color.map(hex).join("")}`,
+    `half ${round(f.half)}, edge ${round(f.edge)}, top ${round(f.top)}, bottom ${round(f.bot)} ft, max opacity ${round(f.maxOp)}`,
+    `round ${round(f.round)}, wisp ${round(f.wisp)} (size ${round(f.wsize)}, speed ${round(f.wspd)})`,
+    weathers,
+  ].join("; ");
+  return { title, detail };
 }

@@ -188,9 +188,17 @@ export function createOpenMtm2Sim(assembly, frame, { colliders = null, waterLeve
       if (waterLevelFt !== null && s.terrain !== null && s.terrain <= waterLevelFt) {
         return ground.weather === S.WEATHER.SNOW ? 800 : 1300;
       }
+      // A Community Patch 4 lake tile is deep water below the lake's surface (CP4 FUN_140203ed0,
+      // OpenMTM2 docs/CP4_EXE_ANALYSIS.md 2; OpenPhotex terrainSurfaceValue does the same).
+      const lake = frame.lakeLevelAtFeet?.(x, -z) ?? null;
+      if (lake !== null && s.terrain !== null && s.terrain < lake) {
+        return ground.weather === S.WEATHER.SNOW ? 800 : 1300;
+      }
       return frame.surfaceAtFeet?.(x, -z) ?? 200;
     },
   };
+  // The water a tire sinks into: the lake's surface on a lake tile, else the track's (OpenPhotex dynamics.js reads it).
+  if (frame.hasLakes) ground.waterLevelAt = (x, z) => frame.lakeLevelAtFeet(x, -z) ?? waterLevelFt;
   const context = { ground, human: true, difficulty: params.difficulty, sonicTrack: false };
   // OpenPhotex's own collision for ground boxes and fixed scenery's walls, as OpenMTM2 runs it.
   const wallFaces = createWallFaces(colliders);

@@ -6,7 +6,7 @@ import { loadRaceTrackLayer } from "./racetrack-loader.js";
 import { podRawSide } from "./texture-decoder.js";
 import { cprCheckpointRole } from "../shared/cpr-track-schema.js";
 import { CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE } from "../shared/terrain-height.js";
-import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, sitTrackTypeName } from "../vendor/openphotex/index.js";
+import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, sitTrackTypeName, readTxvInfo, decodeMtm2Heights, decodeMtm2HeightPng } from "../vendor/openphotex/index.js";
 
 /*
   MTM1, MTM2 and CPR tracks, from a .SIT entry in a POD archive.
@@ -161,6 +161,11 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
 
   // Water level, in legacy height steps.
   if (lvl.waterHeight !== null) doc.waterLevel = Math.round(lvl.waterHeight / 4);
+  // The same in feet, unrounded (0.5 ft units): Community Patch 4's lakes are checked against it (cp4-world.js).
+  if (lvl.waterHeight !== null) doc.waterHeightFt = lvl.waterHeight * 0.5;
+
+  // Community Patch 4's 16-bit terrain grids, before the grid is inferred from the file's size.
+  if (doc.origin !== "CPR") applyCp4Heights(doc, podIndex, getBytes, rawName);
 
   // Infer terrain grid
   inferTerrain(doc);
@@ -288,6 +293,40 @@ function parseTty(bytes, doc) {
   }
 }
 
+/*
+  Community Patch 4 (beta 0.52) and Traxx 1.7 store MTM2 heights on 16-bit grids (OpenPhotex mtm/heights.ts):
+  131,072 bytes, 256 x 256 at 1/128 ft (a Spline track when DATA\<stem>.TXV says terrainGrid=spline), or a
+  2,097,152-byte 1024 x 1024 Full Map at 8 ft; or a height PNG the .TXV names with terrainHeights. A classic byte
+  is v >> 8, so these are 1/256 of a legacy 2 ft step: the grid goes on as 16-bit samples with heightDivisor 256.
+  The 32 ft corners go on as the grid every sampler reads; a Spline or Full Map track also keeps its 8 ft grid in
+  `terrain.fine` ({ heights, subdivisions 4, divisor 256 }), which terrain-builder.js draws and drive/world-frame.js
+  drives on. CPR's 16-bit grid, the same length at another scale, never comes here.
+*/
+function applyCp4Heights(doc, podIndex, getBytes, rawName) {
+  const stem = archiveTitle(rawName ?? "").replace(/\.[^.]*$/, "");
+  const txvEntry = stem ? resolveTrackDataAsset(podIndex, `${stem}.TXV`) : null;
+  const txv = txvEntry ? readTxvInfo(getBytes(txvEntry)) : null;
+  const pngEntry = txv?.terrainHeights ? resolveTrackDataAsset(podIndex, txv.terrainHeights) : null;
+  const raw = doc.terrain.rawData;
+  if (!pngEntry && !(raw && (raw.length === 131072 || raw.length === 2097152))) return;
+  let heights;
+  try {
+    heights = pngEntry ? decodeMtm2HeightPng(getBytes(pngEntry), txv?.terrainGrid) : decodeMtm2Heights(raw, txv?.terrainGrid);
+  } catch (err) {
+    doc.warnings?.push?.(`Heights: ${err.message}`);
+    return;
+  }
+  const bytes = new Uint8Array(heights.coarse.length * 2);
+  for (let i = 0; i < heights.coarse.length; i++) { bytes[2 * i] = heights.coarse[i] & 255; bytes[2 * i + 1] = heights.coarse[i] >> 8; }
+  doc.terrain.rawData = bytes;
+  doc.terrain.cp4 = { mode: heights.mode, warning: heights.warning, fine: heights.fine };
+  doc.terrain.fine = heights.fine ? { heights: heights.fine, subdivisions: CP4_FINE_SUBDIVISIONS, divisor: 256 } : null;
+  if (heights.warning) doc.warnings?.push?.(`Heights: ${heights.warning}`);
+}
+
+/** 8 ft points a 32 ft cell side on a Spline or Full Map track (MTM2_FINE_CELL_FT). */
+const CP4_FINE_SUBDIVISIONS = 4;
+
 function inferTerrain(doc) {
   const { rawData, clrData, lteData } = doc.terrain;
   let gridSize = 256;
@@ -313,8 +352,9 @@ function inferTerrain(doc) {
     MTM1 and MTM2 terrain is one byte per cell (none of their stock PODs holds a
     131,072-byte grid). Evo's 16-bit grid is 11.5 and comes through its own loader.
   */
-  const cpr = rawBytesPerCell === 2;
-  doc.terrain.heightDivisor = cpr ? CPR_HEIGHT_DIVISOR : null;
+  const cp4 = !!doc.terrain.cp4 && rawBytesPerCell === 2;
+  const cpr = rawBytesPerCell === 2 && !cp4;
+  doc.terrain.heightDivisor = cpr ? CPR_HEIGHT_DIVISOR : cp4 ? 256 : null;
   doc.terrain.heightUnitScale = cpr ? CPR_HEIGHT_UNIT_SCALE : 1;
   // CPR splits its terrain cells on alternating diagonals; see cellSplit in terrain-builder.js.
   doc.terrain.cellSplit = cpr ? "checkerboard" : "fixed";

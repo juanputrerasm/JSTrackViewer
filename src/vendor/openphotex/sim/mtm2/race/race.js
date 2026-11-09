@@ -53,7 +53,7 @@ export function raceStarted(race) {
  * The checkpoint-mode hull test (§14.24 step 2): the deepest hull point that crossed the box's
  * back face (-z), with its depth and body point; null when none.
  */
-export function backFaceCrossing(s, p, box, dt) {
+export function backFaceCrossing(s, p, box, dt, twoWay = false) {
     const m = s.matrix, bm = box.matrix, half = box.half;
     const iv = toWorld(m, s.bvel[0], s.bvel[1], s.bvel[2]);
     const lift = toWorld(m, 0, s.points[2 * 3 + 1] * 0.5, 0);
@@ -69,7 +69,9 @@ export function backFaceCrossing(s, p, box, dt) {
         const l = Math.hypot(d[0], d[1], d[2]);
         const dir = l === 0 ? [0, 1, 0] : [d[0] / l, d[1] / l, d[2] / l];
         const { face } = nearestFace(half, prevRef, dir, true, HULL_ORDER);
-        if (face < 0 || faceNormal(face)[2] !== -1)
+        // Two-way (Evo 2): the front face (+z) as well as the back.
+        const nz = face < 0 ? 0 : faceNormal(face)[2];
+        if (twoWay ? nz === 0 : nz !== -1)
             continue;
         const depth = depthInside(half, cur, face);
         if (deepest < depth) {
@@ -96,15 +98,16 @@ export function testCheckpoint(race, t, dt, recover) {
     const d = Math.hypot(s.pos[0] - det.pos[0], s.pos[1] - det.pos[1], s.pos[2] - det.pos[2]);
     if (!(d < (det.radius + truckRadius(t.p)) * PRETEST))
         return 0;
-    const hit = backFaceCrossing(s, t.p, det, dt);
+    const twoWay = !!race.twoWay;
+    const hit = backFaceCrossing(s, t.p, det, dt, twoWay);
     if (!hit)
         return 0;
     const vz = speedThrough(s, det, hit.point);
-    if (!(vz > 0))
+    if (twoWay ? vz === 0 : !(vz > 0))
         return 0;
-    const result = backFaceCrossing(s, t.p, cp.gate, dt) ? 2 : 3;
+    const result = backFaceCrossing(s, t.p, cp.gate, dt, twoWay) ? 2 : 3;
     if (result === 2)
-        pass(race, t, hit.depth, vz);
+        pass(race, t, hit.depth, Math.abs(vz));
     else if (t.state !== 3 && !t.player && recover)
         missedCheckpoint(race, t, cp, recover);
     t.state = result;
@@ -146,7 +149,7 @@ function finishLap(race, t) {
 function missedCheckpoint(race, t, cp, recover) {
     const s = t.s;
     // `proLift` (a port's choice, not the game's) sends the helicopter on Professional too.
-    if (race.difficulty === 2 && !recover.rc.proLift) {
+    if (race.difficulty === 2 && !recover.rc.proLift && !recover.rc.missedLift) {
         s.pos[0] = cp.gate.pos[0];
         s.pos[1] += 10;
         s.pos[2] = cp.gate.pos[2];

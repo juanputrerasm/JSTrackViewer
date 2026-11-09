@@ -30,6 +30,7 @@
 */
 
 import { heightAtCell } from "../shared/terrain-height.js";
+import { createFineSampler } from "../shared/fine-terrain.js";
 import { createRaceTrackSupport } from "./racetrack-collider.js";
 
 /** How far under a CPR road surface the ground is held where it would poke through. */
@@ -114,12 +115,50 @@ export function createWorldFrame(trackData) {
   }
 
   /*
+    Community Patch 4 lakes (worker/cp4-world.js): the lake id of each 32 ft tile, x + z * 256 in
+    the level's rows, and each drawn lake's surface in feet. Null off a lake or on a track
+    without any.
+  */
+  const lakeTiles = trackData?.lakes?.tileMap
+    ? (trackData.lakes.tileMap instanceof Uint8Array ? trackData.lakes.tileMap : new Uint8Array(trackData.lakes.tileMap))
+    : null;
+  const lakeLevels = trackData?.lakes?.levelFt ?? null;
+  function lakeLevelAtFeet(xFt, zFt) {
+    if (!lakeTiles || gridSize !== 256) return null;
+    const cx = Math.floor(xFt * UNITS_PER_FOOT_H / cellSize);
+    const cz = Math.floor(gridSize - zFt * UNITS_PER_FOOT_H / cellSize);
+    if (cx < 0 || cz < 0 || cx >= gridSize || cz >= gridSize) return null;
+    const id = lakeTiles[cx + cz * gridSize];
+    return id ? lakeLevels?.[id] ?? null : null;
+  }
+
+  /*
     Whether a cell is split along its other diagonal, (cx+1,cz) to (cx,cz+1). Only on a
     checkerboard terrain (CPR), and only where cx + cz is odd; see cellSplit in
     terrain-builder.js. The wheels have to meet the triangles that are drawn.
   */
   const checkerboard = terrain?.cellSplit === "checkerboard";
   const splitsOther = (cx, cz) => checkerboard && ((cx + cz) & 1) === 1;
+
+  /*
+    A Community Patch 4 Spline or Full Map track drives on its 8 ft grid, the one the mesh draws
+    (shared/fine-terrain.js); every other track on the 32 ft corners. `cellUnder` gives the
+    triangle pair under a point either way: corners in steps, fractions, split and side in feet.
+  */
+  const fine = createFineSampler(terrain?.fine, gridSize);
+  function cellUnder(gx, gz) {
+    if (fine) {
+      const c = fine.cell(gx, gz);
+      return { ...c, cellFt: cellSize / UNITS_PER_FOOT_H / fine.subdivisions };
+    }
+    const cx = Math.floor(gx);
+    const cz = Math.floor(gz);
+    return {
+      h00: stepsAtCell(cx, cz), h10: stepsAtCell(cx + 1, cz),
+      h11: stepsAtCell(cx + 1, cz + 1), h01: stepsAtCell(cx, cz + 1),
+      u: gx - cx, w: gz - cz, other: splitsOther(cx, cz), cellFt: cellSize / UNITS_PER_FOOT_H,
+    };
+  }
 
   /*
     Terrain height under a point, in feet, interpolated over the same two triangles the mesh
@@ -144,18 +183,10 @@ export function createWorldFrame(trackData) {
     const gx = sceneX / cellSize;
     // Invert z = (gridSize - cz) * cellSize.
     const gz = gridSize - sceneZ / cellSize;
-    const cx = Math.floor(gx);
-    const cz = Math.floor(gz);
-    const u = gx - cx;
-    const w = gz - cz;
-
-    const h00 = stepsAtCell(cx, cz);
-    const h10 = stepsAtCell(cx + 1, cz);
-    const h11 = stepsAtCell(cx + 1, cz + 1);
-    const h01 = stepsAtCell(cx, cz + 1);
+    const { h00, h10, h11, h01, u, w, other } = cellUnder(gx, gz);
 
     let steps;
-    if (splitsOther(cx, cz)) {
+    if (other) {
       // Split along v1-v3: (v0,v1,v3) covers u + w <= 1, (v1,v2,v3) the rest.
       steps = u + w <= 1
         ? h00 + (h10 - h00) * u + (h01 - h00) * w
@@ -180,25 +211,21 @@ export function createWorldFrame(trackData) {
   function terrainNormalAtFeet(xFt, zFt) {
     if (feetGrid) return feetGrid.normalAt(xFt, zFt);
     if (!raw) return { x: 0, y: 1, z: 0 };
-    const cellFt = cellSize / UNITS_PER_FOOT_H;
     const sceneX = xFt * UNITS_PER_FOOT_H;
     const sceneZ = zFt * UNITS_PER_FOOT_H;
     const gx = sceneX / cellSize;
     const gz = gridSize - sceneZ / cellSize;
-    const cx = Math.floor(gx);
-    const cz = Math.floor(gz);
-    const u = gx - cx;
-    const w = gz - cz;
-
-    const h00 = stepsToFeet(stepsAtCell(cx, cz));
-    const h10 = stepsToFeet(stepsAtCell(cx + 1, cz));
-    const h11 = stepsToFeet(stepsAtCell(cx + 1, cz + 1));
-    const h01 = stepsToFeet(stepsAtCell(cx, cz + 1));
+    const c = cellUnder(gx, gz);
+    const { u, w, cellFt } = c;
+    const h00 = stepsToFeet(c.h00);
+    const h10 = stepsToFeet(c.h10);
+    const h11 = stepsToFeet(c.h11);
+    const h01 = stepsToFeet(c.h01);
 
     // Slopes in feet per foot along +x (u) and along -z (w).
     let dhdu;
     let dhdw;
-    if (splitsOther(cx, cz)) {
+    if (c.other) {
       if (u + w <= 1) {
         dhdu = (h10 - h00) / cellFt;
         dhdw = (h01 - h00) / cellFt;
@@ -270,6 +297,8 @@ export function createWorldFrame(trackData) {
     terrainAtFeet,
     normalAtFeet,
     surfaceAtFeet,
+    lakeLevelAtFeet,
+    hasLakes: !!lakeTiles,
 
     /*
       Where a truck is DRAWN, which is not its position scaled.

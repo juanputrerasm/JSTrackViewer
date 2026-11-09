@@ -16,6 +16,18 @@ JSTrackViewer opens the archives of **Monster Truck Madness**, **Monster Truck M
 
 ---
 
+## What's new in 1.2.0
+
+Changes since 1.1.0:
+
+- Community Patch 4 and Traxx 1.7 tracks: 16-bit heightmaps, 16-bit Spline and 16-bit Full Map terrain (drawn on its 8 ft grid), and height PNGs.
+- Lakes drawn at their own heights; Test Drive treats them as water.
+- Fog volumes shown as translucent boxes in the weathers they belong to, listed in the Stats panel.
+- Traxx 1.7 vegetation: trees and grass drawn instanced, with far cards, and a Vegetation toggle.
+- Surface types from a model's .SRF file shown in the Models window.
+- A new document comparing the June 1996 MTM1 beta (Build #41) with the retail game.
+- OpenPhotex 1.7.0.
+
 ## What's new in 1.1.0
 
 Changes since 1.0.0:
@@ -85,6 +97,11 @@ Each feature is described in detail under [Feature details](#feature-details).
 | Sky RAW + ACT, VOX | MTM1, Terminal Velocity, Fury3, Hellbender | Sky texture, recolouring palette and horizon colour; `STARS.VOX` star field |
 | TRK + TTX | CPR | The road layer: surfaces, curbs, walls and their textures |
 | WAT, VEG | 4x4 Evolution 2 | Water material and vegetation |
+| RAW (16-bit), height PNG | MTM2 (Community Patch 4) | 16-bit heights at 1/128 ft: 256 x 256 (131,072 bytes, drawn as is or expanded to an 8 ft Spline grid when the TXV says `terrainGrid=spline`), a 1024 x 1024 Full Map at 8 ft (2,097,152 bytes), or the grey PNG the TXV names with `terrainHeights` |
+| TXV | MTM2 (Community Patches 3 and 4) | The track's version record: format version, tool, and Community Patch 4's terrain grid and height file |
+| WTR | MTM2 (Community Patch 4) | Lakes above the track's own water: a height each and a 256 x 256 map of their tiles |
+| VEG (binary, MVEG) | MTM2 (Community Patch 4) | Placed trees and grass clumps, with each species' model and far card |
+| SRF | MTM2 (Community Patch 4) | A model's surface types, one per texture, making it drivable scenery |
 | AI_*.TXT | 4x4 Evolution | The computer drivers' recorded laps |
 
 MTM1 and MTM2 levels carry all nine RA and CL grids, but only RA0, RA1 and CL0 hold anything; the six underground grids are present and empty. CPR, Terminal Velocity, Fury3 and 4x4 Evolution levels have none of them.
@@ -199,6 +216,7 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 - The heightfield is drawn with its texture grid, each cell's texture mirrored and rotated as its CLR entry says. CPR, Terminal Velocity, Fury3 and Hellbender split their cells along alternating diagonals, as the games do, and markers sit on those triangles.
 - Terminal Velocity, Fury3 and Hellbender terrain is drawn in its true proportions against the objects on it (one height step is 1/32 of a square in Terminal Velocity and Fury3, 1/16 in Hellbender).
 - MTM1 and MTM2 terrain is drawn at the brightness its LTE file bakes in.
+- Community Patch 4 terrain: 16-bit heights are read at their full precision, and Spline and Full Map tracks are drawn on their 8 ft grid, each 32 ft cell's texture stretched over its 16 finer quads, split on the same alternating diagonals the game drives on. The Track Data panel names the grid. Test Drive and the markers stand on the same 8 ft triangles.
 - Ground boxes are the solid blocks that stand on single cells, each face textured from CL0. Hellbender's underground is a second layer under the surface: cavern floor and ceiling meshes covering only the hollow cells, plus the cavern's own ground boxes. The surface opens into it where the game opens it, at every point whose surface height is 0 above a cavern ceiling at 0: almost all of the floating levels, and the shafts and pits of levels such as JURASIC and KREASH3.
 - Terminal Velocity and Fury3 chambers, the rooms inside the solid rock at altitude 255, get the ceiling the game generates: the floor mirrored about 255, textured from ten squares along. The Rock tops toggle hides the rock the game never draws, to look down into them.
 - Texture presentation: smooth or sharp (pixelated) filtering, and the two-pixel tile overlap that hides seams between terrain tiles, on by default where a game's tile sets need it.
@@ -210,6 +228,10 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 - Animated BIN models play their keyframes, blending each frame smoothly into the next. Animated textures play where the level's ANI file names them.
 - Moving objects: MTM2 and 4x4 Evolution trains travel along their velocity, following the terrain and ground boxes, and 4x4 Evolution 2's banked flying objects circle overhead with whatever is attached to them, such as a plane's banner. The Moving objects toggle stops them and puts them back.
 - 4x4 Evolution 2 vegetation is drawn with instancing.
+- Community Patch 4 vegetation is drawn with instancing too: every tree and grass clump of the track's VEG, placed, turned and scaled as the file says. Trees change to their far card beyond 950 ft and grass is drawn to 1,000 ft, as the game's defaults do, decided per 256 ft square. The Vegetation toggle hides both games' vegetation.
+- Community Patch 4 lakes are drawn as flat water at their own heights over their tiles, with the track's water, and Test Drive sinks into them. A lake the game would refuse (out of range, below the track's water, or on a bed that touches it) is left out and named in the warnings.
+- Community Patch 4 fog volumes (type 14 boxes) are drawn as translucent boxes in their colour, their opacity from their visibility distance, and shown only in the weathers they name. The Stats panel lists each with its settings; a click flies the camera to it and outlines it. The Fog volumes toggle hides them, and Test Drive drives through them.
+- A model with a Community Patch 4 SRF shows each of its textures' surface type in the Models box.
 
 ### Courses and markers
 
@@ -262,7 +284,7 @@ See [the physics integration notes](docs/TEST_DRIVE_PHYSICS.md) for the shared s
 
 - The free camera uses MTM2's field of view, about 70 degrees vertically; the mouse wheel and the Zoom slider narrow or widen it from 0.5× to 8×.
 - The minimap shows the heightfield (or, for Fly!, the satellite imagery) and moves the camera where you click.
-- The Markers and View Options panels toggle each layer: terrain, textures, grid, wireframes, objects, ground boxes, collision boxes, water, backdrop, sky, fog and markers. Distance, sunlight and gamma have sliders. Panels collapse from their headings, and only the controls the loaded track uses appear.
+- The Markers and View Options panels toggle each layer: terrain, textures, grid, wireframes, objects, vegetation, ground boxes, collision boxes, water, fog volumes, backdrop, sky, fog and markers. Distance, sunlight and gamma have sliders. Panels collapse from their headings, and only the controls the loaded track uses appear.
 - Track Data and Stats list the track's metadata and statistics: textures, objects, courses, ground boxes, and CPR surface and wall types.
 - The **Models** and **Textures** buttons under Track Data open two floating boxes, after JSTraxx's (and Traxx's) boxes of the same names. Models lists every model in the track with how many objects place it, a 3D preview with turn, tilt and zoom, and its vertex and triangle counts; picking one flies the camera to the front of the first object using it and outlines that object in wireframe, and the arrows step through the others. Textures shows every terrain, CART road, model and sky texture in a grid of small tiles (24 to 128 px, 48 by default; a larger box shows more), and a click shows the texture's name, slot and size, and its ground type where the game gives one: Grass, Cement, Dirt and so on, with depth, from the .TTY in Monster Truck Madness and CART, Evo's .TEX (with its vegetation class), and CART's road surface types. Terminal Velocity, Fury3 and Hellbender store none. Both boxes can be moved and resized, and remember where they were.
 
@@ -309,6 +331,7 @@ Archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex), 
 - Terminal Velocity and Fury3 powerup models ship in `STARTUP.POD`, not in a level archive, so loose powerups are drawn as named markers unless the opened archive carries the models.
 - 4x4 Evolution `.SDW` baked shadow overlays and `.RTD` grids are read but not drawn.
 - 4x4 Evolution 2 material stages beyond diffuse and alpha (bump, cubic reflection, gloss and projected shadows) are not reproduced.
+- Community Patch 4: lake reflections, the fog volumes' soft edges, height falloff and wisps (their shader lives in the game's renderer, which is not available), vegetation tint, the far card cross-fade band, scenery detail tiers (every tier is drawn) and tree collision are not reproduced. SRF surface types are shown, not driven on: a model's collision is the same with or without one.
 - 4x4 Evolution vegetation stands on the drawn terrain and is turned by a viewer convention, because a `.VEG` record carries no orientation; `treeBiasY` is read but not applied.
 - Standalone downloadable 4x4 Evolution `.LTE` tracks are not supported; they are a compressed format that reuses assets the track does not carry.
 - Fly! scenery does not draw its beacons and windsocks, whose models ship with the game rather than the scenery, or the sectional charts in `Maps\`. Cells outside a city's photographed area use generic textures that also ship with the game, so they are drawn in flat land and water colours.

@@ -98,6 +98,8 @@ export class ModelsBox {
     this.vertices = el("output", { class: "box-count" }, "0");
     this.triangles = el("output", { class: "box-count" }, "0");
     this.placed = el("output", { class: "box-count" }, "0");
+    // Community Patch 4: what the model's MODELS\<stem>.SRF makes each of its textures to drive on.
+    this.surface = el("p", { class: "box-surface", hidden: true });
     this.prev = el("button", { type: "button", title: "Go to the previous object with this model", onclick: () => this.step(-1) }, "◀");
     this.next = el("button", { type: "button", title: "Go to the next object with this model", onclick: () => this.step(1) }, "▶");
     this.which = el("span", { class: "box-which" }, "");
@@ -113,6 +115,7 @@ export class ModelsBox {
           el("label", { class: "box-field" }, "Vertices", this.vertices),
           el("label", { class: "box-field" }, "Triangles", this.triangles),
           el("label", { class: "box-field" }, "Placed", this.placed)),
+        this.surface,
         el("div", { class: "box-go" }, this.prev, this.which, this.next, this.clear))));
 
     this.preview = createPreview(this.canvas);
@@ -185,6 +188,8 @@ export class ModelsBox {
     const many = (model?.instances.length ?? 0) > 1;
     this.prev.disabled = this.next.disabled = !many;
     this.which.textContent = model?.instances.length ? `${this.instance + 1} / ${model.instances.length}` : "";
+    this.surface.hidden = !model?.surface;
+    this.surface.textContent = model?.surface ? describeSurface(model.surface) : "";
     this.draw();
   }
 
@@ -194,4 +199,13 @@ export class ModelsBox {
     this.preview.draw(group, YAW_STEP * (Number(this.yaw.value) - HMID),
       PITCH_STEP * (Number(this.pitch.value) - VMID), this.zoom / ZOOM_START);
   }
+}
+
+/** One line for a model's .SRF: each texture's surface type, "not a surface" where it has none. */
+export function describeSurface(surface) {
+  const parts = surface.materials.map(({ texture, type }) => `${texture} ${type ?? "not a surface"}`);
+  if (surface.fallback) parts.push(`others ${surface.fallback}`);
+  let text = `Surface (.SRF): ${parts.join(", ") || "no textures"}`;
+  if (surface.rejected?.length) text += `; ${surface.rejected.length} line(s) rejected`;
+  return text;
 }

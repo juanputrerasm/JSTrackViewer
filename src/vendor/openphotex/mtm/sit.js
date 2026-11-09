@@ -39,6 +39,38 @@ export function parseSitLight(line) {
         bright: Math.min(3.75, Math.max(0.25, Math.round(bright * 4) / 4)), aimOff,
     };
 }
+export const BOX_FOG = 14;
+/** The F block's header line, exactly as Traxx writes it (the engine reads it with an 80-character fgets). */
+export const SIT_FOG_HEADER = "Ffog w,l,h,base,vis,r,g,b,half,edge,top,maxOp,wmask,round,wisp,wsize,wspd,bot";
+/** The engine's defaults for a missing field (Traxx FOGDEF_*); a new Traxx object differs only in round 1, wisp 0.5. */
+const FOG_DEFAULTS = [0, 0, 0, 0, 300, 0.75, 0.78, 0.82, 8, 20, 5, 1, 511, 0, 0, 40, 3, 0];
+const FOG_RANGES = [
+    [0, 100000], [0, 100000], [0, 100000], [-10000, 10000], [1, 100000], [0, 1], [0, 1], [0, 1],
+    [0, 100000], [0, 100000], [0, 100000], [0, 1], null, [0, 1], [0, 1], [1, 100000], [0, 100000], null,
+];
+/** The `F` block's data line, read tolerantly (missing trailing fields keep their defaults) and clamped as Traxx's ClampFog. */
+export function parseSitFog(line) {
+    const values = [...FOG_DEFAULTS];
+    if (line)
+        line.split(",").slice(0, values.length).forEach((part, i) => {
+            const v = i === 12 ? Number.parseInt(part, 10) : Number.parseFloat(part);
+            if (Number.isFinite(v))
+                values[i] = v;
+        });
+    values.forEach((v, i) => {
+        const r = FOG_RANGES[i];
+        if (r)
+            values[i] = !(v >= r[0]) ? r[0] : v > r[1] ? r[1] : v;
+    });
+    const [w, l, h, base, vis, r, g, b, half, edge, top, maxOp, wmask, round, wisp, wsize, wspd, bot] = values;
+    return { w, l, h, base, vis, color: [r, g, b], half, edge, top, maxOp, wmask, round, wisp, wsize, wspd, bot };
+}
+/** The F block's data line as Traxx writes it: C's %f for every field but wmask (%d). */
+export function formatSitFogLine(fog) {
+    const f = (v) => Math.fround(v).toFixed(6);
+    return [fog.w, fog.l, fog.h, fog.base, fog.vis, ...fog.color, fog.half, fog.edge, fog.top, fog.maxOp].map(f).join(",")
+        + `,${Math.trunc(fog.wmask)},` + [fog.round, fog.wisp, fog.wsize, fog.wspd, fog.bot].map(f).join(",");
+}
 /*
   Which game a SIT came from.
 
@@ -146,6 +178,10 @@ export function parseMtmSit(input, sitTitle = "") {
         trackName: valueAfter("!Race Track Name")?.trim() ?? null,
         flyBy: valueAfter("Track Fly-By .AVI file")?.trim() ?? null,
         sonicTrack: valueAfter("Track Fly-By .AVI file")?.trim() === "Sonic",
+        raceTimes: (() => {
+            const at = lines.findIndex((line) => line.trim().startsWith("$racetime"));
+            return at >= 0 && at + 1 < lines.length ? parseFloatTriplet(lines[at + 1]) : null;
+        })(),
         localeName: valueAfter("Race Track Locale")?.trim() ?? null,
         logoBmp: valueAfter("Track Logo .BMP file")?.trim() || null,
         mapBmp: valueAfter("Track Map .BMP file")?.trim() || null,
@@ -166,6 +202,13 @@ export function parseMtmSit(input, sitTitle = "") {
         trucks: parseTrucks(lines),
         cylinders: parseCylinders(lines),
         longitudeLatitude: valueAfter("Track Longtitude, Latitude")?.trim() ?? null,
+        viewState: valueAfter("viewmode,spotd,spotp,spoth,zoom")?.trim() ?? null,
+        controlFlags: valueAfter("controlflag, autoShift, autoStage, bothStaged, bothStagedPrev")?.trim() ?? null,
+        stageFlags: valueAfter("stageComFlag, bonusLapFlag")?.trim() ?? null,
+        backdropType: (() => {
+            const at = indexOfLine(lines, "*** Backdrop ***");
+            return at >= 0 && at + 2 < lines.length ? parseLeadingInt(lines[at + 2]) : null;
+        })(),
         warnings: [],
     };
     const trackType = valueAfter("Track Race Type");
@@ -289,6 +332,12 @@ function parseBoxBlock(lines, blockStart, isRamp) {
         box.lightFields = lines[lightIdx + 1].split(",").map((v) => parseLeadingFloat(v));
     if (box.type === BOX_LIGHT)
         box.light = parseSitLight(lightIdx >= 0 ? lines[lightIdx + 1] : null);
+    // Community Patch 4's fog block sits where a light block would: "Ffog w,l,h,..." then its values.
+    const fogIdx = indexOfLinePrefix(lines, "Ffog", blockStart, endIndex);
+    if (fogIdx >= 0 && fogIdx + 1 < endIndex)
+        box.fogFields = lines[fogIdx + 1].split(",").map((v) => parseLeadingFloat(v));
+    if (box.type === BOX_FOG)
+        box.fog = parseSitFog(fogIdx >= 0 ? lines[fogIdx + 1] : null);
     const ratesIdx = indexOfLinePrefix(lines, "p,q,r", blockStart, endIndex);
     if (ratesIdx >= 0 && ratesIdx + 1 < endIndex)
         box.rates = parseFloatTriplet(lines[ratesIdx + 1]);
@@ -554,14 +603,63 @@ function parseTruckBlock(lines, startIdx) {
         truck.phi = a[1];
         truck.psi = a[2];
     }
-    // Within this record: the next one starts at a delimiter or a section header.
-    let end = startIdx;
+    // Within this record: the next one starts at a delimiter or a section header. The player slot's record opens on
+    // its own delimiter (it follows the section header directly), which is not the end of it.
+    let end = lines[startIdx]?.startsWith("****") ? startIdx + 1 : startIdx;
     while (end < lines.length && !lines[end].startsWith("****"))
         end++;
     const followIdx = indexOfLinePrefix(lines, "!ap.courseToFollow", startIdx, end);
     if (followIdx >= 0 && followIdx + 1 < lines.length)
         truck.courseToFollow = parseLeadingInt(lines[followIdx + 1]);
+    truck.state = parseTruckState(lines, startIdx);
     return truck;
+}
+/** The numbers on the line after `label` in [start, end), or null. */
+function numbersAfter(lines, label, start, end) {
+    const at = indexOfLinePrefix(lines, label, start, end);
+    if (at < 0 || at + 1 >= lines.length)
+        return null;
+    return lines[at + 1].split(",").map((part) => parseLeadingFloat(part));
+}
+/**
+ * A truck record's live lines, from its first line to the next record's delimiter or section header (the lap and
+ * checkpoint times' own star lines have no space after the stars).
+ */
+function parseTruckState(lines, startIdx) {
+    let end = lines[startIdx]?.startsWith("****") ? startIdx + 1 : startIdx;
+    while (end < lines.length && !(lines[end].trim() === "*********************************************" || /^\*\*\* \S/.test(lines[end].trim())))
+        end++;
+    const bvel = numbersAfter(lines, "bvel", startIdx, end);
+    if (!bvel)
+        return null;
+    const n = (label, count) => {
+        const values = numbersAfter(lines, label, startIdx, end) ?? [];
+        return Array.from({ length: count }, (_, i) => values[i] ?? 0);
+    };
+    const damage = numbersAfter(lines, "@damageCode", startIdx, end);
+    const race = n("^segments", 6), times = n("totalracetime", 3), ap = n("ap.autopilot", 2);
+    const lapTimes = [], checkpointTimes = [];
+    for (let i = startIdx; i < end; i++) {
+        if (lines[i].trim() !== "***Lap time***")
+            continue;
+        lapTimes.push(parseLeadingFloat(lines[i + 1]));
+        const splits = [];
+        if (lines[i + 2]?.trim() === "*****Checkpoint times*****")
+            for (let k = 0; k < 20 && i + 3 + k < end; k++)
+                splits.push(parseLeadingFloat(lines[i + 3 + k]));
+        checkpointTimes.push(splits);
+    }
+    const pair = (v) => [v[0], v[1]];
+    return {
+        bvel: [bvel[0] ?? 0, bvel[1] ?? 0, bvel[2] ?? 0], rates: n("p,q,r", 3),
+        frontAxle: pair(n("faxle.angle", 2)), rearAxle: pair(n("raxle.angle", 2)),
+        frontOnGround: pair(n("faxle.rtire", 2)), rearOnGround: pair(n("raxle.rtire", 2)),
+        gear: n("xm.gear", 1)[0], autopilot: ap[0], cnumber: ap[1], apControl: n("ap.speed_control", 3),
+        damageCode: damage ? damage[0] >>> 0 : null,
+        heli: n("$heliTimer", 4), heliPos: n("heliPos", 3),
+        segments: race[0], laps: race[1], staged: race[2], bonusLaps: race[3], finished: race[4], nextCheckpoint: race[5],
+        totalRaceTime: times[0], fastestLap: times[1], dragTimer: times[2], lapTimes, checkpointTimes,
+    };
 }
 /** Parse an MTM-family .LVL. Returns null when it has fewer than six lines. */
 export function parseMtmLvl(input) {

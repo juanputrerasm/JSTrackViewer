@@ -1,5 +1,5 @@
 import { rampHeightAt } from "../collide/ramp.js";
-import { groundHeightAt, groundNormalAt } from "./terrain.js";
+import { groundHeightAt, groundNormalAt, terrainWaterLevelAt } from "./terrain.js";
 import { MTM2_RULES, weatherGrip } from "../constants.js";
 import { terrainSurfaceValue } from "./surface.js";
 /** The grip factor of the ground's weather under its rules. */
@@ -21,6 +21,7 @@ export function createTerrainGround(terrain, surface, weather = 0, waterLevelFt 
         normal: (x, z, out) => groundNormalAt(terrain, x, z, out, snow),
         surface: (x, _y, z) => (surface ? terrainSurfaceValue(terrain, surface, x, z, waterLevelFt, snow, rules.deepWater) : 200),
         waterLevelFt,
+        waterLevelAt: terrain.lakes ? (x, z) => terrainWaterLevelAt(terrain, x, z, waterLevelFt) : undefined,
         weather,
         ramps,
         rules,

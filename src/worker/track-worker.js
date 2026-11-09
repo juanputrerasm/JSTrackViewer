@@ -256,6 +256,20 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
   }
 
   /*
+    Community Patch 4's world layers (cp4-world.js): lakes, vegetation and its models, fog
+    volumes and .SRF surface types. Only an MTM2 .SIT/.SI2 track can carry them, and its files
+    are named after the scene script (WORLD\<stem>.WTR, WORLD\<stem>.VEG).
+  */
+  let cp4World = null;
+  if (choice.format === "SIT" && doc.origin === "MTM2") {
+    const { loadCp4World } = await import("./cp4-world.js");
+    const stem = (choice.entry?.title ?? "").replace(/\.[^.]*$/, "");
+    cp4World = loadCp4World(podIndex, syncGetBytes, doc, stem, loadModel, {
+      cellSize: CELL_SIZE, heightScale: effectiveTerrainHeightScale(doc.origin, heightScale),
+    });
+  }
+
+  /*
     Palette resolution.
 
     Every 8-bit texture in the track goes through one ordered chain rather than the old
@@ -541,6 +555,14 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     console.warn(`[JSTrackViewer] ${modelWarnings.length} model warning(s):\n  ` + modelWarnings.join("\n  "));
   }
   stats.modelWarningCount = modelWarnings.length;
+  if (cp4World) {
+    if (doc.terrain.cp4?.mode) stats.cp4TerrainMode = doc.terrain.cp4.mode;
+    stats.lakeCount = cp4World.lakes.length;
+    stats.cp4TreeCount = cp4World.vegetation?.treeCount ?? 0;
+    stats.cp4ClumpCount = cp4World.vegetation?.clumpCount ?? 0;
+    stats.fogVolumeCount = cp4World.fogVolumes.length;
+    stats.srfModelCount = Object.values(doc.models).filter((m) => m.surface).length;
+  }
   stats.paletteSources = palettes.sourceSummary();
   stats.hdTextureCount = modelTextures.length
     ? modelTextures.filter((t) => t.width > 256 || t.height > 256).length
@@ -581,6 +603,8 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
         positions: m.positions.buffer, normals: m.normals.buffer, uvs: m.uvs.buffer,
       })),
       // Animated BINs only: every keyframe, first included, in the first frame's space.
+      // Community Patch 4: the model's MODELS\<stem>.SRF surface types, per texture (cp4-world.js).
+      surface: model.surface ?? null,
       keyframes: model.keyframes?.map((frame) => ({
         meshes: frame.meshes.map((m) => ({ positions: m.positions.buffer, normals: m.normals.buffer })),
       })) ?? null,
@@ -607,6 +631,13 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       heightDivisor: doc.terrain.heightDivisor ?? null,
       heightUnitScale: doc.terrain.heightUnitScale ?? 1,
       cellSplit: doc.terrain.cellSplit ?? "fixed",
+      // Community Patch 4: the height mode, and a Spline or Full Map track's 8 ft grid, which drive mode and the
+      // marker sampler read as the mesh does (terrain-builder.js buildFineCells).
+      cp4Mode: doc.terrain.cp4?.mode ?? null,
+      fine: doc.terrain.fine ? {
+        heights: doc.terrain.fine.heights.slice().buffer,
+        subdivisions: doc.terrain.fine.subdivisions, divisor: doc.terrain.fine.divisor,
+      } : null,
       // TV/F3 rock tops (all four corners at 255), which the game never draws; see tv-chambers.js.
       rockCells,
       // The .TEX names in atlas slot order, for the Textures box (ui/textures-box.js).
@@ -656,6 +687,19 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     raceTrackSurfaces: doc.raceTrackSurfaces ?? [],
     raceTrackFence,
     trucks: doc.trucks,
+    // Community Patch 4 lakes, vegetation and fog volumes; see cp4-world.js.
+    lakes: cp4World?.lakes.length ? {
+      sheets: cp4World.lakes.map((lake) => ({ ...lake, positions: lake.positions.buffer, indices: lake.indices.buffer })),
+      tileMap: cp4World.lakeTileMap.buffer,
+      levelFt: Array.from(cp4World.lakes.reduce((levels, lake) => { levels[lake.id] = lake.heightFt; return levels; }, new Array(256).fill(0))),
+    } : null,
+    cp4Vegetation: cp4World?.vegetation?.batches.length ? {
+      ...cp4World.vegetation,
+      batches: cp4World.vegetation.batches.map((b) => ({
+        ...b, positions: b.positions.buffer, yaw: b.yaw.buffer, scale: b.scale.buffer,
+      })),
+    } : null,
+    fogVolumes: cp4World?.fogVolumes ?? [],
     models, modelTextures, stats,
   };
 }

@@ -30,6 +30,9 @@ export function parseEvoAiLine(bytes) {
     const lines = new TextDecoder("latin1").decode(bytes).split(/\r?\n/).map((line) => line.trim());
     const header = {};
     const points = [];
+    const speeds = [];
+    // A sample is its position, then its speed, then the checkpoint it heads for.
+    let afterPosition = false;
     for (const line of lines) {
         const field = /^([A-Za-z ]+):\s*(.*)$/.exec(line);
         if (field && points.length === 0) {
@@ -37,13 +40,21 @@ export function parseEvoAiLine(bytes) {
             continue;
         }
         const m = POSITION.exec(line);
-        if (m)
+        if (m) {
             points.push([Number(m[1]), Number(m[2]), Number(m[3])]);
+            speeds.push(NaN);
+            afterPosition = true;
+            continue;
+        }
+        if (afterPosition && /^-?\d+(?:\.\d+)?$/.test(line))
+            speeds[speeds.length - 1] = Number(line);
+        afterPosition = false;
     }
     return {
         driver: header["Driver Name"] ?? "",
         lapTime: header["Lap Time"] ?? "",
         points,
+        speeds,
     };
 }
 /** AI\CLASSc\AI_cnTRACK.TXT, with its class and line number. */

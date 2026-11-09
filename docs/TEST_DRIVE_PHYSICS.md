@@ -20,6 +20,14 @@ in OpenMTM2's `docs/MTM2_PHYSICS.md`.
 - The viewer's height and normal samplers retain CPR road support, Evo fractional
   heights, Fly! terrain and absent Hellbender cells. Water height is converted from
   the same track height scale used to draw it.
+- Community Patch 4: a Spline or Full Map track is driven on its 8 ft grid, the
+  triangles the mesh draws (`shared/fine-terrain.js`), split on the checkerboard of
+  the fine cells as the CP4 ground query is (OpenMTM2 `docs/CP4_EXE_ANALYSIS.md` 1.6).
+  Heights are the file's 1/128 ft, one bit finer than the engine's 1/64 ft. A lake
+  tile is deep water (1300, ice 800 in Snow) below its lake's surface, and the
+  ground's `waterLevelAt` gives the lake's surface for the core's water drag. Fog
+  volume boxes (type 14) are not solid. Vegetation does not collide, and SRF
+  surface types do not reach the surface tables yet.
 - Terrain and ground-box TTY values feed the shared surface tables. The library's
   height query has no altitude argument, so object support is selected below the
   truck's body origin. Overhead bridge decks remain traversable from underneath.

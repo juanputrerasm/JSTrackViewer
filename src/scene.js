@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { MATERIAL_FLAGS } from "./shared/mrgl-material.js";
 import { heightAtCell, LEGACY_ALTITUDE_DIVISOR } from "./shared/terrain-height.js";
 import { cellTriangleHeight, cellUsesOtherDiagonal } from "./vendor/openphotex/index.js";
+import { createFineSampler } from "./shared/fine-terrain.js";
 import { TrackCamera } from "./nav.js";
 import { SunShadows } from "./sun-shadows.js";
 import { SunFlare } from "./sun-flare.js";
@@ -59,6 +60,8 @@ const BOXTYPE_NO_COLLIDE_FACING = 8;
 /** "Collide (facing)", Traxx's help: a facing tree with a solid trunk ("New Tree" in tracked2). */
 const BOXTYPE_COLLIDE_FACING    = 9;
 const BOXTYPE_RAMP              = 99;
+/** Community Patch 4's fog volume (OpenPhotex BOX_FOG); drawn by _buildFogVolumes, not as a prism. */
+const BOXTYPE_FOG               = 14;
 
 // Collision box colors matching JTraxx Java constants
 const CBOX_TOP    = 0x8D42FF;
@@ -171,6 +174,13 @@ const SHADOW_MAX_FAR = 256 * 64 * 1.5;
 const SHADOW_MATERIAL_SWEEP_FRAMES = 60;
 const GRID_COLOR = 0x444466;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
+/*
+  Community Patch 4 fog volumes by weather (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 4): the bit of the
+  volume's wmask each of the viewer's weathers is (0 Clear, 1 Cloudy, 6 Dusk, 7 Night), and the
+  light factor the engine puts on the fog colour in it.
+*/
+const FOG_WEATHER_BIT = { clear: 0, cloudy: 1, dusk: 6, night: 7 };
+const FOG_WEATHER_LIGHT = { clear: 1, cloudy: 0.7, dusk: 0.375, night: 0.25 };
 const SUN_COLOR = 0xfff4e0;
 /*
   The fly camera's vertical field of view: MTM2's.
@@ -442,7 +452,7 @@ export class TrackScene {
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
       racetrack: true, underground: true, lensflare: true, sky: true, fog: true,
-      movingObjects: true,
+      movingObjects: true, vegetation: true, fogVolumes: true,
     };
     this._heightScale = 4;
     this._textureSmoothingEnabled = true;
@@ -542,6 +552,10 @@ export class TrackScene {
       hitboxes:   new THREE.Group(),
       vegetation: new THREE.Group(),
       vegetationWire: new THREE.Group(),
+      // Community Patch 4 trees and grass (WORLD\<stem>.VEG), batched by area; see _buildCp4Vegetation.
+      cp4Vegetation: new THREE.Group(),
+      // Community Patch 4 fog volumes (SIT box type 14); see _buildFogVolumes.
+      fogVolumes: new THREE.Group(),
       backdrop:   new THREE.Group(),
       // A track's own sky texture on a dome (Evo). Sky, not backdrop: the Backdrop toggle leaves it.
       skyBox:     new THREE.Group(),
@@ -750,6 +764,7 @@ export class TrackScene {
   }
 
   _applyWeather() {
+    this._applyFogVolumeWeather();
     const preset = this._weatherPreset();
     const style = this._effectiveSkyStyle();
     this._sky.material.map = !preset ? null
@@ -901,6 +916,7 @@ export class TrackScene {
       }
       this._updateMovers(dt);
       this._updateBillboards();
+      this._updateVegetationLod();
       this._truckLights?.update(this._camera, time);
       this._updateTextureAnimations(dt);
       this._updateKeyframes(dt);
@@ -947,7 +963,11 @@ export class TrackScene {
           vertices += v;
           triangles += mesh.indices ? count(mesh.indices, 3) : v / 3;
         }
-        return { name, vertices: Math.round(vertices), triangles: Math.round(triangles), instances: placed.get(name) ?? [] };
+        return {
+          name, vertices: Math.round(vertices), triangles: Math.round(triangles), instances: placed.get(name) ?? [],
+          // Community Patch 4: the surface types its MODELS\<stem>.SRF gives its textures, or null.
+          surface: model.surface ?? null,
+        };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -985,16 +1005,29 @@ export class TrackScene {
   focusObject(boxIndex) {
     const drawn = this._objectsByBox?.get(boxIndex);
     if (!drawn?.group) return false;
+    const evo = this._trackData?.origin === "EVO1" || this._trackData?.origin === "EVO2";
+    return this._focusGroup(drawn.group, evo ? 2 : 1);
+  }
+
+  /*
+    A Community Patch 4 fog volume (_buildFogVolumes), by its place in trackData.fogVolumes:
+    flown to and outlined as focusObject does an object. The Track Stats panel lists them.
+  */
+  focusFogVolume(index) {
+    const mesh = this._groups.fogVolumes.children.find((child) => child.userData.fogVolumeIndex === index);
+    return mesh ? this._focusGroup(mesh, 2) : false;
+  }
+
+  /** Camera in front of `group` along its local axis `axisColumn`, and its outline; see focusObject. */
+  _focusGroup(group, axisColumn) {
     this.clearHighlight();
-    const group = drawn.group;
     group.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(group);
     if (bounds.isEmpty()) return false;
     const centre = bounds.getCenter(new THREE.Vector3());
     const radius = Math.max(4, bounds.getSize(new THREE.Vector3()).length() / 2);
 
-    const evo = this._trackData?.origin === "EVO1" || this._trackData?.origin === "EVO2";
-    const axis = new THREE.Vector3().setFromMatrixColumn(group.matrixWorld, evo ? 2 : 1);
+    const axis = new THREE.Vector3().setFromMatrixColumn(group.matrixWorld, axisColumn);
     axis.y = 0;
     if (axis.lengthSq() < 1e-6) axis.copy(this._camera.position).sub(centre).setY(0);
     if (axis.lengthSq() < 1e-6) axis.set(0, 0, 1);
@@ -1263,7 +1296,7 @@ export class TrackScene {
   layerPresence() {
     const g = this._groups;
     const has = (...groups) => groups.some((name) => g[name].children.length > 0);
-    const objects = has("objects", "billboards", "vegetation", "checkpoints", "ramps");
+    const objects = has("objects", "billboards", "vegetation", "cp4Vegetation", "checkpoints", "ramps");
     return {
       terrain:    !!this._terrainMesh || !!this._flyTileMeshes?.length || !!this._tunnelInteriorMesh,
       textures:   !!this._terrainMesh || !!this._flyTileMeshes?.length,
@@ -1285,6 +1318,8 @@ export class TrackScene {
       quakes:     has("quakes"),
       powerups:   has("powerups"),
       water:      has("water"),
+      vegetation: has("vegetation", "cp4Vegetation"),
+      fogVolumes: has("fogVolumes"),
       backdrop:   has("backdrop"),
       sky:        !!this._trackData?.tvSky,
       // MTM1's Classic sky brings the TV fog with it.
@@ -1309,8 +1344,10 @@ export class TrackScene {
     this._groups.objects.visible = f.objects;
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboards.visible = f.objects;
-    this._groups.vegetation.visible = f.objects;
-    this._groups.vegetationWire.visible = f.objects && (f.wireframe === true);
+    this._groups.vegetation.visible = f.objects && f.vegetation !== false;
+    this._groups.vegetationWire.visible = f.objects && f.vegetation !== false && (f.wireframe === true);
+    this._groups.cp4Vegetation.visible = f.objects && f.vegetation !== false;
+    this._groups.fogVolumes.visible = f.fogVolumes !== false;
     this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
     this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
     this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
@@ -1477,6 +1514,9 @@ export class TrackScene {
     this._flareFrame = null;
     this._arenaMesh = null;
     this._terrainRaw = null;
+    this._fineSampler = null;
+    this._vegBatches = [];
+    this._vegLodFrom = null;
     this._terrainUvTargets = [];
     this._terrainOverlapApplied = null;
     for (const texture of this._labelTextures ?? []) texture.dispose();
@@ -1541,6 +1581,9 @@ export class TrackScene {
     this._buildUnderground(trackData);
     if (trackData.trucks?.length) this._buildTrucks(trackData);
     if (trackData.vegetation?.trees?.length) this._buildVegetation(trackData);
+    if (trackData.lakes?.sheets?.length) this._buildLakes(trackData);
+    if (trackData.cp4Vegetation?.batches?.length) this._buildCp4Vegetation(trackData);
+    if (trackData.fogVolumes?.length) this._buildFogVolumes(trackData);
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
     if (trackData.checkpoints?.length) this._buildCheckpointMarkers(trackData);
     if (trackData.tunnels?.length) this._buildTunnelMarkers(trackData);
@@ -1730,6 +1773,8 @@ export class TrackScene {
 
     // Kept for marker placement: the raw heightfield is what puts a marker on the ground.
     this._terrainRaw = terrainData.rawData ? new Uint8Array(terrainData.rawData) : null;
+    // A Community Patch 4 Spline or Full Map track's 8 ft grid, which the mesh is drawn from.
+    this._fineSampler = createFineSampler(terrainData.fine, gridSize);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -1776,13 +1821,38 @@ export class TrackScene {
     const posArr = geo.attributes.position.array;
     const lineVerts = [];
     const pushV = (vi) => { const i = vi * 3; lineVerts.push(posArr[i], posArr[i + 1], posArr[i + 2]); };
-    for (let cz = 0; cz < gridSize; cz++) {
-      for (let cx = 0; cx < gridSize; cx++) {
-        const vb = (cx + cz * gridSize) * 4;
-        pushV(vb); pushV(vb + 1);        // top edge (v0→v1)
-        pushV(vb); pushV(vb + 3);        // left edge (v0→v3)
-        if (cx === gridSize - 1) { pushV(vb + 1); pushV(vb + 2); } // right border
-        if (cz === gridSize - 1) { pushV(vb + 3); pushV(vb + 2); } // bottom border
+    /*
+      A Community Patch 4 Spline or Full Map mesh has (s + 1)^2 vertices a 32 ft cell (see
+      buildFineCells in terrain-builder.js). The grid stays on the 32 ft cells, drawn through
+      the 8 ft points between their corners so the lines follow the finer relief.
+    */
+    const sub = terrainData.subdivisions ?? 1;
+    if (sub > 1) {
+      const row = sub + 1;
+      const edge = (vb, i0, j0, di, dj) => {
+        for (let k = 0; k < sub; k++) {
+          pushV(vb + (j0 + dj * k) * row + i0 + di * k);
+          pushV(vb + (j0 + dj * (k + 1)) * row + i0 + di * (k + 1));
+        }
+      };
+      for (let cz = 0; cz < gridSize; cz++) {
+        for (let cx = 0; cx < gridSize; cx++) {
+          const vb = (cx + cz * gridSize) * row * row;
+          edge(vb, 0, 0, 1, 0);                                   // the cz edge, west to east
+          edge(vb, 0, 0, 0, 1);                                   // the cx edge, along the rows
+          if (cx === gridSize - 1) edge(vb, sub, 0, 0, 1);        // east border
+          if (cz === gridSize - 1) edge(vb, 0, sub, 1, 0);        // far border
+        }
+      }
+    } else {
+      for (let cz = 0; cz < gridSize; cz++) {
+        for (let cx = 0; cx < gridSize; cx++) {
+          const vb = (cx + cz * gridSize) * 4;
+          pushV(vb); pushV(vb + 1);        // top edge (v0→v1)
+          pushV(vb); pushV(vb + 3);        // left edge (v0→v3)
+          if (cx === gridSize - 1) { pushV(vb + 1); pushV(vb + 2); } // right border
+          if (cz === gridSize - 1) { pushV(vb + 3); pushV(vb + 2); } // bottom border
+        }
       }
     }
     const gridLinGeo = new THREE.BufferGeometry();
@@ -2594,6 +2664,10 @@ export class TrackScene {
     const cz = Math.min(gridSize - 2, Math.floor(fz));
     const tx = fx - cx, tz = fz - cz;
 
+    if (this._fineSampler) {
+      const c = this._fineSampler.cell(fx, fz);
+      return cellTriangleHeight(c.h00, c.h10, c.h11, c.h01, c.u, c.w, c.other) * this._heightScale;
+    }
     const h00 = heightAtCell(terrain, raw, cx, cz);
     const h10 = heightAtCell(terrain, raw, cx + 1, cz);
     const h01 = heightAtCell(terrain, raw, cx, cz + 1);
@@ -3415,6 +3489,8 @@ export class TrackScene {
         under hundreds of grey cubes that stand for nothing the game draws.
       */
       if (!renderModel && isEvoOrigin(trackData.origin)) continue;
+      // A Community Patch 4 fog volume is drawn as one (_buildFogVolumes), not as a collision prism.
+      if (!renderModel && box.type === BOXTYPE_FOG && box.fog) continue;
 
       if (!renderModel) {
         // Traxx half-extents are width/length/height as authored; THREE.BoxGeometry takes
@@ -3836,6 +3912,175 @@ export class TrackScene {
         this._groups.vegetation.add(instanced);
         this._groups.vegetationWire.add(wire);
       }
+    }
+  }
+
+  /*
+    Community Patch 4 lakes (WORLD\<stem>.WTR; worker/cp4-world.js buildLakeSheets): each a flat
+    sheet at its own height over the tiles its map gives it, styled as the track's own water.
+    They are part of the Water layer. The engine's reflections (waterLakeReflect) are not drawn.
+  */
+  _buildLakes(trackData) {
+    const material = new THREE.MeshLambertMaterial({
+      color: WATER_COLOR, transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+    });
+    for (const sheet of trackData.lakes.sheets) {
+      const positions = new Float32Array(sheet.positions);
+      const normals = new Float32Array(positions.length);
+      for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(sheet.indices), 1));
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.userData.lake = { id: sheet.id, heightFt: sheet.heightFt, tileCount: sheet.tileCount };
+      this._groups.water.add(mesh);
+    }
+  }
+
+  /*
+    Community Patch 4 vegetation (WORLD\<stem>.VEG; worker/cp4-world.js vegetationInstances).
+
+    Trees and grass clumps come in batches, one per species per 256 ft square, each drawn as
+    InstancedMesh per model mesh. Every instance is placed as a SIT object is: the Traxx matrix
+    for its heading at its model origin, the model's anchor, then its scale. A batch also holds
+    the species' far card, and _updateVegetationLod swaps the two at the engine's 950 ft and
+    hides grass past its 1000 ft draw distance, per batch, measured from the batch's middle;
+    the engine does it per instance, with a cross-fade band where a species asks for one.
+  */
+  _buildCp4Vegetation(trackData) {
+    const veg = trackData.cp4Vegetation;
+    const geometries = new Map();
+    const materials = new Map();
+    const partsOf = (name) => {
+      if (!name) return [];
+      const model = trackData.models?.[name];
+      if (!model?.meshes?.length) return [];
+      if (!geometries.has(name)) {
+        geometries.set(name, model.meshes.map((mesh) => {
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.positions), 3));
+          geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(mesh.normals), 3));
+          geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(mesh.uvs), 2));
+          if (mesh.indices) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1));
+          geo.computeBoundingSphere();
+          return { geo, mesh };
+        }));
+        materials.set(name, model.meshes.map((mesh) => this._createModelMaterial(mesh)));
+      }
+      return geometries.get(name).map((part, i) => ({ ...part, material: materials.get(name)[i], model }));
+    };
+
+    const matrix = new THREE.Matrix4();
+    const local = new THREE.Matrix4();
+    const scaleMatrix = new THREE.Matrix4();
+    const castsShadow = new Set(veg.species.filter((s) => s.flags & 1).map((s) => s.index));
+    const instanced = (parts, batch, shadow) => parts.map(({ geo, material, model }) => {
+      const positions = new Float32Array(batch.positions);
+      const yaw = new Float32Array(batch.yaw);
+      const scale = new Float32Array(batch.scale);
+      const mesh = new THREE.InstancedMesh(geo, material, batch.count);
+      const anchor = model.anchor ?? { x: 0, y: 0, z: 0 };
+      local.makeTranslation(anchor.x ?? 0, anchor.y ?? 0, anchor.z ?? 0);
+      for (let i = 0; i < batch.count; i++) {
+        matrix.copy(traxxModelMatrix(yaw[i], 0, 0, positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]));
+        scaleMatrix.makeScale(scale[i], scale[i], scale[i]);
+        matrix.multiply(scaleMatrix).multiply(local);
+        mesh.setMatrixAt(i, matrix);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      if (shadow && !material.transparent && material.depthWrite && material.blending === THREE.NormalBlending) {
+        mesh.castShadow = true;
+        material.shadowSide = material.side;
+      }
+      this._groups.cp4Vegetation.add(mesh);
+      return mesh;
+    });
+
+    const unitsPerFoot = (trackData.terrain?.cellSize ?? 64) / 32;
+    this._vegBatches = [];
+    for (const batch of veg.batches) {
+      const shadow = batch.kind === "tree" && castsShadow.has(batch.species);
+      const near = instanced(partsOf(batch.modelName), batch, shadow);
+      const far = batch.kind === "tree" ? instanced(partsOf(batch.farModelName), batch, false) : [];
+      this._vegBatches.push({
+        x: batch.centre[0], z: batch.centre[1], radius: batch.radius, grass: batch.kind === "grass", near, far,
+      });
+    }
+    this._vegFarCard = (veg.farCardFt ?? 950) * unitsPerFoot;
+    this._vegGrassDistance = (veg.grassDistanceFt ?? 1000) * unitsPerFoot;
+    this._vegLodFrom = null;
+  }
+
+  /* The vegetation's per-batch level of detail; see _buildCp4Vegetation. Rechecked once the camera has moved 16 units. */
+  _updateVegetationLod() {
+    if (!this._vegBatches?.length) return;
+    const cam = this._camera.position;
+    if (this._vegLodFrom && Math.hypot(cam.x - this._vegLodFrom.x, cam.z - this._vegLodFrom.z) < 16) return;
+    this._vegLodFrom = { x: cam.x, z: cam.z };
+    for (const batch of this._vegBatches) {
+      const distance = Math.hypot(cam.x - batch.x, cam.z - batch.z);
+      if (batch.grass) {
+        const shown = distance - batch.radius < this._vegGrassDistance;
+        for (const mesh of batch.near) mesh.visible = shown;
+        continue;
+      }
+      const near = !batch.far.length || distance < this._vegFarCard;
+      for (const mesh of batch.near) mesh.visible = near;
+      for (const mesh of batch.far) mesh.visible = !near;
+    }
+  }
+
+  /*
+    Community Patch 4 fog volumes (SIT box type 14; worker/cp4-world.js collectFogVolumes): each a
+    translucent box in its colour, w x l x h on the box's own axes, its bottom face `base` above
+    the box. The engine's density integral is in its renderer DLLs and not known (OpenMTM2
+    docs/CP4_EXE_ANALYSIS.md 4), so the box is drawn at one opacity: what is left of the light
+    after its shortest side, 1 - e^(-3 side / vis), as the engine's extinction 3 / vis gives,
+    capped at maxOp. A volume shows only in the weathers its wmask names, its colour times the
+    engine's light factor for the weather (_applyFogVolumeWeather).
+  */
+  _buildFogVolumes(trackData) {
+    trackData.fogVolumes.forEach((volume, index) => {
+      if (!volume.drawn) return;
+      const fog = volume.fog;
+      const side = Math.min(volume.w, volume.l, volume.h);
+      const opacity = Math.max(0.08, Math.min(fog.maxOp ?? 1, 1 - Math.exp(-3 * side / Math.max(1, fog.vis))));
+      const color = new THREE.Color(fog.color[0], fog.color[1], fog.color[2]);
+      const geo = new THREE.BoxGeometry(volume.size[0], volume.size[1], volume.size[2]);
+      const material = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.renderOrder = 2;
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }));
+      mesh.add(edges);
+      mesh.matrixAutoUpdate = false;
+      const [x, y, z] = volume.centre;
+      mesh.matrix.copy(traxxPrismMatrix(volume.psi, volume.theta, volume.phi, x, y, z));
+      mesh.matrixWorldNeedsUpdate = true;
+      mesh.userData.fogVolumeIndex = index;
+      mesh.userData.fogVolume = volume;
+      mesh.userData.baseColor = color.clone();
+      this._groups.fogVolumes.add(mesh);
+    });
+    this._applyFogVolumeWeather();
+  }
+
+  _applyFogVolumeWeather() {
+    const weather = this.weatherApplies() ? this._weather : "clear";
+    const bit = FOG_WEATHER_BIT[weather] ?? 0;
+    const light = FOG_WEATHER_LIGHT[weather] ?? 1;
+    for (const mesh of this._groups?.fogVolumes?.children ?? []) {
+      const volume = mesh.userData.fogVolume;
+      if (!volume) continue;
+      mesh.visible = ((volume.fog.wmask >> bit) & 1) === 1;
+      const color = mesh.userData.baseColor.clone().multiplyScalar(Math.max(0.05, light));
+      mesh.material.color.copy(color);
+      mesh.children[0]?.material?.color.copy(color);
     }
   }
 

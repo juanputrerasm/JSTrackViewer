@@ -5,6 +5,14 @@ export const MTM_WHEEL_KEYS = [
     "raxle.rtire.static_bpos",
     "raxle.ltire.static_bpos",
 ];
+/** The .CPT named by a TRK's last two non-blank lines, `COCKPIT` then the file name, or null. */
+export function mtmTrkCockpit(lines) {
+    const kept = lines.map((l) => l.trim()).filter((l) => l !== "");
+    if (kept.length < 2 || kept[kept.length - 2].toUpperCase() !== "COCKPIT")
+        return null;
+    const name = kept[kept.length - 1];
+    return name.length >= 5 && name.length <= 31 && !/[\\/:]/.test(name) ? name : null;
+}
 /**
  * Parse an MTM1/MTM2 TRK already split by `truckManifestLines`.
  *
@@ -38,6 +46,7 @@ export function parseMtmTrkLines(input) {
         waveFiles: [],
         numberOfLights: null,
         lights: [],
+        cockpit: mtmTrkCockpit(input),
         unknownFields: {},
     };
     const lights = [];

@@ -267,6 +267,8 @@ export function applyAutopilot(s, p, ctx) {
     if (seg.ctype === 1 && seg.speedLimit >= 10 && seg.speedLimit < target) {
         target = seg.speedLimit;
     }
+    if (ctx.aiSpeed !== undefined && ctx.aiSpeed !== 1)
+        target *= ctx.aiSpeed;
     const u = 1.2 * fdt * (target - predicted);
     if (u >= 0) {
         ctl.throttle = Math.min(u, 1);
