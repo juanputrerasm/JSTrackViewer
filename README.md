@@ -23,10 +23,11 @@ Changes since 1.1.0:
 - Community Patch 4 and Traxx 1.7 tracks: 16-bit heightmaps, 16-bit Spline and 16-bit Full Map terrain (drawn on its 8 ft grid), and height PNGs.
 - Lakes drawn at their own heights; Test Drive treats them as water.
 - Fog volumes shown as translucent boxes in the weathers they belong to, listed in the Stats panel.
+- Community Patch 4 beta 0.53 waterfalls (.WFL): each built at load as the game builds it, by walking the water from its crest over the terrain into the lakes or the track's water, then drawn flowing in the game's Original look with its foam strip, ragged edges and mist box, with a Waterfalls toggle and a Stats row.
 - Traxx 1.7 vegetation: trees and grass drawn instanced, with far cards, and a Vegetation toggle.
 - Surface types from a model's .SRF file shown in the Models window.
 - A new document comparing the June 1996 MTM1 beta (Build #41) with the retail game.
-- OpenPhotex 1.7.0.
+- OpenPhotex 1.7.3.
 
 ## What's new in 1.1.0
 
@@ -74,13 +75,14 @@ Each feature is described in detail under [Feature details](#feature-details).
 |---|---|---|
 | LVL | All | The level manifest: heightfield, texture grid, palette, texture list, sky, music, lighting and water. A positional list in MTM, CPR and the Terminal Velocity family; labelled fields in 4x4 Evolution |
 | SIT, SI2 | MTM1, MTM2, CPR | Scene script: objects, ramps, ground boxes, starting grid and courses (SI2 is the Community Patch 3 spelling) |
+| SI3 | MTM2 (track format version 6) | The same scene script for a [track format version 6](https://openmtm2.github.io/proposals/track-format-v6) track, listed as its own track even beside a SIT or SI2 of the same name. Its TXV sets the world's size (256 or 512 cells, up to 16,384 ft a side) and the height step and base, so heights may be negative or thousands of feet tall; a TXV or grid file that does not fit is refused with the reason |
 | SIT v6 / v7 | 4x4 Evolution 1 and 2 | Scene script: placements, starting grid and course centrelines |
 | RAW (heightfield) | All but Fly! | Terrain height per grid point: one byte in MTM and the Terminal Velocity family, 16-bit fixed point in CPR and 4x4 Evolution |
 | CLR | All but Fly! | Terrain texture per cell: a 16-bit word (texture index, mirror and rotation) in MTM1, MTM2, CPR, Hellbender and 4x4 Evolution; one byte (texture index and rotation) in Terminal Velocity and Fury3 |
 | TEX | All but Fly! | The level's terrain texture list |
 | TTY | MTM1, MTM2 | Ground type and depth for each terrain texture, used by Test Drive |
 | LTE | MTM1, MTM2 | Baked terrain light |
-| RA0 | MTM1, MTM2, Hellbender | Ground boxes: lower height of the box in each cell, 1 byte per cell |
+| RA0 | MTM1, MTM2, Hellbender | Ground boxes: lower height of the box in each cell, 1 byte per cell (1 or 2 bytes on an SI3 track, on its step and base) |
 | RA1 | MTM1, MTM2, Hellbender | Ground boxes: upper height of the box in each cell, 1 byte per cell; 0 means the cell has no box |
 | CL0 | MTM1, MTM2, Hellbender | Ground boxes: the six face textures of each cell's box (south, north, east, west, top, bottom), one texture word each, 12 bytes per cell |
 | RA2 | Hellbender | Underground: cavern floor height, 1 byte per cell, biased so that byte 255 is altitude 0 (the surface datum) |
@@ -98,8 +100,9 @@ Each feature is described in detail under [Feature details](#feature-details).
 | TRK + TTX | CPR | The road layer: surfaces, curbs, walls and their textures |
 | WAT, VEG | 4x4 Evolution 2 | Water material and vegetation |
 | RAW (16-bit), height PNG | MTM2 (Community Patch 4) | 16-bit heights at 1/128 ft: 256 x 256 (131,072 bytes, drawn as is or expanded to an 8 ft Spline grid when the TXV says `terrainGrid=spline`), a 1024 x 1024 Full Map at 8 ft (2,097,152 bytes), or the grey PNG the TXV names with `terrainHeights` |
-| TXV | MTM2 (Community Patches 3 and 4) | The track's version record: format version, tool, and Community Patch 4's terrain grid and height file |
-| WTR | MTM2 (Community Patch 4) | Lakes above the track's own water: a height each and a 256 x 256 map of their tiles |
+| TXV | MTM2 (Community Patches 3 and 4, track format version 6) | The track's version record: format version, tool, and Community Patch 4's terrain grid and height file; for an SI3 track also `worldCells`, `terrainHeightMap` (a 16-bit RAW or grey PNG of N or 4N square), `terrainHeightStep` and `terrainHeightBase` |
+| WTR | MTM2 (Community Patch 4, track format version 6) | Lakes above the track's own water: a height each and a 256 x 256 map of their tiles (version 1), or 512 x 512 with signed heights across the terrain's range (version 2, 512-cell SI3 tracks only). The world's size picks the version, and any other pairing is refused with a warning |
+| WFL | MTM2 (Community Patch 4 beta 0.53, track format version 6) | Waterfalls: up to 64 crests of 2 to 8 points, each fed by a lake or a spring at its own height, with its flow speed, opacity, mist, splash, sound and texture. The file holds no geometry; the sheet is built at load from the crest, the terrain and the water. Version 1 is a 256-cell world's (SIT, SI2, or a 256-cell SI3) and version 2 a 512-cell SI3's, with signed heights across the terrain's range and crests anywhere in the world; any other pairing is refused with a warning |
 | VEG (binary, MVEG) | MTM2 (Community Patch 4) | Placed trees and grass clumps, with each species' model and far card |
 | SRF | MTM2 (Community Patch 4) | A model's surface types, one per texture, making it drivable scenery |
 | AI_*.TXT | 4x4 Evolution | The computer drivers' recorded laps |
@@ -231,6 +234,7 @@ While driving, the panel reports speed in mph and km/h, the selected gear, wheth
 - Community Patch 4 vegetation is drawn with instancing too: every tree and grass clump of the track's VEG, placed, turned and scaled as the file says. Trees change to their far card beyond 950 ft and grass is drawn to 1,000 ft, as the game's defaults do, decided per 256 ft square. The Vegetation toggle hides both games' vegetation.
 - Community Patch 4 lakes are drawn as flat water at their own heights over their tiles, with the track's water, and Test Drive sinks into them. A lake the game would refuse (out of range, below the track's water, or on a bed that touches it) is left out and named in the warnings.
 - Community Patch 4 fog volumes (type 14 boxes) are drawn as translucent boxes in their colour, their opacity from their visibility distance, and shown only in the weathers they name. The Stats panel lists each with its settings; a click flies the camera to it and outlines it. The Fog volumes toggle hides them, and Test Drive drives through them.
+- Community Patch 4 beta 0.53 waterfalls (`WORLD\<stem>.WFL`) are built with the game's rules (OpenPhotex `buildFallMeshes`): the record checks and refusals, the walk of each column over the terrain in the mode the track is drawn in, the spacing and vertex budget, the foam strip and the mist. Refused, dropped and skipped falls are listed as warnings. The sheet is drawn in the game's Original look: the fall's texture scrolling down at its crest speed with a second layer mixed in, a ragged mask on its edges and end, and the foam strip where the water lands when the fall has SPLASH. A fall without its own texture uses the retail ripple (RIPPL100 to RIPPL800) when the opened archive carries it (the game keeps it in STARTUP.POD and FIXMORE4.POD), and is drawn in the water colour otherwise. Each mist is a fog volume box. The Waterfalls toggle hides them; Test Drive drives through them, as the game does.
 - A model with a Community Patch 4 SRF shows each of its textures' surface type in the Models box.
 
 ### Courses and markers
@@ -284,7 +288,7 @@ See [the physics integration notes](docs/TEST_DRIVE_PHYSICS.md) for the shared s
 
 - The free camera uses MTM2's field of view, about 70 degrees vertically; the mouse wheel and the Zoom slider narrow or widen it from 0.5× to 8×.
 - The minimap shows the heightfield (or, for Fly!, the satellite imagery) and moves the camera where you click.
-- The Markers and View Options panels toggle each layer: terrain, textures, grid, wireframes, objects, vegetation, ground boxes, collision boxes, water, fog volumes, backdrop, sky, fog and markers. Distance, sunlight and gamma have sliders. Panels collapse from their headings, and only the controls the loaded track uses appear.
+- The Markers and View Options panels toggle each layer: terrain, textures, grid, wireframes, objects, vegetation, ground boxes, collision boxes, water, fog volumes, waterfalls, backdrop, sky, fog and markers. Distance, sunlight and gamma have sliders. Panels collapse from their headings, and only the controls the loaded track uses appear.
 - Track Data and Stats list the track's metadata and statistics: textures, objects, courses, ground boxes, and CPR surface and wall types.
 - The **Models** and **Textures** buttons under Track Data open two floating boxes, after JSTraxx's (and Traxx's) boxes of the same names. Models lists every model in the track with how many objects place it, a 3D preview with turn, tilt and zoom, and its vertex and triangle counts; picking one flies the camera to the front of the first object using it and outlines that object in wireframe, and the arrows step through the others. Textures shows every terrain, CART road, model and sky texture in a grid of small tiles (24 to 128 px, 48 by default; a larger box shows more), and a click shows the texture's name, slot and size, and its ground type where the game gives one: Grass, Cement, Dirt and so on, with depth, from the .TTY in Monster Truck Madness and CART, Evo's .TEX (with its vegetation class), and CART's road surface types. Terminal Velocity, Fury3 and Hellbender store none. Both boxes can be moved and resized, and remember where they were.
 
@@ -332,6 +336,8 @@ Archives are read by [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex), 
 - 4x4 Evolution `.SDW` baked shadow overlays and `.RTD` grids are read but not drawn.
 - 4x4 Evolution 2 material stages beyond diffuse and alpha (bump, cubic reflection, gloss and projected shadows) are not reproduced.
 - Community Patch 4: lake reflections, the fog volumes' soft edges, height falloff and wisps (their shader lives in the game's renderer, which is not available), vegetation tint, the far card cross-fade band, scenery detail tiers (every tier is drawn) and tree collision are not reproduced. SRF surface types are shown, not driven on: a model's collision is the same with or without one.
+- Community Patch 4 waterfalls: no sound, droplets, foam zones or landing rings; only the Original look is drawn (not CP4's Enhanced and Realistic water looks, nor the ice look of a frozen fall in snow); the mist is a plain translucent box, like the fog volumes; a custom texture that names one of the track's animations is drawn still; and every fall is drawn whatever its distance, without the game's draw range.
+- Track format version 6 (SI3) tracks: waterfalls are built in the track's own world: crests wrapped at its width, the N x N lake map, heights checked against the terrain's range and the walk on its terrainHeightMap heights at full precision. A 256-cell track (SIT, SI2 or SI3) reads WTR and WFL version 1 only and a 512-cell SI3 version 2 only; a file of the other version is a warning and is not drawn. The viewer draws the whole world without wrapping it, as it does every track, and a 512-cell Spline or Full Map track's 8 ft mesh is four times a Community Patch 4 one's.
 - 4x4 Evolution vegetation stands on the drawn terrain and is turned by a viewer convention, because a `.VEG` record carries no orientation; `treeBiasY` is read but not applied.
 - Standalone downloadable 4x4 Evolution `.LTE` tracks are not supported; they are a compressed format that reuses assets the track does not carry.
 - Fly! scenery does not draw its beacons and windsocks, whose models ship with the game rather than the scenery, or the sectional charts in `Maps\`. Cells outside a city's photographed area use generic textures that also ship with the game, so they are drawn in flat land and water colours.
