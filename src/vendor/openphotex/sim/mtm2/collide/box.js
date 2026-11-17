@@ -34,6 +34,17 @@ export function levelBoxCollides(box, detailLevel = 2) {
     return !NON_COLLIDING_TYPES.has(box.type) && (box.priority ?? 0) <= detailLevel;
 }
 /**
+ * Whether a truck that is not the player's own brings a box into the frame's object list by being
+ * near it (§14.15; retail 0x554802..0x554844, CP4 0x1403b39c0..0x1403b3a10, the same rule): not a
+ * box in a checkpoint's footprint (type 11) nor a box with no model, unless the count at
+ * `[0x646c40] + 0xc` (CP4 `[0x140945560] + 0x18`; believed to be a network game's other drivers)
+ * is at least 1. The player's truck, ramps and listed boxes bring in every box; once listed, a box
+ * meets every truck.
+ */
+export function listedByComputerTruck(type, hasModel, networkDrivers = 0) {
+    return networkDrivers >= 1 || (type !== 11 && hasModel);
+}
+/**
  * A level box as a collision object (§14.15): centred on its position, rotated by its angles,
  * sized by its model's vertex bounds when it has a model (else the SIT's sizes). Camera-facing
  * types 8 and 9 take the larger of length and width for both, halved. Null without a position.
@@ -71,19 +82,23 @@ export const MAX_GROUND_BOXES = 600;
  * the game places it by its own cell, a world away from a truck at the other edge). Every face is
  * solid, as in the game: a wheel climbs onto a box only when its hub was above the top the step
  * before (§14.14 step 3), so a step taller than the hub is a wall. `stepFt` is the feet to a height
- * step, for a level whose steps are not MTM2's 2 ft (Hellbender's are 1.5).
+ * step, for a level whose steps are not MTM2's 2 ft (Hellbender's are 1.5). A track format version 6 world passes
+ * its cells (N, 256 or 512) and its terrain base in feet; a 16-bit layer passes its u16 grids with `stepFt` 1 / step
+ * (section 8.3: base + 2 * byte, or base + value / step).
  */
-export function groundBoxesAround(ra0, ra1, x, z, out = [], stepFt = 2) {
-    const col = (Math.trunc(x * 256) >> 13) & 255;
-    const row = (Math.trunc(z * 256) >> 13) & 255;
+export function groundBoxesAround(ra0, ra1, x, z, out = [], stepFt = 2, cells = 256, baseFt = 0) {
+    const m = cells - 1;
+    const col = (Math.trunc(x * 256) >> 13) & m;
+    const row = (Math.trunc(z * 256) >> 13) & m;
     // Where the point's own copy of the world begins. A neighbouring cell across the map's edge is read wrapped, as in
     // the game, but its box is placed beside the point (the game places it a world away, where the truck never meets it).
-    const baseX = x - wrapCoord(x), baseZ = z - wrapCoord(z);
+    const worldFt = cells * GROUND_BOX_CELL_FT;
+    const baseX = x - wrapCoord(x, worldFt), baseZ = z - wrapCoord(z, worldFt);
     for (let dc = -1; dc <= 1; dc++) {
         for (let dr = -1; dr <= 1; dr++) {
-            const c = (col + dc) & 255, r = (row + dr) & 255;
-            const i = r * 256 + c;
-            const lo = ra0[i] * stepFt, hi = ra1[i] * stepFt;
+            const c = (col + dc) & m, r = (row + dr) & m;
+            const i = r * cells + c;
+            const lo = baseFt + ra0[i] * stepFt, hi = baseFt + ra1[i] * stepFt;
             if (lo === hi)
                 continue;
             const h = hi - lo;

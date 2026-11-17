@@ -70,7 +70,8 @@ export function createMovers(trackData, frame) {
   const groundBoxTops = new Map();
   for (const gb of trackData?.groundBoxes ?? []) {
     const upper = gb.upper ?? 0;
-    if (upper < 1) continue;
+    // A version 6 box (gbox-loader.js) is in the list only when present, and may stand below 0.
+    if (upper < 1 && gb.v6 !== true) continue;
     const midX = gb.midX ?? ((gb.x ?? 0) * CELL + CELL / 2);
     const midY = gb.midY ?? ((gb.y ?? 0) * CELL + CELL / 2);
     const key = `${Math.floor(midX / CELL)},${Math.floor((worldSize - midY) / CELL)}`;

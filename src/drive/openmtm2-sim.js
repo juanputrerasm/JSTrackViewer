@@ -61,11 +61,26 @@ function restoreState(live, saved) {
   the terrain's height scale over the viewer's vertical units per foot, so a box meets the truck
   where it is drawn and where the terrain beside it is. Null for a track with none, or whose grid
   cannot be laid on MTM2's (4x4 Evolution's 32-unit cells, which carry no ground boxes).
+
+  A track format version 6 track's boxes (gbox-loader.js, `v6: true`) may be fractional, negative
+  or above 510 ft, and its world may be 512 cells: they go in as feet on its own N x N grid
+  (Float32Array, `stepFt` 1 times the drawn scale, `cells` N), which groundBoxesAround reads as
+  base + value * stepFt and wraps at N (spec section 8.1).
 */
 export function simGroundBoxes(trackData) {
   const terrain = trackData?.terrain;
   const boxes = trackData?.groundBoxes ?? [];
   const grid = terrain?.gridSize ?? 256;
+  if (boxes.length && boxes[0].v6 === true && (terrain?.cellSize ?? 64) === 64) {
+    // Feet as drawn: a 2 ft step at the drawn scale, so a box meets the truck where it is drawn.
+    const drawnFtPerFt = (terrain?.heightScale ?? 3) / UNITS_PER_FOOT_V / 2;
+    const ra0 = new Float32Array(grid * grid), ra1 = new Float32Array(grid * grid);
+    for (const box of boxes) {
+      ra0[box.y * grid + box.x] = box.lower * 2;
+      ra1[box.y * grid + box.x] = box.upper * 2;
+    }
+    return { ra0, ra1, stepFt: drawnFtPerFt, cells: grid };
+  }
   if (!boxes.length || (terrain?.cellSize ?? 64) !== 64 || grid > 256 || 256 % grid !== 0) return null;
   const ra0 = new Uint8Array(256 * 256), ra1 = new Uint8Array(256 * 256);
   for (const box of boxes) {
@@ -206,7 +221,7 @@ export function createOpenMtm2Sim(assembly, frame, { colliders = null, waterLeve
   const radius = S.truckRadius(params);
   function collideWorld(h) {
     nearBoxes.length = 0;
-    if (groundBoxes) S.groundBoxesAround(groundBoxes.ra0, groundBoxes.ra1, state.pos[0], state.pos[2], nearBoxes, groundBoxes.stepFt);
+    if (groundBoxes) S.groundBoxesAround(groundBoxes.ra0, groundBoxes.ra1, state.pos[0], state.pos[2], nearBoxes, groundBoxes.stepFt, groundBoxes.cells ?? 256);
     for (const box of nearBoxes) S.collideTruckImmovableBox(state, params, box, h);
     nearFaces.length = 0;
     wallFaces.around(state.pos[0], state.pos[2], radius, nearFaces);

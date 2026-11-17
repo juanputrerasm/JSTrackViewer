@@ -2,8 +2,9 @@
   Community Patch 4's 8 ft terrain grid, sampled the way the mesh draws it.
 
   A Spline or Full Map MTM2 track (sit-parser.js applyCp4Heights) carries `terrain.fine`:
-  { heights, subdivisions, divisor }, a (gridSize * subdivisions)^2 grid of 16-bit samples in file
-  order (rows along the level's z), `divisor` samples to a legacy 2 ft step. terrain-builder.js
+  { heights, subdivisions, divisor, offset }, a (gridSize * subdivisions)^2 grid of 16-bit samples in
+  file order (rows along the level's z), `divisor` samples to a legacy 2 ft step, plus `offset` steps
+  (a track format version 6 terrain's base; 0 otherwise). terrain-builder.js
   buildFineCells draws each fine cell as two triangles split on the checkerboard of the fine
   indices, as the CP4 ground query does (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 1.6); this is the same
   surface for drive mode (drive/world-frame.js) and the scene's marker placement. Indices clamp
@@ -18,8 +19,9 @@ export function createFineSampler(fine, gridSize = 256) {
   const side = gridSize * s;
   if (heights.length !== side * side) return null;
   const divisor = fine.divisor ?? 256;
+  const offset = fine.offset ?? 0;
   const clamp = (v) => (v < 0 ? 0 : v > side - 1 ? side - 1 : v);
-  const at = (x, z) => heights[clamp(x) + clamp(z) * side] / divisor;
+  const at = (x, z) => heights[clamp(x) + clamp(z) * side] / divisor + offset;
 
   /*
     The fine cell under a point given in coarse-cell coordinates (gx along +x, gz along the

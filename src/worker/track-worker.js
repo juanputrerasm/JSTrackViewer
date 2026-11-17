@@ -10,6 +10,8 @@ import { decodeTrueColorTexture, hdDimensionRefusal } from "./image-decoder.js";
 import { CPR_WALL_TYPE_NAMES, CPR_SURFACE_TYPES } from "../shared/cpr-track-schema.js";
 import { decodeHeightSample } from "../shared/terrain-height.js";
 import { resolveKeyframeModel } from "./keyframes.js";
+import { sitLevelStem, levelFileStems } from "./level-stem.js";
+import { FALL_RIPPLE_FRAMES, FALL_RIPPLE_FRAME_SEC } from "../vendor/openphotex/index.js";
 
 let podIndex = null;
 // Where the indexed POD is: an OPFS path, or a File from Open from Folder (see indexPodFile).
@@ -257,7 +259,7 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
 
   /*
     Community Patch 4's world layers (cp4-world.js): lakes, vegetation and its models, fog
-    volumes and .SRF surface types. Only an MTM2 .SIT/.SI2 track can carry them, and its files
+    volumes and .SRF surface types. Only an MTM2 .SIT/.SI2/.SI3 track can carry them, and its files
     are named after the scene script (WORLD\<stem>.WTR, WORLD\<stem>.VEG).
   */
   let cp4World = null;
@@ -413,6 +415,64 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     }
   }
 
+  /*
+    Community Patch 4 beta 0.53 waterfalls' textures (cp4-world.js buildWaterfalls; OpenMTM2
+    docs/CP4_EXE_ANALYSIS.md 12.8). A fall with its own texture stem draws that texture (HD sibling
+    first, as a model texture); one without, or whose texture cannot be loaded, draws the retail
+    ripple RIPPL100 .. RIPPL800 .. RIPPL200 at 0.25 s a frame. The ripple ships in the game's own
+    pods, not a track's, so it is found only when the opened archive carries it; without it the
+    scene draws the sheet in its water colour (textureIndex -1).
+  */
+  const waterfallTextures = [];
+  if (cp4World?.waterfalls) {
+    const decodeFallTexture = async (name) => {
+      const hd = await hdDecode(name);
+      if (hd) return { rgba: hd.rgba.buffer, width: hd.width, height: hd.height };
+      const entry = resolveAsset(podIndex, name) ?? resolveAsset(podIndex, replaceExtension(name, ".RAW"));
+      if (!entry) return null;
+      try {
+        const decoded = decodeRawTexture(syncGetBytes(entry), palettes.paletteFor(name, entry, "model") ?? doc.palette, name);
+        return { rgba: decoded.rgba.buffer, width: decoded.width, height: decoded.height };
+      } catch { return null; }
+    };
+    let rippleIndex;
+    const ripple = async () => {
+      if (rippleIndex !== undefined) return rippleIndex;
+      const names = [...new Set(FALL_RIPPLE_FRAMES)];
+      const decoded = new Map();
+      for (const name of names) {
+        const image = await decodeFallTexture(name);
+        if (image) decoded.set(name, image);
+      }
+      const first = decoded.get(FALL_RIPPLE_FRAMES[0]) ?? decoded.values().next().value;
+      if (!first) return (rippleIndex = -1);
+      // Frames that do not match the first's size cannot share its texture, and are left out.
+      const usable = names.filter((n) => decoded.get(n)?.width === first.width && decoded.get(n)?.height === first.height);
+      waterfallTextures.push({
+        name: FALL_RIPPLE_FRAMES[0], width: first.width, height: first.height,
+        frames: usable.map((n) => decoded.get(n).rgba),
+        sequence: FALL_RIPPLE_FRAMES.filter((n) => usable.includes(n)).map((n) => usable.indexOf(n)),
+        frameSec: FALL_RIPPLE_FRAME_SEC,
+      });
+      return (rippleIndex = waterfallTextures.length - 1);
+    };
+    const custom = new Map();
+    for (const fall of cp4World.waterfalls.falls) {
+      if (fall.textureName && !custom.has(fall.textureName)) {
+        const image = await decodeFallTexture(fall.textureName);
+        if (image) {
+          waterfallTextures.push({ name: fall.textureName, width: image.width, height: image.height, frames: [image.rgba], sequence: [0], frameSec: 0 });
+          custom.set(fall.textureName, waterfallTextures.length - 1);
+        } else {
+          custom.set(fall.textureName, null);
+          doc.warnings?.push?.(`Waterfalls: texture ${fall.textureName} cannot be loaded - the ripple is used`);
+        }
+      }
+      const own = fall.textureName ? custom.get(fall.textureName) : null;
+      fall.textureIndex = own ?? await ripple();
+    }
+  }
+
   const raceTrackTextures = [];
   for (const tex of doc.raceTrackTextures ?? []) {
     if (!tex?.data) {
@@ -561,6 +621,9 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
     stats.cp4TreeCount = cp4World.vegetation?.treeCount ?? 0;
     stats.cp4ClumpCount = cp4World.vegetation?.clumpCount ?? 0;
     stats.fogVolumeCount = cp4World.fogVolumes.length;
+    stats.waterfallCount = cp4World.waterfalls?.falls.length ?? 0;
+    stats.waterfallMistCount = cp4World.waterfalls?.mists.length ?? 0;
+    stats.waterfallVertexCount = cp4World.waterfalls ? cp4World.waterfalls.positions.length / 3 : 0;
     stats.srfModelCount = Object.values(doc.models).filter((m) => m.surface).length;
   }
   stats.paletteSources = palettes.sourceSummary();
@@ -630,13 +693,21 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       rawBytesPerCell: doc.terrain.rawBytesPerCell ?? 1,
       heightDivisor: doc.terrain.heightDivisor ?? null,
       heightUnitScale: doc.terrain.heightUnitScale ?? 1,
+      // Steps added to every sample: a track format version 6 terrain's base (sit-parser.js applyV6Heights).
+      heightOffset: doc.terrain.heightOffset ?? 0,
       cellSplit: doc.terrain.cellSplit ?? "fixed",
       // Community Patch 4: the height mode, and a Spline or Full Map track's 8 ft grid, which drive mode and the
       // marker sampler read as the mesh does (terrain-builder.js buildFineCells).
       cp4Mode: doc.terrain.cp4?.mode ?? null,
       fine: doc.terrain.fine ? {
         heights: doc.terrain.fine.heights.slice().buffer,
-        subdivisions: doc.terrain.fine.subdivisions, divisor: doc.terrain.fine.divisor,
+        subdivisions: doc.terrain.fine.subdivisions, divisor: doc.terrain.fine.divisor, offset: doc.terrain.fine.offset ?? 0,
+      } : null,
+      // Track format version 6 (.SI3): the world and height scale its .TXV chose, for the Track Data panel.
+      v6: doc.v6 ? {
+        worldCells: doc.v6.worldCells, worldFt: doc.v6.worldFt, formatVersion: doc.v6.formatVersion,
+        terrainHeightMap: doc.v6.terrainHeightMap, heightStep: doc.v6.heightStep, heightBase: doc.v6.heightBase,
+        heightRangeFt: doc.v6.heightRangeFt ? [...doc.v6.heightRangeFt] : null,
       } : null,
       // TV/F3 rock tops (all four corners at 255), which the game never draws; see tv-chambers.js.
       rockCells,
@@ -700,6 +771,16 @@ async function loadTrackAsync(podIndex, opfsPath, choice, heightScale) {
       })),
     } : null,
     fogVolumes: cp4World?.fogVolumes ?? [],
+    // Beta 0.53 waterfalls: one track buffer (the engine's 16-float vertices, scene positions, global
+    // indices), the falls in it, their textures and their mist boxes; see cp4-world.js buildWaterfalls.
+    waterfalls: cp4World?.waterfalls ? {
+      vertices: cp4World.waterfalls.vertices.buffer,
+      positions: cp4World.waterfalls.positions.buffer,
+      indices: cp4World.waterfalls.indices.buffer,
+      falls: cp4World.waterfalls.falls,
+      mists: cp4World.waterfalls.mists,
+      textures: waterfallTextures,
+    } : null,
     models, modelTextures, stats,
   };
 }
@@ -803,8 +884,14 @@ function readTxvRecord(podIndex, getBytes, choice) {
   const title = choice?.entry?.title ?? "";
   const stem = title.replace(/\.[^.]+$/, "");
   if (!stem) return null;
-  const entry = podIndex.entries.find((e) => e.normalizedName === `DATA/${stem}.TXV`)
-    ?? podIndex.entries.find((e) => e.title.toUpperCase() === `${stem}.TXV`);
+  // DATA\<level>.TXV first, then DATA\<stem>.TXV (level-stem.js).
+  const levelStem = choice?.entry ? sitLevelStem(getBytes(choice.entry)) : "";
+  let entry = null;
+  for (const s of levelFileStems(levelStem, stem)) {
+    entry = podIndex.entries.find((e) => e.normalizedName.toUpperCase() === `DATA/${s}.TXV`)
+      ?? podIndex.entries.find((e) => e.title.toUpperCase() === `${s}.TXV`);
+    if (entry) break;
+  }
   if (!entry) return null;
   try {
     const text = new TextDecoder("latin1").decode(getBytes(entry));
@@ -915,7 +1002,7 @@ function rawHeightAtCell(terrain, gx, gy) {
   const x = ((gx % gridSize) + gridSize) % gridSize;
   const y = ((gy % gridSize) + gridSize) % gridSize;
   return decodeHeightSample(raw, (x + y * gridSize) * bytesPerCell, bytesPerCell,
-                            terrain.heightDivisor ?? null, terrain.heightUnitScale ?? 1);
+                            terrain.heightDivisor ?? null, terrain.heightUnitScale ?? 1) + (terrain.heightOffset ?? 0);
 }
 
 

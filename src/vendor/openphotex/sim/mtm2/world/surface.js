@@ -32,11 +32,11 @@ export function textureTypeValues(textureNames, tty) {
     }
     return out;
 }
-export function createSurfaceMap(clr, textureValues) {
-    if (clr.length !== TERRAIN_CELLS * TERRAIN_CELLS) {
-        throw new RangeError(`surface map needs ${TERRAIN_CELLS * TERRAIN_CELLS} cells, got ${clr.length}`);
+export function createSurfaceMap(clr, textureValues, cells = TERRAIN_CELLS) {
+    if (clr.length !== cells * cells) {
+        throw new RangeError(`surface map needs ${cells * cells} cells, got ${clr.length}`);
     }
-    return { clr, textureValues };
+    return cells === TERRAIN_CELLS ? { clr, textureValues } : { cells, clr, textureValues };
 }
 /** The type value of a texture word (unknown textures read 0). */
 export function textureWordValue(map, word) {
@@ -46,12 +46,14 @@ export function textureWordValue(map, word) {
  * The terrain's type value at (x, z): the cell texture, or water below the level. `waterLevelFt`
  * null is treated as the game's level 0.
  */
-export function terrainSurfaceValue(terrain, map, x, z, waterLevelFt, snow = false, deepWater = true) {
+export function terrainSurfaceValue(terrain, map, x, z, waterLevelFt, snow = false, deepWater = true, pointY = null) {
     if (deepWater) {
         const height = terrainHeightAt(terrain, x, z);
         // A Community Patch 4 lake tile is deep water below the lake's surface (FUN_140203ed0, CP4_EXE_ANALYSIS.md 2).
+        // CP4's own physics tests the queried point (`pointY`, the tire's bottom, 10.3); otherwise the ground.
         const lake = terrainLakeAt(terrain, x, z);
-        if (lake && height < terrain.lakes.levelFt[lake])
+        const probeY = pointY ?? height;
+        if (lake && probeY < terrain.lakes.levelFt[lake])
             return (snow ? FROZEN_WATER_TYPE : DEEP_WATER_TYPE) * 100;
         const level = waterLevelFt ?? 0;
         // In the game's units (1/256 ft, floored): ground at 0 is Default, before the water test.
@@ -60,9 +62,10 @@ export function terrainSurfaceValue(terrain, map, x, z, waterLevelFt, snow = fal
         if (height <= level)
             return (snow ? FROZEN_WATER_TYPE : DEEP_WATER_TYPE) * 100;
     }
-    const col = (Math.trunc(x * 256) >> 13) & (TERRAIN_CELLS - 1);
-    const row = (Math.trunc(z * 256) >> 13) & (TERRAIN_CELLS - 1);
-    return textureWordValue(map, map.clr[row * TERRAIN_CELLS + col]);
+    const n = map.cells ?? TERRAIN_CELLS;
+    const col = (Math.trunc(x * 256) >> 13) & (n - 1);
+    const row = (Math.trunc(z * 256) >> 13) & (n - 1);
+    return textureWordValue(map, map.clr[row * n + col]);
 }
 export function surfaceType(value) {
     return Math.floor(value / 100);

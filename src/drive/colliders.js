@@ -389,7 +389,8 @@ export function createColliders(trackData, frame, { movers = null } = {}) {
   const textureSurfaces = trackData?.terrain?.textureSurfaces ?? [];
   for (const gb of trackData?.groundBoxes ?? []) {
     const upper = gb.upper ?? 0;
-    if (upper < 1) continue;
+    // A version 6 box (gbox-loader.js) is in the list only when present, and may stand below 0.
+    if (upper < 1 && gb.v6 !== true) continue;
     const lower = gb.lower ?? 0;
     const midX = gb.midX ?? ((gb.x ?? 0) * CELL + CELL / 2);
     const midY = gb.midY ?? ((gb.y ?? 0) * CELL + CELL / 2);

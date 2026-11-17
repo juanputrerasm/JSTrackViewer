@@ -39,7 +39,7 @@ export class TrackViewerApp {
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
       racetrack: true, underground: true, terrainOverlap: true, rockTops: true, lensflare: true,
-      sky: true, fog: true, movingObjects: true, vegetation: true, fogVolumes: true,
+      sky: true, fog: true, movingObjects: true, vegetation: true, fogVolumes: true, waterfalls: true,
     };
   }
 
@@ -204,6 +204,7 @@ export class TrackViewerApp {
       "tog-water":     "water",
       "tog-vegetation": "vegetation",
       "tog-fog-volumes": "fogVolumes",
+      "tog-waterfalls": "waterfalls",
       "tog-backdrop":  "backdrop",
       "tog-sky":       "sky",
       "tog-fog":       "fog",
@@ -1049,6 +1050,13 @@ export class TrackViewerApp {
     // Community Patch 4's 16-bit terrain, by the mode its height file and .TXV resolve to.
     const terrainMode = CP4_TERRAIN_MODES[data.terrain?.cp4Mode];
     if (terrainMode) pairs.push(["Terrain grid", terrainMode]);
+    // Track format version 6 (.SI3): the world size and height scale its .TXV chose.
+    const v6 = data.terrain?.v6;
+    if (v6) {
+      pairs.push(["World", `${v6.worldCells} cells, ${v6.worldFt.toLocaleString()} ft a side`]);
+      if (v6.terrainHeightMap) pairs.push(["Height step", `1/${v6.heightStep} ft, base ${v6.heightBase} ft`]);
+      if (v6.heightRangeFt) pairs.push(["Heights", `${Math.round(v6.heightRangeFt[0] * 10) / 10} to ${Math.round(v6.heightRangeFt[1] * 10) / 10} ft`]);
+    }
     dl.innerHTML = pairs.map(([k, v]) =>
       `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`
     ).join("");
@@ -1098,6 +1106,9 @@ export class TrackViewerApp {
       if (s.cp4TreeCount) statsPairs.push(["Trees", s.cp4TreeCount]);
       if (s.cp4ClumpCount) statsPairs.push(["Grass clumps", s.cp4ClumpCount]);
       if (s.fogVolumeCount) statsPairs.push(["Fog volumes", s.fogVolumeCount]);
+      if (s.waterfallCount) {
+        statsPairs.push(["Waterfalls", `${s.waterfallCount} (${s.waterfallVertexCount.toLocaleString()} vertices, ${s.waterfallMistCount} with mist)`]);
+      }
       if (s.srfModelCount) statsPairs.push(["Surface models", s.srfModelCount]);
       /*
         CPR tracks carry a second geometry layer the other games have no equivalent for. The

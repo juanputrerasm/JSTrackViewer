@@ -1,6 +1,6 @@
 import { MTM_WHEEL_KEYS } from "../truck/mtm-trk.js";
 import { encodeWindows1252 } from "../text.js";
-import { SIT_FOG_HEADER, formatSitFogLine } from "./sit.js";
+import { SIT_FOG_HEADER, SIT_LIGHT_HEADER, SIT_LIGHT_HEADER_12, formatSitFogLine } from "./sit.js";
 const CRLF = "\r\n";
 /*
   An MTM2 .SIT. Unless the caller gives them, ramps, cylinders and top-crush parts are written
@@ -34,7 +34,7 @@ export function writeMtm2Sit(sit) {
         record(out, box);
         out.push("!type,flags", `${box.type},${box.flags ?? 0}`, "priority", String(box.priority ?? 0), "@sound effect entries", box.hitSound ?? "NULL.WAV", box.loopSound ?? "NULL.WAV", "0,0");
         if (box.light)
-            out.push("Llight rad,hgt,r,g,b,glow,glowRad,coneLen,coneRim,coneBase,bright,aimOff", box.light.map(num).join(","));
+            out.push(box.light.length > 12 ? SIT_LIGHT_HEADER : SIT_LIGHT_HEADER_12, box.light.map(num).join(","));
         if (box.fog)
             out.push(SIT_FOG_HEADER, formatSitFogLine(box.fog));
     }
@@ -279,13 +279,17 @@ export function writeEmptyList() {
   zero face textures (CL0, CL1, CL2), and 0xFF in RA2 and RA3, which marks the second layer as
   solid rock rather than an open cavern at height zero. RA4 and RA5 are zero in every stock
   track. See decodeGroundBoxes and decodeHbUnderground for what the grids mean.
+
+  `gridSize` is N, the track's worldCells (track format version 6 allows 512); `depth` 16 gives
+  the box pairs (RA0/RA1, RA4/RA5) two bytes a cell, a version 6 track's 16-bit boxes. RA2 and RA3
+  stay one byte a cell.
 */
-export function emptyGroundBoxGrids(gridSize = 256) {
-    const cells = gridSize * gridSize;
+export function emptyGroundBoxGrids(gridSize = 256, depth = 8) {
+    const cells = gridSize * gridSize, pair = cells * (depth / 8);
     return {
-        RA0: new Uint8Array(cells), RA1: new Uint8Array(cells),
+        RA0: new Uint8Array(pair), RA1: new Uint8Array(pair),
         RA2: new Uint8Array(cells).fill(0xff), RA3: new Uint8Array(cells).fill(0xff),
-        RA4: new Uint8Array(cells), RA5: new Uint8Array(cells),
+        RA4: new Uint8Array(pair), RA5: new Uint8Array(pair),
         CL0: new Uint8Array(12 * cells), CL1: new Uint8Array(4 * cells), CL2: new Uint8Array(12 * cells),
     };
 }
@@ -305,23 +309,27 @@ export function emptyGroundBoxGrids(gridSize = 256) {
   and the ones starting -46333 match -nx (BAJA r=0.90).
 
   `sun` is the .LVL line 17 direction in any scale; only its horizontal direction is used.
+  `raw` is one height per cell in RAW byte units (2 ft); a finer track passes feet / 2, which
+  may be fractional. `cells` is N, the track's worldCells (256, or 512 in track format version 6).
 */
-export function buildMtm2Lte(raw, sun) {
-    const out = new Uint8Array(256 * 256 * 7);
-    const dark = 160, bright = 255;
+export function buildMtm2Lte(raw, sun, cells = 256) {
+    if (raw.length !== cells * cells)
+        throw new RangeError(`buildMtm2Lte: ${raw.length} heights for a ${cells}-cell grid`);
+    const out = new Uint8Array(cells * cells * 7);
+    const dark = 160, bright = 255, m = cells - 1;
     // The sun's compass direction in the grid's own axes: LVL east is grid x, LVL north grid y.
     const horizontal = Math.hypot(sun[0], sun[2]);
     const sunX = horizontal ? sun[0] / horizontal : 0, sunY = horizontal ? sun[2] / horizontal : 0;
-    for (let y = 0; y < 256; y++) {
-        const row = y << 8;
-        for (let x = 0; x < 256; x++) {
+    for (let y = 0; y < cells; y++) {
+        const row = y * cells;
+        for (let x = 0; x < cells; x++) {
             const height = raw[x + row];
             // West, south, east and north neighbours.
             const ring = [
-                [-64, 0, raw[((x - 1) & 255) + row]],
-                [0, 64, raw[x + (((y + 1) & 255) << 8)]],
-                [64, 0, raw[((x + 1) & 255) + row]],
-                [0, -64, raw[x + (((y - 1) & 255) << 8)]],
+                [-64, 0, raw[((x - 1) & m) + row]],
+                [0, 64, raw[x + ((y + 1) & m) * cells]],
+                [64, 0, raw[((x + 1) & m) + row]],
+                [0, -64, raw[x + ((y - 1) & m) * cells]],
             ];
             let nx = 0, ny = 0, nz = 0;
             for (let i = 0; i < 4; i++) {

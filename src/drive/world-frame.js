@@ -22,7 +22,8 @@
 
       1 height step = 2 ft          1 cell = 64 units = 32 ft
       horizontal:  2 units per ft   vertical: 1.5 units per ft
-      world:       16384 units = 8192 ft square
+      world:       16384 units = 8192 ft square on a 256-cell grid (gridSize * 64 units on any
+                   other, 16,384 ft on a track format version 6 world of 512 cells)
 
   Per-track rest heights vary (ALASKA 4.5 steps, CRAZY98 5.0, BAJA 2.4 to 4.5), so the stored
   spawn altitude is an authored drop height rather than a settled physics pose. Spawning snaps
@@ -115,8 +116,9 @@ export function createWorldFrame(trackData) {
   }
 
   /*
-    Community Patch 4 lakes (worker/cp4-world.js): the lake id of each 32 ft tile, x + z * 256 in
-    the level's rows, and each drawn lake's surface in feet. Null off a lake or on a track
+    Community Patch 4 lakes (worker/cp4-world.js): the lake id of each 32 ft tile, x + z * N in
+    the level's rows (N the grid's side, 512 in a track format version 6 world of 512 cells), and
+    each drawn lake's surface in feet. Null off a lake or on a track
     without any.
   */
   const lakeTiles = trackData?.lakes?.tileMap
@@ -124,7 +126,7 @@ export function createWorldFrame(trackData) {
     : null;
   const lakeLevels = trackData?.lakes?.levelFt ?? null;
   function lakeLevelAtFeet(xFt, zFt) {
-    if (!lakeTiles || gridSize !== 256) return null;
+    if (!lakeTiles || lakeTiles.length !== gridSize * gridSize) return null;
     const cx = Math.floor(xFt * UNITS_PER_FOOT_H / cellSize);
     const cz = Math.floor(gridSize - zFt * UNITS_PER_FOOT_H / cellSize);
     if (cx < 0 || cz < 0 || cx >= gridSize || cz >= gridSize) return null;

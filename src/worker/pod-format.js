@@ -11,6 +11,7 @@ import {
   findPodEntry,
   findPodEntryByTitle,
   findPodEntriesByExtension,
+  mtm2SituationExtension,
 } from "../vendor/openphotex/index.js";
 import { archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
 import { readFile, writeBytesToFile } from "../shared/opfs.js";
@@ -70,15 +71,20 @@ export function findEntriesByExtension(podIndex, ext) {
 }
 
 /*
-  Track scripts, including the Community Patch 3 .SI2 spelling.
+  Track scripts, including the Community Patch 3 .SI2 spelling and the track format version 6
+  .SI3 (https://openmtm2.github.io/proposals/track-format-v6, section 5.1).
 
   The fork writes WORLD\<stem>.SI2 instead of .SIT when a pod omits its legacy 8-bit
   fallbacks: the extension IS the visibility switch, because a 1998 install scans only for
   .SIT and so never lists a track it could not draw. The content is identical, so nothing
   downstream needs to care which one it came from.
+
+  A .SI3 is the same text, but its track follows version 6's rules (its .TXV's world size and
+  height step; sit-parser.js). Every entry is its own track: a .SIT or .SI2 with the same stem
+  is a different track, listed beside it, never a fallback for it.
 */
 export function findSitEntries(podIndex) {
-  return podIndex.entries.filter((e) => e.title.endsWith(".SIT") || e.title.endsWith(".SI2"));
+  return podIndex.entries.filter((e) => mtm2SituationExtension(e.title) !== null);
 }
 
 export function findLvlEntries(podIndex) {

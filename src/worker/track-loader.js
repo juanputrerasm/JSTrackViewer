@@ -17,7 +17,7 @@ const LVL_KIND_TUNNEL = 1;
 export function listTrackChoices(podIndex) {
   const sitEntries = findSitEntries(podIndex);
   if (sitEntries.length > 0) {
-    return sitEntries.map((e, i) => ({ name: archiveTitle(e.name).replace(/\.SI[T2]$/i, ""), index: i, format: "SIT", entry: e }));
+    return sitEntries.map((e, i) => ({ name: sitChoiceName(archiveTitle(e.name).replace(/\.SI[T23]$/i, ""), e, sitEntries), index: i, format: "SIT", entry: e }));
   }
   const lvlEntries = findLvlEntries(podIndex);
   const filtered = lvlEntries.filter((e) => {
@@ -42,7 +42,7 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
       const e = sitEntries[i];
       const fileName = archiveTitle(e.name);
       choices.push({
-        name: await readSitDisplayName(opfsPath, e) ?? fileName.replace(/\.SI[T2]$/i, ""),
+        name: sitChoiceName(await readSitDisplayName(opfsPath, e) ?? fileName.replace(/\.SI[T23]$/i, ""), e, sitEntries),
         fileName,
         index: i,
         format: "SIT",
@@ -88,6 +88,18 @@ export async function listTrackChoicesAsync(podIndex, opfsPath) {
     name: archiveTitle(e.name).replace(/\.LVL$/i, "") + (i >= surface.length ? " (tunnel)" : ""),
     fileName: archiveTitle(e.name), index: i, format: "LVL", entry: e,
   }));
+}
+
+/*
+  A track format version 6 .SI3 is its own track even when a .SIT or .SI2 of the same stem sits
+  beside it (the spec's section 5.1), and the two usually carry the same race name. The .SI3 one
+  is marked so the list can tell them apart; every other name is left as it was.
+*/
+function sitChoiceName(name, entry, sitEntries) {
+  if (!/\.SI3$/i.test(entry.title ?? "")) return name;
+  const stem = entry.title.replace(/\.[^.]*$/, "");
+  const twin = sitEntries.some((e) => e !== entry && /\.SI[T2]$/i.test(e.title ?? "") && e.title.replace(/\.[^.]*$/, "") === stem);
+  return twin ? `${name} (.SI3)` : name;
 }
 
 async function readSitDisplayName(opfsPath, entry) {
@@ -176,6 +188,7 @@ export async function loadTrack(podIndex, getBytes, choice, heightScale) {
       rawBytesPerCell: doc.terrain.rawBytesPerCell ?? 1,
       heightDivisor: doc.terrain.heightDivisor ?? null,
       heightUnitScale: doc.terrain.heightUnitScale ?? 1,
+      heightOffset: doc.terrain.heightOffset ?? 0,
       cellSplit: doc.terrain.cellSplit ?? "fixed",
     } : null,
     skyTexture: skyTextureDecoded ? { rgba: skyTextureDecoded.rgba.buffer, width: skyTextureDecoded.width, height: skyTextureDecoded.height } : null,

@@ -22,7 +22,8 @@
     h   = floor((2N + den) / (2 den)), clamped to 0..65535
 
   Pass 1 runs along X on the coarse rows (fine rows 4z), pass 2 along Z on every fine column,
-  reading the pass-1 values on the coarse rows. Indices wrap at 256 (the world wraps).
+  reading the pass-1 values on the coarse rows. Indices wrap at 256 (the world wraps); a track
+  format version 6 world of N cells wraps at N.
 
   N reaches about 1e17, past the 2^53 a double holds exactly. The common case (gentle slopes)
   fits and is computed with plain numbers; the rest falls back to BigInt, so the result is
@@ -132,27 +133,31 @@ function fillSegment(p0, p1, p2, p3, out, o, step) {
     out[o + 3 * step] = segWith(p1, p2, n1, q1, n2, q2, 3);
 }
 /**
- * Expand a 256 x 256 height map (row = Z, u16 heights) into the 1024 x 1024 smooth grid.
- * fine[4z * 1024 + 4x] equals coarse[z * 256 + x].
+ * Expand an N x N height map (row = Z, u16 heights; N = 256 by default) into the 4N x 4N smooth
+ * grid. fine[4z * 4N + 4x] equals coarse[z * N + x]. Indices wrap at N: CP4 wraps at 256, and track
+ * format version 6 (section 7.2) wraps a 512-cell world at 512. N must be a power of two.
  */
-export function terrainSplineExpand(coarse) {
-    if (coarse.length !== TERRAIN_COARSE * TERRAIN_COARSE) {
-        throw new RangeError(`terrainSplineExpand: expected ${TERRAIN_COARSE * TERRAIN_COARSE} heights, got ${coarse.length}`);
+export function terrainSplineExpand(coarse, size = TERRAIN_COARSE) {
+    if (!(size >= 4 && (size & (size - 1)) === 0))
+        throw new RangeError(`terrainSplineExpand: size ${size} is not a power of two`);
+    if (coarse.length !== size * size) {
+        throw new RangeError(`terrainSplineExpand: expected ${size * size} heights, got ${coarse.length}`);
     }
-    const fine = new Uint16Array(TERRAIN_FINE * TERRAIN_FINE);
-    const H = (z, x) => coarse[(z & 255) * 256 + (x & 255)];
-    for (let z = 0; z < 256; z++) {
-        const row = 4 * z * 1024;
-        for (let x = 0; x < 256; x++) {
+    const fineSide = 4 * size, m = size - 1;
+    const fine = new Uint16Array(fineSide * fineSide);
+    const H = (z, x) => coarse[(z & m) * size + (x & m)];
+    for (let z = 0; z < size; z++) {
+        const row = 4 * z * fineSide;
+        for (let x = 0; x < size; x++) {
             const p1 = H(z, x);
             fine[row + 4 * x] = p1;
             fillSegment(H(z, x - 1), p1, H(z, x + 1), H(z, x + 2), fine, row + 4 * x, 1);
         }
     }
-    const FR = (r, X) => fine[4 * (r & 255) * 1024 + X];
-    for (let X = 0; X < 1024; X++) {
-        for (let z = 0; z < 256; z++) {
-            fillSegment(FR(z - 1, X), FR(z, X), FR(z + 1, X), FR(z + 2, X), fine, 4 * z * 1024 + X, 1024);
+    const FR = (r, X) => fine[4 * (r & m) * fineSide + X];
+    for (let X = 0; X < fineSide; X++) {
+        for (let z = 0; z < size; z++) {
+            fillSegment(FR(z - 1, X), FR(z, X), FR(z + 1, X), FR(z + 2, X), fine, 4 * z * fineSide + X, fineSide);
         }
     }
     return fine;

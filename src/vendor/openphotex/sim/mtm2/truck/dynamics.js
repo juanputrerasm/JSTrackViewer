@@ -13,7 +13,9 @@ import { groundWeatherGrip } from "../world/ground.js";
 import { deliveredTorque, gearRatio, stepGearbox } from "./drivetrain.js";
 import { solveHullContacts } from "./contacts.js";
 import { fluidAreas } from "./water-drag.js";
+import { objectSurfaceValue, tireOnObject } from "./object-support.js";
 import { helicopterStep, updateStuck } from "./recovery.js";
+import { trickDamping, trickPitchMoment } from "./trick.js";
 const SKIN = 0.25;
 const TWO_PI = Math.PI * 2;
 const AREA = TRUCK.aeroArea; // x, y, z
@@ -99,7 +101,12 @@ export function stepTruck(s, p, ctx, dt) {
     stepGearbox(c, { rpm: s.rpm, autoShift: p.autoShift, forwardSpeed: s.bvel[2], dragStaging: false });
     const W = truckWeight(p);
     const mass = W * INV_G;
-    const gripK = !ctx.human && ctx.difficulty === DIFFICULTY.PROFESSIONAL && ctx.sonicTrack ? 2 : 1.75;
+    // The host's optional handling and another game's rules (constants.ts `Mtm2Rules`); none of them set is MTM2, to the bit.
+    const rules = ctx.ground.rules;
+    const gripK = !ctx.human && ctx.difficulty === DIFFICULTY.PROFESSIONAL && ctx.sonicTrack ? rules?.sonicTireCf ?? 2 : 1.75;
+    // Community Patch 4: computer trucks grip harder offline outside drag races, and in drag races (CP4_EXE_ANALYSIS.md 10.4).
+    const aiGrip = !ctx.human && !ctx.dragMode && !ctx.online ? rules?.aiGrip ?? 1 : 1;
+    const dragGrip = !ctx.human && ctx.dragMode ? rules?.dragCpuGrip ?? 1 : 1;
     const speed = Math.hypot(s.bvel[0], s.bvel[1], s.bvel[2]);
     // Gravity and drag, body axes (§14.7).
     const force = [-W * m[3], -W * m[4], -W * m[5]];
@@ -121,10 +128,15 @@ export function stepTruck(s, p, ctx, dt) {
         if (t.onGround) {
             const nLoad = t.load * (t.normal[0] * m[1] + t.normal[1] * m[4] + t.normal[2] * m[7]);
             const w = toWorld(m, t.hub[0], t.hub[1], t.hub[2]);
-            t.surface = ctx.ground.surface(s.pos[0] + w[0], s.pos[1] + w[1] + 100, s.pos[2] + w[2]);
+            // CP4 reads the surface at the tire's bottom, so a lake under a tire on a prop is not water (10.3).
+            const y = rules?.surfaceAtPoint ? s.pos[1] + w[1] - p.tireRadiusFt : s.pos[1] + w[1] + 100;
+            const g = ctx.ground;
+            t.surface = g.tireSurface ? g.tireSurface(s.pos[0] + w[0], y, s.pos[2] + w[2]) : g.surface(s.pos[0] + w[0], y, s.pos[2] + w[2]);
+            if (ctx.dryOnObjects && tireOnObject(t, g, s.pos[0] + w[0], s.pos[2] + w[2]))
+                t.surface = objectSurfaceValue(t.surface);
             const type = surfaceType(t.surface);
-            t.mu = gripK * surfaceMu(type) * weather * cutFactor(type, p.tireCut);
-            t.grip = t.mu * nLoad;
+            t.mu = gripK * surfaceMu(type) * weather * cutFactor(type, p.tireCut) * aiGrip;
+            t.grip = t.mu * nLoad * dragGrip;
         }
         else {
             t.grip = 0;
@@ -255,11 +267,8 @@ export function stepTruck(s, p, ctx, dt) {
         qbar = 26.74125;
     const L = p.hubs[0][2] * 2;
     const [pRoll, qPitch, rYaw] = s.rates;
-    // The host's optional handling (constants.ts `Mtm2Rules`); with none of it set this is the game's, to the bit.
-    const rules = ctx.ground.rules;
     const aloft = s.tires.every((t) => !t.onGround);
-    const rotDamp = aloft ? rules?.airRotationDamping ?? 1 : 1;
-    const yawDamp = aloft ? rotDamp : rules?.groundYawDamping ?? 1;
+    const [rotDamp, yawDamp] = trickDamping(rules, aloft);
     const moment = [
         -0.2 * qPitch * AREA[1] * L * qbar * rotDamp,
         -0.4 * rYaw * AREA[0] * L * qbar * yawDamp,
@@ -297,9 +306,7 @@ export function stepTruck(s, p, ctx, dt) {
     moment[0] += s.impulseMoment / dt;
     s.impulseMoment = 0;
     // Optional: the pedals pitch the truck in the air, throttle nose up (a negative pitch moment), brakes nose down.
-    const airPitch = aloft ? rules?.airPitchControl ?? 0 : 0;
-    if (airPitch !== 0)
-        moment[0] -= (c.throttle - 0.5 * (c.brakeFront + c.brakeRear)) * airPitch * p.inertia[1];
+    moment[0] += trickPitchMoment(rules, aloft, c.throttle, c.brakeFront, c.brakeRear, p.inertia[1]);
     // Integration (§14.9): rates and velocity first, then position and orientation.
     const [I1, I2, I3] = p.inertia; // roll (z), pitch (x), yaw (y)
     const clamp13 = (v) => (v > 13 ? 13 : v < -13 ? -13 : v);
@@ -322,7 +329,12 @@ export function stepTruck(s, p, ctx, dt) {
     const iv = Math.hypot(ivel[0], ivel[1], ivel[2]);
     // Collision rays start from here (§14.14); kept before the stuck checks, as in the game.
     s.prevPos.set(s.pos);
-    const atRest = iv < 0.1 || (iv < 0.5 && contacts.count >= 3);
+    let atRest = iv < 0.1 || (iv < 0.5 && contacts.count >= 3);
+    // CP4 freezes a truck at rest only with enough ground contacts, wheels down plus hull contacts (+0x890, 10.3).
+    if (atRest && rules?.restNeedsContacts !== undefined) {
+        const down = s.tires.reduce((a, t) => a + (t.onGround ? 1 : 0), 0);
+        atRest = down + s.contactCount >= rules.restNeedsContacts;
+    }
     if (atRest) {
         s.bvel.fill(0);
         s.rates.fill(0);
@@ -395,7 +407,8 @@ export function probeGround(s, ground, px, py, pz, offset) {
     const h = ground.height(x, z);
     let depth = h - y;
     let water = depth;
-    const value = ground.surface(x, h + 100, z);
+    // Community Patch 4's ground reads the queried height (10.3); the probe asks at the ground, which keeps its lake test.
+    const value = ground.surface(x, ground.rules?.surfaceAtPoint ? h : h + 100, z);
     const level = ground.waterLevelAt ? ground.waterLevelAt(x, z) : ground.waterLevelFt;
     if (surfaceType(value) === 13 && level !== null)
         water += level - h;
@@ -410,6 +423,8 @@ export function probeContacts(s, p, ground) {
         const t = s.tires[i];
         t.penetration = -9999;
         t.lever = 0;
+        t.propHeight = 0;
+        t.supportSource = 0;
         const axle = s.axles[i < 2 ? 0 : 1];
         const half = p.tireWidthFt * sign * 0.5;
         const px = Math.cos(axle.articulation) * half + t.hub[0];
@@ -474,6 +489,9 @@ export function postStepTruck(s, p, ground, dt) {
         }
     }
     // Wheels (§14.11.3): probe at the static anchor, half the width inward, offset r.
+    const rules = ground.rules;
+    const tc = rules?.terrainComprMaxFt ?? 0;
+    const comprMax = tc <= 0 ? 0 : Math.min(500, Math.max(1, tc));
     const bodyY = [m[1], m[4], m[7]];
     let sign = -1;
     for (let i = 0; i < 4; i++) {
@@ -491,10 +509,16 @@ export function postStepTruck(s, p, ground, dt) {
         let pen = along === 0 ? 0 : dot(vec, vec) / along;
         if (pr.depth !== 0 && pen / pr.depth < 0 && pr.depth < 0)
             pen = -pen;
+        // CP4 caps the terrain's penetration (terrainComprMaxFt, 10.3).
+        if (comprMax > 0 && pen > comprMax)
+            pen = comprMax;
         if (t.penetration < pen) {
             if (pen > 0) {
                 t.normal = pr.normal;
                 t.onGround = true;
+                // The terrain holds the wheel up now, not a prop (INFERRED: CP4 never shares bottoming on terrain, 11.7).
+                t.propHeight = 0;
+                t.supportSource = 1;
             }
             t.penetration = pen;
             t.lever = Math.hypot(p.tireRadiusFt, px);
@@ -506,7 +530,7 @@ export function postStepTruck(s, p, ground, dt) {
     const order = deeper(0) > deeper(2) ? [0, 1] : [1, 0];
     let carry = 0;
     for (const axleIdx of order)
-        carry = solveAxle(s, p, axleIdx, carry, dt);
+        carry = solveAxle(s, p, axleIdx, carry, dt, rules?.suspVelMaxFtPerSec ?? 0);
     // Bottoming (§14.11.5).
     const iv = toWorld(m, s.bvel[0], s.bvel[1], s.bvel[2]);
     const corr = [0, 0, 0];
@@ -515,9 +539,13 @@ export function postStepTruck(s, p, ground, dt) {
         if ((p.bumpTravelFt?.[i < 2 ? 0 : 1] ?? TRUCK.bumpTravelFt) > t.compression)
             continue;
         const vn = dot(t.normal, iv);
+        // CP4 cancels less on a small prop (bottomPropPct, 11.7).
+        const ph = t.propHeight ?? 0;
+        const onSmallProp = rules?.bottomPropShare !== undefined && ph > 0 && ph < (rules.smallPropRatio ?? 2) * p.tireRadiusFt;
+        const share = onSmallProp ? rules.bottomPropShare : 1;
         if (vn < 0)
             for (let k = 0; k < 3; k++)
-                corr[k] += t.normal[k] * vn * 0.25;
+                corr[k] += t.normal[k] * vn * 0.25 * share;
     }
     s.bottoming = Math.hypot(corr[0], corr[1], corr[2]);
     if (corr[0] !== 0 || corr[1] !== 0 || corr[2] !== 0) {
@@ -527,7 +555,7 @@ export function postStepTruck(s, p, ground, dt) {
     }
 }
 /** One solid axle (§14.11.4). Returns the lift left over for the other axle. */
-function solveAxle(s, p, axleIdx, carry, dt) {
+function solveAxle(s, p, axleIdx, carry, dt, velMax = 0) {
     const axle = s.axles[axleIdx];
     const R = s.tires[axleIdx * 2], Lt = s.tires[axleIdx * 2 + 1];
     const anchorY = p.hubs[axleIdx * 2][1];
@@ -613,6 +641,11 @@ function solveAxle(s, p, axleIdx, carry, dt) {
         Lt.compression = 0;
     R.extensionRate = (oldR - R.compression) / dt;
     Lt.extensionRate = (oldL - Lt.compression) / dt;
+    // CP4 clamps the rate the damper reads (suspVelMaxFtPerSec, 10.3); 0 is off.
+    if (velMax > 0) {
+        R.extensionRate = Math.max(-velMax, Math.min(velMax, R.extensionRate));
+        Lt.extensionRate = Math.max(-velMax, Math.min(velMax, Lt.extensionRate));
+    }
     return pen;
 }
 export { G };

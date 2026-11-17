@@ -20,7 +20,10 @@ import { LEGACY_ALTITUDE_DIVISOR } from "../terrain/height.js";
 /** The box types Community Patch 3 added: a static light, and a mover with no train sound, horn or light. */
 export const BOX_LIGHT = 12;
 export const BOX_MOVING = 13;
-const LIGHT_DEFAULTS = [64, 8, 1, 1, 1, 0, 6, 125, 10, 3.5, 1, 0];
+const LIGHT_DEFAULTS = [64, 8, 1, 1, 1, 0, 6, 125, 10, 3.5, 1, 0, 0];
+/** The `L` block's header line as hotfix 4 and Traxx 1.8 write it (13 fields), and the 12-field one before. */
+export const SIT_LIGHT_HEADER = "Llight rad,hgt,r,g,b,glow,glowRad,coneLen,coneRim,coneBase,bright,aimOff,allWx";
+export const SIT_LIGHT_HEADER_12 = "Llight rad,hgt,r,g,b,glow,glowRad,coneLen,coneRim,coneBase,bright,aimOff";
 /**
  * The `L` block's data line, read as the engine reads it: tolerantly, missing trailing fields keeping their defaults and
  * surplus ones ignored; `bright` snapped to 0.25 steps within 0.25..3.75 and `rad` clamped to 4095.
@@ -33,10 +36,10 @@ export function parseSitLight(line) {
             if (Number.isFinite(v))
                 values[i] = v;
         });
-    const [rad, hgt, r, g, b, glow, glowRad, coneLen, coneRim, coneBase, bright, aimOff] = values;
+    const [rad, hgt, r, g, b, glow, glowRad, coneLen, coneRim, coneBase, bright, aimOff, allWx] = values;
     return {
         rad: Math.min(4095, Math.max(0, rad)), hgt, color: [r, g, b], glow: Math.trunc(glow), glowRad, coneLen, coneRim, coneBase,
-        bright: Math.min(3.75, Math.max(0.25, Math.round(bright * 4) / 4)), aimOff,
+        bright: Math.min(3.75, Math.max(0.25, Math.round(bright * 4) / 4)), aimOff, allWx: Math.trunc(allWx),
     };
 }
 export const BOX_FOG = 14;
@@ -85,12 +88,13 @@ export function formatSitFogLine(fog) {
   Every marker below appears in all of its own family's stock SITs and in none of the other two
   families' (47 stock SITs: MTM1 14, MTM2 15, CPR 18). MTM1 is the residual, because its schema
   is a strict subset of MTM2's. Community Patch 3 writes .SI2 only for MTM2, so that extension
-  settles it on its own.
+  settles it on its own, and so does .SI3, the situation file of an MTM2 track in track format
+  version 6 (https://openmtm2.github.io/proposals/track-format-v6, 5.1), the same text as a .SI2.
 */
 const CPR_SIT_MARKERS = ["^currentPitStop", "@ap.guy2follow,ap.lineOffset,ap.place,ap.pit", "*** VARLOW ***"];
 const MTM2_SIT_MARKERS = ["!ambient sound,track length,weather mask", "!stadiumFlag,x,z,sx,sz,stadiumModelName"];
 export function detectSitOrigin(lines, sitTitle = "") {
-    if (sitTitle.toUpperCase().endsWith(".SI2"))
+    if (/\.SI[23]$/i.test(sitTitle))
         return "MTM2";
     const set = new Set(lines.map((line) => line.trim()));
     if (CPR_SIT_MARKERS.some((marker) => set.has(marker)))
@@ -129,9 +133,10 @@ export function sitTrackTypeName(code, origin) {
 */
 /*
   The same triplet as the game's course loader keeps it (MONSTER.EXE 0x4e0970): feet, with a
-  negative x or z wrapped by +8192 ft (the 256 x 32 ft world) and y untouched.
+  negative x or z wrapped by +8192 ft (the 256 x 32 ft world) and y untouched. A track format
+  version 6 world of N cells wraps by +W = 32 N ft instead (section 8.4).
 */
-export function sitFeetTriplet(value) {
+export function sitFeetTriplet(value, worldFt = 8192) {
     const parts = value.split(",");
     if (parts.length < 3)
         return [0, 0, 0];
@@ -140,9 +145,9 @@ export function sitFeetTriplet(value) {
     const y = num(parts[1]);
     let z = num(parts[2]);
     if (x < 0)
-        x += 8192;
+        x += worldFt;
     if (z < 0)
-        z += 8192;
+        z += worldFt;
     return [x, y, z];
 }
 export function sitWorldTriplet(value) {
@@ -163,8 +168,27 @@ export function sitWorldTriplet(value) {
     return [x, y, Number.isFinite(z) ? z : 0];
 }
 const decoder = new TextDecoder("latin1");
-/** Parse a .SIT (MTM1, MTM2 or CPR). `sitTitle` lets the .SI2 extension settle the origin. */
-export function parseMtmSit(input, sitTitle = "") {
+/*
+  The world the loader's feet are wrapped into while parseMtmSit runs (it is synchronous): 8192 ft,
+  or W of a track format version 6 world, which the .SI3's .TXV gives (worldCells).
+*/
+let loadWorldFt = 8192;
+/**
+ * Parse a .SIT (MTM1, MTM2 or CPR). `sitTitle` lets the .SI2 or .SI3 extension settle the origin.
+ * `worldFt` is the world the loader's feet (`positionFt`, `startFt`, `endFt`) wrap a negative x or
+ * z into: 8192, or 32 * worldCells for a .SI3 track (track format version 6, 8.4).
+ */
+export function parseMtmSit(input, sitTitle = "", { worldFt = 8192 } = {}) {
+    const saved = loadWorldFt;
+    loadWorldFt = worldFt;
+    try {
+        return parseMtmSitIn(input, sitTitle);
+    }
+    finally {
+        loadWorldFt = saved;
+    }
+}
+function parseMtmSitIn(input, sitTitle) {
     const lines = toLines(typeof input === "string" ? input : decoder.decode(input));
     const origin = detectSitOrigin(lines, sitTitle);
     const valueAfter = (label) => {
@@ -283,7 +307,7 @@ function parseBoxBlock(lines, blockStart, isRamp) {
     const iposIdx = indexOfLinePrefix(lines, "ipos", blockStart, endIndex);
     if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
         box.position = sitWorldTriplet(lines[iposIdx + 1]);
-        box.positionFt = sitFeetTriplet(lines[iposIdx + 1]);
+        box.positionFt = sitFeetTriplet(lines[iposIdx + 1], loadWorldFt);
     }
     const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", blockStart, endIndex);
     if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
@@ -399,7 +423,7 @@ function parseTopCrushSection(lines, boxes, cars) {
         const sizes = (k) => (modelForm ? null : parseFloatTriplet(value(k) ?? "0,0,0"));
         if (ipos) {
             const car = {
-                positionFt: sitFeetTriplet(ipos), position2Ft: sitFeetTriplet(ipos2),
+                positionFt: sitFeetTriplet(ipos, loadWorldFt), position2Ft: sitFeetTriplet(ipos2, loadWorldFt),
                 theta: angles[0], phi: angles[1], psi: angles[2],
                 modelName: modelForm ? modelOf(value(3)) : "", cabModelName: modelForm ? modelOf(value(4)) : "",
                 sizeFt: sizes(3), size2Ft: sizes(4),
@@ -471,12 +495,12 @@ function parseCourseBlocks(lines, startCursor, count, course) {
         const cstart = valueLine("cstart");
         if (cstart !== null) {
             segment.start = sitWorldTriplet(cstart);
-            segment.startFt = sitFeetTriplet(cstart);
+            segment.startFt = sitFeetTriplet(cstart, loadWorldFt);
         }
         const cend = valueLine("cend");
         if (cend !== null) {
             segment.end = sitWorldTriplet(cend);
-            segment.endFt = sitFeetTriplet(cend);
+            segment.endFt = sitFeetTriplet(cend, loadWorldFt);
         }
         const speeds = valueLine("cdec_point,cspeed,lastentry");
         if (speeds !== null) {
@@ -594,7 +618,7 @@ function parseTruckBlock(lines, startIdx) {
     const iposIdx = indexOfLinePrefix(lines, "ipos", startIdx);
     if (iposIdx >= 0 && iposIdx + 1 < lines.length) {
         truck.position = sitWorldTriplet(lines[iposIdx + 1]);
-        truck.positionFt = sitFeetTriplet(lines[iposIdx + 1]);
+        truck.positionFt = sitFeetTriplet(lines[iposIdx + 1], loadWorldFt);
     }
     const anglesIdx = indexOfLinePrefix(lines, "theta,phi,psi", startIdx);
     if (anglesIdx >= 0 && anglesIdx + 1 < lines.length) {
@@ -764,4 +788,20 @@ function toLines(text) {
 }
 function toNonEmptyLines(text) {
     return toLines(text).map((l) => l.trim()).filter(Boolean);
+}
+/*
+  MTM2 situation file extensions, the ones a reader lists as tracks: .SIT (retail), .SI2
+  (Community Patch 3 and 4) and .SI3 (track format version 6). Each is its own track: a .SIT or
+  .SI2 beside a .SI3 of the same stem is a different track, read by today's rules, never a
+  fallback for the .SI3 one (track format version 6, 5.1).
+*/
+export const MTM2_SITUATION_EXTENSIONS = ["SIT", "SI2", "SI3"];
+/** The situation extension of an entry name (SIT, SI2 or SI3), or null for anything else. */
+export function mtm2SituationExtension(name) {
+    const m = /\.(SIT|SI2|SI3)$/i.exec(name);
+    return m ? m[1].toUpperCase() : null;
+}
+/** True for a track format version 6 situation file (WORLD\<stem>.SI3). */
+export function isMtm2V6Situation(name) {
+    return mtm2SituationExtension(name) === "SI3";
 }

@@ -1,12 +1,14 @@
 import { resolveAsset, findEntryByTitle, findEntry } from "./pod-format.js";
 import { replaceExtension, archiveTitle, normalizeArchiveName } from "../shared/path-utils.js";
-import { loadGroundBoxes } from "./gbox-loader.js";
+import { loadGroundBoxes, loadMtm2V6GroundBoxes, resolveDataAsset } from "./gbox-loader.js";
 import { decodeBinModel } from "./bin-decoder.js";
 import { loadRaceTrackLayer } from "./racetrack-loader.js";
 import { podRawSide } from "./texture-decoder.js";
 import { cprCheckpointRole } from "../shared/cpr-track-schema.js";
+import { levelStemOf, sitLevelStem, levelFileStems } from "./level-stem.js";
 import { CPR_HEIGHT_DIVISOR, CPR_HEIGHT_UNIT_SCALE } from "../shared/terrain-height.js";
-import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, sitTrackTypeName, readTxvInfo, decodeMtm2Heights, decodeMtm2HeightPng } from "../vendor/openphotex/index.js";
+import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, sitTrackTypeName, readTxvInfo, decodeMtm2Heights, decodeMtm2HeightPng,
+  isMtm2V6Situation, readTxvV6, decodeMtm2V6Heights, mtm2V6HeightsFt, checkMtm2GridSize, mtm2GroundBoxDepth } from "../vendor/openphotex/index.js";
 
 /*
   MTM1, MTM2 and CPR tracks, from a .SIT entry in a POD archive.
@@ -21,13 +23,22 @@ import { parseMtmLvl, parseMtmSit, parseTexList, parseTty as parseTtyEntries, si
  * Returns a partial TrackDoc (terrain data, courses, boxes, metadata).
  */
 export function parseSitTrack(podIndex, getBytes, sitEntry, podComment) {
-  const sit = parseMtmSit(getBytes(sitEntry), sitEntry.title ?? "");
+  // A track format version 6 track (.SI3): its .TXV first, since the world size wraps the SIT's positions.
+  const v6 = isMtm2V6Situation(sitEntry.title ?? "") ? readV6Track(podIndex, getBytes, sitEntry) : null;
+  const sit = v6
+    ? parseMtmSit(getBytes(sitEntry), sitEntry.title ?? "", { worldFt: v6.worldFt })
+    : parseMtmSit(getBytes(sitEntry), sitEntry.title ?? "");
   if (!sit.lineCount) throw new Error("SIT entry is empty");
 
   const lvlName = sit.lvlName;
   const doc = createDoc(podComment);
   doc.origin = sit.origin;
   doc.prefix = prefixFromName(lvlName);
+  // The level's stem: its .TXV, .WTR, .VEG and .WFL are looked up by it first (level-stem.js).
+  doc.levelStem = levelStemOf(lvlName);
+  doc.v6 = v6;
+  // formatVersion above 6: the track may need a newer build. Shown, and the track still loads.
+  if (v6) doc.warnings.push(...v6.warnings.map((text) => `Track format: ${text}`));
   // A box count that disagrees with the records, for one; shown in the Track Data panel.
   doc.warnings.push(...sit.warnings);
 
@@ -165,14 +176,21 @@ function parseLvlSection(podIndex, getBytes, lvlEntry, doc) {
   if (lvl.waterHeight !== null) doc.waterHeightFt = lvl.waterHeight * 0.5;
 
   // Community Patch 4's 16-bit terrain grids, before the grid is inferred from the file's size.
-  if (doc.origin !== "CPR") applyCp4Heights(doc, podIndex, getBytes, rawName);
+  // A version 6 track with a terrainHeightMap reads its heights from that instead (applyV6Heights).
+  if (doc.v6?.terrainHeightMap) applyV6Heights(doc, podIndex, getBytes);
+  else if (doc.origin !== "CPR") applyCp4Heights(doc, podIndex, getBytes, rawName, doc.v6?.txvBytes);
 
   // Infer terrain grid
   inferTerrain(doc);
 
+  // A version 6 track's grid files must hold its N x N cells, or it is refused (spec section 8.2).
+  if (doc.v6) checkV6GridFiles(doc, podIndex, getBytes, rawName);
+
   // Ground boxes from RA0/RA1/CL0
   if (doc.terrain.rawData) {
-    doc.groundBoxes = loadGroundBoxes(podIndex, getBytes, rawName, doc.terrain.gridSize);
+    doc.groundBoxes = doc.v6
+      ? loadMtm2V6GroundBoxes(podIndex, getBytes, rawName, doc.v6.worldCells, { step: doc.v6.heightStep, base: doc.v6.heightBase })
+      : loadGroundBoxes(podIndex, getBytes, rawName, doc.terrain.gridSize);
   }
 
   loadRaceTrackLayer(podIndex, getBytes, rawName, doc);
@@ -302,10 +320,11 @@ function parseTty(bytes, doc) {
   `terrain.fine` ({ heights, subdivisions 4, divisor 256 }), which terrain-builder.js draws and drive/world-frame.js
   drives on. CPR's 16-bit grid, the same length at another scale, never comes here.
 */
-function applyCp4Heights(doc, podIndex, getBytes, rawName) {
+function applyCp4Heights(doc, podIndex, getBytes, rawName, txvBytes = null) {
   const stem = archiveTitle(rawName ?? "").replace(/\.[^.]*$/, "");
-  const txvEntry = stem ? resolveTrackDataAsset(podIndex, `${stem}.TXV`) : null;
-  const txv = txvEntry ? readTxvInfo(getBytes(txvEntry)) : null;
+  // A version 6 track without a terrainHeightMap passes its own .TXV (DATA\<situation stem>.TXV).
+  const txvEntry = txvBytes ? null : stem ? resolveTrackDataAsset(podIndex, `${stem}.TXV`) : null;
+  const txv = txvBytes ? readTxvInfo(txvBytes) : txvEntry ? readTxvInfo(getBytes(txvEntry)) : null;
   const pngEntry = txv?.terrainHeights ? resolveTrackDataAsset(podIndex, txv.terrainHeights) : null;
   const raw = doc.terrain.rawData;
   if (!pngEntry && !(raw && (raw.length === 131072 || raw.length === 2097152))) return;
@@ -322,6 +341,94 @@ function applyCp4Heights(doc, podIndex, getBytes, rawName) {
   doc.terrain.cp4 = { mode: heights.mode, warning: heights.warning, fine: heights.fine };
   doc.terrain.fine = heights.fine ? { heights: heights.fine, subdivisions: CP4_FINE_SUBDIVISIONS, divisor: 256 } : null;
   if (heights.warning) doc.warnings?.push?.(`Heights: ${heights.warning}`);
+}
+
+/*
+  Track format version 6 (https://openmtm2.github.io/proposals/track-format-v6), a .SI3 track: its
+  DATA\<level>.TXV (else DATA\<stem>.TXV) read by OpenPhotex readTxvV6, which throws a RangeError naming the key for a bad
+  value, a missing .TXV or a formatVersion below 6. That refuses the track with the message (spec
+  section 5.2). The step and base apply to heights and ground boxes only with a terrainHeightMap;
+  without one heights follow CP4's rules (spec 7.1), and boxes 128 and 0, which are CP4's.
+*/
+function readV6Track(podIndex, getBytes, sitEntry) {
+  const stem = archiveTitle(sitEntry.title ?? "").replace(/\.[^.]*$/, "");
+  // DATA\<level>.TXV first, then DATA\<stem>.TXV (level-stem.js): tracks sharing a level share its .TXV.
+  let txvEntry = null;
+  for (const s of levelFileStems(sitLevelStem(getBytes(sitEntry)), stem)) {
+    txvEntry = resolveTrackDataAsset(podIndex, `${s}.TXV`);
+    if (txvEntry) break;
+  }
+  const txvBytes = txvEntry ? getBytes(txvEntry) : null;
+  const txv = readTxvV6(txvBytes);
+  const mapped = txv.terrainHeightMap !== null;
+  return {
+    ...txv, txvBytes,
+    heightStep: mapped ? txv.terrainHeightStep : 128,
+    heightBase: mapped ? txv.terrainHeightBase : 0,
+    heightRangeFt: null,
+  };
+}
+
+/*
+  A version 6 terrainHeightMap (spec section 7): an N or 4N square 16-bit RAW or greyscale PNG,
+  decoded by OpenPhotex decodeMtm2V6Heights, which refuses any other size. height_ft = base +
+  sample / step, so in the viewer's legacy 2 ft steps a sample is sample / (2 * step) + base / 2:
+  the grid goes on as the file's 16-bit samples with heightDivisor 2 * step and heightOffset
+  base / 2 (both exact, the step being a power of two), which terrain-builder.js and the shared
+  samplers (shared/terrain-height.js, shared/fine-terrain.js) add as they read. That carries
+  heights below zero and above 512 ft, to the full 16 bits of the step. A Spline or 4N square
+  track keeps its 8 ft grid in `terrain.fine` with the same divisor and offset.
+*/
+function applyV6Heights(doc, podIndex, getBytes) {
+  const v6 = doc.v6;
+  const name = v6.terrainHeightMap;
+  const entry = resolveTrackDataAsset(podIndex, name);
+  if (!entry) throw new RangeError(`TXV: terrainHeightMap=${name} is not in the pod`);
+  const heights = decodeMtm2V6Heights(getBytes(entry), {
+    name, cells: v6.worldCells, step: v6.terrainHeightStep, base: v6.terrainHeightBase, terrainGrid: v6.terrainGrid,
+  });
+  const bytes = new Uint8Array(heights.coarse.length * 2);
+  for (let i = 0; i < heights.coarse.length; i++) { bytes[2 * i] = heights.coarse[i] & 0xff; bytes[2 * i + 1] = heights.coarse[i] >> 8; }
+  // The track's height range in feet (mtm2V6HeightsFt is the spec's exact 7.3 store), for the Track Data panel.
+  const feet = mtm2V6HeightsFt(heights.fine ?? heights.coarse, heights.step, heights.base);
+  let low = Infinity, high = -Infinity;
+  for (let i = 0; i < feet.length; i++) { if (feet[i] < low) low = feet[i]; if (feet[i] > high) high = feet[i]; }
+  v6.heightRangeFt = feet.length ? [low, high] : null;
+  const divisor = 2 * heights.step;
+  const offset = heights.base / 2;
+  doc.terrain.rawName = name;
+  doc.terrain.rawData = bytes;
+  doc.terrain.cp4 = { mode: heights.mode === "classic" ? "classic16" : heights.mode, warning: heights.warning, fine: heights.fine };
+  doc.terrain.fine = heights.fine ? { heights: heights.fine, subdivisions: CP4_FINE_SUBDIVISIONS, divisor, offset } : null;
+  doc.terrain.v6Layout = { gridSize: heights.cells, heightDivisor: divisor, heightOffset: offset };
+  if (heights.warning) doc.warnings?.push?.(`Heights: ${heights.warning}`);
+}
+
+/** The version 6 grid files (spec section 8.2), by extension, found beside the .LVL's RAW as the viewer finds them. */
+const V6_GRID_FILES = [".RA0", ".RA1", ".RA2", ".RA3", ".RA4", ".RA5", ".CL0", ".CL1", ".CL2"];
+
+/*
+  Every grid file of a version 6 track checked against its N x N cells (OpenPhotex
+  checkMtm2GridSize), and the ground box pairs .RA0/.RA1 and .RA4/.RA5 against each other's depth
+  (spec 8.3). A RangeError refuses the track with its message. The .CLR and .LTE are the ones the
+  .LVL names; the others are found by the RAW line's stem, as the ground boxes are, whether or not
+  the RAW itself is in the pod (a terrainHeightMap track need not ship one).
+*/
+function checkV6GridFiles(doc, podIndex, getBytes, rawName) {
+  const cells = doc.v6.worldCells;
+  const { clrData, clrName, lteData, lteName } = doc.terrain;
+  if (clrData) checkMtm2GridSize(archiveTitle(clrName || "CLR.CLR"), clrData.length, cells);
+  if (lteData) checkMtm2GridSize(archiveTitle(lteName || "LTE.LTE"), lteData.length, cells);
+  if (!rawName) return;
+  const found = {};
+  for (const ext of V6_GRID_FILES) {
+    const entry = resolveDataAsset(podIndex, replaceExtension(rawName, ext));
+    if (!entry) continue;
+    found[ext] = getBytes(entry);
+    checkMtm2GridSize(archiveTitle(entry.title ?? entry.name ?? ext), found[ext].length, cells);
+  }
+  if (found[".RA0"] && found[".RA1"]) mtm2GroundBoxDepth(found[".RA0"], found[".RA1"], cells, ["RA0", "RA1"]);
+  if (found[".RA4"] && found[".RA5"]) mtm2GroundBoxDepth(found[".RA4"], found[".RA5"], cells, ["RA4", "RA5"]);
 }
 
 /** 8 ft points a 32 ft cell side on a Spline or Full Map track (MTM2_FINE_CELL_FT). */
@@ -358,6 +465,16 @@ function inferTerrain(doc) {
   doc.terrain.heightUnitScale = cpr ? CPR_HEIGHT_UNIT_SCALE : 1;
   // CPR splits its terrain cells on alternating diagonals; see cellSplit in terrain-builder.js.
   doc.terrain.cellSplit = cpr ? "checkerboard" : "fixed";
+  // A version 6 terrainHeightMap: its own grid and scale (applyV6Heights), never CPR's.
+  const v6 = doc.terrain.v6Layout;
+  if (v6) {
+    gridSize = doc.terrain.gridSize = v6.gridSize;
+    doc.terrain.rawBytesPerCell = 2;
+    doc.terrain.heightDivisor = v6.heightDivisor;
+    doc.terrain.heightOffset = v6.heightOffset;
+    doc.terrain.heightUnitScale = 1;
+    doc.terrain.cellSplit = "fixed";
+  }
   // CLR bytes per cell: 1 or 2
   if (clrData) {
     const cells = gridSize * gridSize;

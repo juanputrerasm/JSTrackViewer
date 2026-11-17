@@ -4,6 +4,7 @@ const BUCKET_FT = 32;
 /** The steepest a triangle may be and still carry a wheel: its unit normal's y. */
 const MIN_NORMAL_Y = 0.5;
 export function createRoadGround(base, road) {
+    const worldFt = base.worldFt;
     const p = road.positions;
     const count = Math.floor(p.length / 9);
     // Per triangle: the plane y = y0 + sx * (x - x0) + sz * (z - z0), and its unit normal.
@@ -48,8 +49,8 @@ export function createRoadGround(base, road) {
     let found = 0;
     function triangleAt(x, z, limit = Infinity) {
         // The road is in the one world: a point a world away is over the same triangle.
-        x = wrapCoord(x);
-        z = wrapCoord(z);
+        x = wrapCoord(x, worldFt);
+        z = wrapCoord(z, worldFt);
         const list = buckets.get(key(Math.floor(x / BUCKET_FT), Math.floor(z / BUCKET_FT)));
         if (!list)
             return -1;

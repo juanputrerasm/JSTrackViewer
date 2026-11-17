@@ -4,6 +4,9 @@
   - A 256 × 256 grid of 32 ft cells; the level's `.RAW` heightfield is the grid in file order:
     corner (row, col) is byte `row * 256 + col`, worth 2 ft per step. Rows follow z, columns x.
   - Positions are truncated to 1/256 ft and wrap at 8192 ft.
+  - A track format version 6 world has N = 256 or 512 cells a side (`cells`, section 8.1): the
+    cell mask is N - 1, the row stride N, a fine grid 4N, and the world wraps at 32 N ft. The
+    32 ft cell, the checkerboard split and the triangle rule do not change.
   - Each cell is two triangles, split along a diagonal that alternates in a checkerboard: when
     `row + col` is even the split runs from (row, col) to (row + 1, col + 1), otherwise along the
     other diagonal. Height is linear inside the triangle; the normal is the triangle's.
@@ -14,34 +17,51 @@
 import { CELL_FT, HEIGHT_STEP_FT, TERRAIN_CELLS } from "../constants.js";
 const UNITS_PER_FT = 256;
 const UNITS_PER_CELL = CELL_FT * UNITS_PER_FT; // 0x2000
-const MASK = TERRAIN_CELLS - 1;
-export function createTerrain(heights, waterLevelFt = null) {
-    if (heights.length !== TERRAIN_CELLS * TERRAIN_CELLS) {
-        throw new RangeError(`terrain needs ${TERRAIN_CELLS * TERRAIN_CELLS} heights, got ${heights.length}`);
+function checkCells(cells) {
+    if (!(cells >= 2 && (cells & (cells - 1)) === 0))
+        throw new RangeError(`terrain cells ${cells} is not a power of two`);
+}
+/** N, the terrain's cells a side. */
+export function terrainCells(t) {
+    return t.cells ?? TERRAIN_CELLS;
+}
+/** W = 32 N, the terrain's world side in feet. */
+export function terrainWorldFt(t) {
+    return terrainCells(t) * CELL_FT;
+}
+export function createTerrain(heights, waterLevelFt = null, cells = TERRAIN_CELLS) {
+    checkCells(cells);
+    if (heights.length !== cells * cells) {
+        throw new RangeError(`terrain needs ${cells * cells} heights, got ${heights.length}`);
     }
-    return { heights, waterLevelFt };
+    return cells === TERRAIN_CELLS ? { heights, waterLevelFt } : { cells, heights, waterLevelFt };
 }
 /**
  * A terrain from corner heights in feet (see `Mtm2Terrain.heightsFt`): the same grid, cells and split. `fineFt`, a
- * square grid of a multiple of 256 heights a side, is a finer grid over it (`Mtm2Terrain.fine`).
+ * square grid of a multiple of N heights a side, is a finer grid over it (`Mtm2Terrain.fine`). `cells` is N (256, or
+ * 512 in a track format version 6 world).
  */
-export function createTerrainFt(heightsFt, waterLevelFt = null, fineFt = null) {
-    if (heightsFt.length !== TERRAIN_CELLS * TERRAIN_CELLS) {
-        throw new RangeError(`terrain needs ${TERRAIN_CELLS * TERRAIN_CELLS} heights, got ${heightsFt.length}`);
+export function createTerrainFt(heightsFt, waterLevelFt = null, fineFt = null, cells = TERRAIN_CELLS) {
+    checkCells(cells);
+    if (heightsFt.length !== cells * cells) {
+        throw new RangeError(`terrain needs ${cells * cells} heights, got ${heightsFt.length}`);
     }
     const t = { heights: new Uint8Array(0), heightsFt, waterLevelFt };
+    if (cells !== TERRAIN_CELLS)
+        t.cells = cells;
     if (fineFt) {
-        const cells = Math.round(Math.sqrt(fineFt.length));
-        if (cells * cells !== fineFt.length || cells % TERRAIN_CELLS !== 0)
-            throw new RangeError(`a fine grid needs a square multiple of ${TERRAIN_CELLS} a side, got ${fineFt.length}`);
-        t.fine = { cells, cellFt: (CELL_FT * TERRAIN_CELLS) / cells, heightsFt: fineFt };
+        const side = Math.round(Math.sqrt(fineFt.length));
+        if (side * side !== fineFt.length || side % cells !== 0)
+            throw new RangeError(`a fine grid needs a square multiple of ${cells} a side, got ${fineFt.length}`);
+        t.fine = { cells: side, cellFt: (CELL_FT * cells) / side, heightsFt: fineFt };
     }
     return t;
 }
 /** Give a terrain Community Patch 4 lakes: the .WTR's tile map and each lake id's surface in feet (index 0 unused). */
 export function setTerrainLakes(t, tileMap, levelFt) {
-    if (tileMap.length !== TERRAIN_CELLS * TERRAIN_CELLS)
-        throw new RangeError("a lake tile map has 65536 tiles");
+    const n = terrainCells(t);
+    if (tileMap.length !== n * n)
+        throw new RangeError(`a lake tile map has ${n * n} tiles`);
     t.lakes = { tileMap, levelFt };
     return t;
 }
@@ -49,9 +69,10 @@ export function setTerrainLakes(t, tileMap, levelFt) {
 export function terrainLakeAt(t, x, z) {
     if (!t.lakes)
         return 0;
-    const col = (Math.trunc(x * UNITS_PER_FT) >> 13) & MASK;
-    const row = (Math.trunc(z * UNITS_PER_FT) >> 13) & MASK;
-    return t.lakes.tileMap[row * TERRAIN_CELLS + col];
+    const n = terrainCells(t), m = n - 1;
+    const col = (Math.trunc(x * UNITS_PER_FT) >> 13) & m;
+    const row = (Math.trunc(z * UNITS_PER_FT) >> 13) & m;
+    return t.lakes.tileMap[row * n + col];
 }
 /** The water level at (x, z): a lake's surface on its tiles, else the track's water (null for none). */
 export function terrainWaterLevelAt(t, x, z, trackLevelFt = t.waterLevelFt) {
@@ -67,16 +88,17 @@ function fineCell(f, x, z) {
     return { h00: h(r, c), h01: h(r, c + 1), h10: h(r + 1, c), h11: h(r + 1, c + 1), fx, fz, main: ((r ^ c) & 1) === 0 };
 }
 function corner(t, row, col) {
-    const i = (row & MASK) * TERRAIN_CELLS + (col & MASK);
+    const n = terrainCells(t), m = n - 1;
+    const i = (row & m) * n + (col & m);
     return t.heightsFt ? t.heightsFt[i] : t.heights[i] * HEIGHT_STEP_FT;
 }
 /** The cell and in-cell fractions of a position, as the game computes them. */
-function locate(x, z) {
+function locate(x, z, m) {
     const xi = Math.trunc(x * UNITS_PER_FT) | 0;
     const zi = Math.trunc(z * UNITS_PER_FT) | 0;
     return {
-        col: (xi >> 13) & MASK,
-        row: (zi >> 13) & MASK,
+        col: (xi >> 13) & m,
+        row: (zi >> 13) & m,
         fx: (xi & (UNITS_PER_CELL - 1)) / UNITS_PER_CELL,
         fz: (zi & (UNITS_PER_CELL - 1)) / UNITS_PER_CELL,
     };
@@ -91,7 +113,7 @@ export function terrainHeightAt(t, x, z) {
         const { h00, h01, h10, h11, fx, fz, main } = fineCell(t.fine, x, z);
         return triangleAt(h00, h01, h10, h11, fx, fz, main);
     }
-    const { row, col, fx, fz } = locate(x, z);
+    const { row, col, fx, fz } = locate(x, z, terrainCells(t) - 1);
     const h00 = corner(t, row, col);
     const h01 = corner(t, row, col + 1);
     const h10 = corner(t, row + 1, col);
@@ -133,7 +155,7 @@ export function groundNormalAt(t, x, z, out, snow = false) {
         side = t.fine.cellFt;
     }
     else {
-        const at = locate(x, z);
+        const at = locate(x, z, terrainCells(t) - 1);
         ({ fx, fz } = at);
         h00 = corner(t, at.row, at.col);
         h01 = corner(t, at.row, at.col + 1);

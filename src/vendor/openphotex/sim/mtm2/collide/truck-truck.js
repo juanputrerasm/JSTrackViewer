@@ -33,9 +33,9 @@ function insideHullBox(hull, r) {
  * truck's `extForce` / `extMoment`; the faster truck is moved out of the slower one. Returns what
  * met (for a host's sounds and effects).
  */
-export function collideTrucks(a, b, dt, rules = MTM2_RULES) {
+export function collideTrucks(a, b, dt, rules = MTM2_RULES, worldFt = 8192) {
     // Across the world's seam the two are a world apart by their numbers: `b` is tested as the copy nearest `a`.
-    return withNearest(b.s, a.s.pos[0], a.s.pos[2], () => collideNear(a, b, dt, rules));
+    return withNearest(b.s, a.s.pos[0], a.s.pos[2], () => collideNear(a, b, dt, rules), worldFt);
 }
 function collideNear(a, b, dt, rules) {
     if (a.s.heliTimer > 0 || b.s.heliTimer > 0)

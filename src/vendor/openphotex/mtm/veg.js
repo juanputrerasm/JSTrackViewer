@@ -5,8 +5,9 @@
   The file holds placements already made: Traxx 1.7 plants the trees and grass from painted
   masks (ART\<stem>_V.PNG trees, ART\<stem>_G.PNG grass, shipped in the pod but never read by the
   engine) and the engine draws what the file says. It is only read from the track's own pod.
-  Limits the engine documents through Traxx: 60 species of which at most 16 ground (grass),
-  30,000 trees, 131,072 clumps, 1,024 clumps a tile.
+  Limits: Traxx 1.7 plants at most 60 species of which at most 16 ground (grass), 30,000 trees,
+  131,072 clumps (2,097,152 from Traxx 1.8.0), 1,024 clumps a tile; Community Patch 4 beta 0.53
+  (hotfix 3 and 4, its load messages) holds 64 species, 32,768 trees and 2,097,152 clumps.
 
   Layout, little-endian (Traxx TrackPODVegetation.cpp BuildVEG):
 
@@ -88,12 +89,19 @@ export function parseMtm2Veg(bytes) {
     const count = r32(bytes, 12);
     if (headerSize < 32 || headerSize > bytes.length || count > (bytes.length - headerSize) / 16)
         throw new RangeError("VEG: bad header");
+    // Unknown ids are skipped, so a later format can add chunks old readers pass over. The first entry of an id
+    // wins: when it has a version we do not know or runs past the file, the id is absent and a later duplicate is
+    // never consulted (Traxx TrackPODVegetation.cpp VegFindChunk).
     const chunks = new Map();
+    const seen = new Set();
     for (let i = 0; i < count; i++) {
         const e = headerSize + i * 16;
         const id = latin1.decode(bytes.subarray(e, e + 4));
+        if (seen.has(id))
+            continue;
+        seen.add(id);
         const ver = r32(bytes, e + 4), off = r32(bytes, e + 8), len = r32(bytes, e + 12);
-        if (ver !== 1 || off > bytes.length || len > bytes.length - off || chunks.has(id))
+        if (ver !== 1 || off > bytes.length || len > bytes.length - off)
             continue;
         chunks.set(id, [off, len]);
     }
@@ -185,7 +193,9 @@ export function vegClumpAt(clumps, tile, i) {
  * as Traxx does; clumps must already be grouped by tile in ascending (tz, tx) order.
  * `rule` and `info` are written verbatim when given (CRLF text).
  */
-export function writeMtm2Veg(veg) {
+export function writeMtm2Veg(veg, { cells } = {}) {
+    if (cells !== undefined)
+        checkMtm2VegBounds(veg, cells);
     const parts = [];
     const enc = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff);
     if (veg.species.length) {
@@ -290,4 +300,23 @@ export function writeMtm2Veg(veg) {
         offset += b.length;
     });
     return out;
+}
+/**
+ * Refuse a .VEG whose placements fall outside an N-cell world (track format version 6, section
+ * 9.2): TREE x and z in 0 to W * 256 (exclusive) 1/256 ft units, W = 32 N ft, and GRAS tile numbers
+ * 0 to N - 1. With N = 256 that is CP4's own bound (x and z below 0x200000). The layout does not
+ * change with N; the header's tile counts stay 256 as Traxx writes them.
+ */
+export function checkMtm2VegBounds(veg, cells) {
+    const limit = cells * 32 * VEG_UNITS_PER_FT;
+    const t = veg.trees;
+    for (let i = 0; i < t.count; i++) {
+        const x = t.position[3 * i], z = t.position[3 * i + 2];
+        if (x < 0 || x >= limit || z < 0 || z >= limit)
+            throw new RangeError(`VEG: tree ${i} at (${x}, ${z}) is outside a ${cells}-cell world (0 to ${limit} 1/256 ft)`);
+    }
+    for (const tile of veg.clumps.tiles) {
+        if (tile.tx >= cells || tile.tz >= cells)
+            throw new RangeError(`VEG: grass tile (${tile.tx}, ${tile.tz}) is outside a ${cells}-cell world (0 to ${cells - 1})`);
+    }
 }

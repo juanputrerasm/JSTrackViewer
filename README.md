@@ -16,6 +16,15 @@ JSTrackViewer opens the archives of **Monster Truck Madness**, **Monster Truck M
 
 ---
 
+## What's new in 1.3.0
+
+Changes since 1.2.0:
+
+- Track format version 6 tracks (.SI3, https://openmtm2.github.io/proposals/track-format-v6): worlds of 512 cells (16,384 ft a side), the height step and base its TXV sets (heights below zero or thousands of feet up), 16-bit ground boxes, and version 2 lakes and waterfalls. The Track Data panel shows the world's size, height step and height range; a TXV or grid file that does not fit refuses the track with the reason.
+- Tracks that share one level, such as the 22 Midtown Madness Chicago races, find the level's TXV, lakes, vegetation and waterfalls by the level's name first, then their own: their water now shows.
+- Community Patch 4 beta 0.53 waterfalls (.WFL): each built at load as the game builds it, by walking the water from its crest over the terrain into the lakes or the track's water, then drawn flowing in the game's Original look with its foam strip, ragged edges and mist box, with a Waterfalls toggle and a Stats row.
+- OpenPhotex 1.7.3.
+
 ## What's new in 1.2.0
 
 Changes since 1.1.0:
@@ -23,11 +32,10 @@ Changes since 1.1.0:
 - Community Patch 4 and Traxx 1.7 tracks: 16-bit heightmaps, 16-bit Spline and 16-bit Full Map terrain (drawn on its 8 ft grid), and height PNGs.
 - Lakes drawn at their own heights; Test Drive treats them as water.
 - Fog volumes shown as translucent boxes in the weathers they belong to, listed in the Stats panel.
-- Community Patch 4 beta 0.53 waterfalls (.WFL): each built at load as the game builds it, by walking the water from its crest over the terrain into the lakes or the track's water, then drawn flowing in the game's Original look with its foam strip, ragged edges and mist box, with a Waterfalls toggle and a Stats row.
 - Traxx 1.7 vegetation: trees and grass drawn instanced, with far cards, and a Vegetation toggle.
 - Surface types from a model's .SRF file shown in the Models window.
 - A new document comparing the June 1996 MTM1 beta (Build #41) with the retail game.
-- OpenPhotex 1.7.3.
+- OpenPhotex 1.7.0.
 
 ## What's new in 1.1.0
 
@@ -75,7 +83,7 @@ Each feature is described in detail under [Feature details](#feature-details).
 |---|---|---|
 | LVL | All | The level manifest: heightfield, texture grid, palette, texture list, sky, music, lighting and water. A positional list in MTM, CPR and the Terminal Velocity family; labelled fields in 4x4 Evolution |
 | SIT, SI2 | MTM1, MTM2, CPR | Scene script: objects, ramps, ground boxes, starting grid and courses (SI2 is the Community Patch 3 spelling) |
-| SI3 | MTM2 (track format version 6) | The same scene script for a [track format version 6](https://openmtm2.github.io/proposals/track-format-v6) track, listed as its own track even beside a SIT or SI2 of the same name. Its TXV sets the world's size (256 or 512 cells, up to 16,384 ft a side) and the height step and base, so heights may be negative or thousands of feet tall; a TXV or grid file that does not fit is refused with the reason |
+| SI3 | MTM2 (track format version 6) | The same scene script for a [track format version 6](https://openmtm2.github.io/proposals/track-format-v6) track, listed as its own track even beside a SIT or SI2 of the same name. Its TXV sets the world's size (256 or 512 cells, up to 16,384 ft a side) and the height step and base, so heights may be negative or thousands of feet tall; a TXV or grid file that does not fit is refused with the reason. Its TXV, lakes (WTR), vegetation (VEG) and waterfalls (WFL) are found by its level's name first, then its own, so several tracks can share one level (as the Midtown Madness Chicago races do) |
 | SIT v6 / v7 | 4x4 Evolution 1 and 2 | Scene script: placements, starting grid and course centrelines |
 | RAW (heightfield) | All but Fly! | Terrain height per grid point: one byte in MTM and the Terminal Velocity family, 16-bit fixed point in CPR and 4x4 Evolution |
 | CLR | All but Fly! | Terrain texture per cell: a 16-bit word (texture index, mirror and rotation) in MTM1, MTM2, CPR, Hellbender and 4x4 Evolution; one byte (texture index and rotation) in Terminal Velocity and Fury3 |

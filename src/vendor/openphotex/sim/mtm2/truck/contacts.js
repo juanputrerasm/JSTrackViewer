@@ -140,6 +140,12 @@ export function solveHullContacts(s, inertia, ground, external, mass, weight, dt
     };
     const before = sumN();
     const R = used.map((c, i) => recovery(c, N[i], before));
+    // Community Patch 4 caps each recovery at the force that just stops the closing speed (impulseCap, CP4_EXE_ANALYSIS.md 11.7).
+    if (ground.rules?.impulseCap) {
+        const iv = toWorld([s.bvel[0], s.bvel[1], s.bvel[2]]);
+        for (let i = 0; i < k; i++)
+            R[i] = Math.min(R[i], (mass * Math.max(0, -dot(used[i].normal, iv))) / dt);
+    }
     if (k === 1) {
         if (N[0] < R[0])
             N[0] = R[0];

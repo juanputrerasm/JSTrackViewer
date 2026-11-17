@@ -17,11 +17,12 @@ const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
 const unit = (a) => { const l = Math.hypot(a[0], a[1], a[2]); return l === 0 ? [0, 1, 0] : [a[0] / l, a[1] / l, a[2] / l]; };
 /** A car at load (`0x54a000`): a model's bounds replace that part's sizes (length z, width x, height y). */
-export function createTopCrush(src, bodyBounds = null, cabBounds = null) {
+export function createTopCrush(src, bodyBounds = null, cabBounds = null, worldFt = 8192) {
     const sizes = (bounds, size) => bounds ? [bounds.max[2] - bounds.min[2], bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1]] : [size?.[0] ?? 0, size?.[1] ?? 0, size?.[2] ?? 0];
     const [L, W, H] = sizes(bodyBounds, src.sizeFt);
     const [L2, W2, H2] = sizes(cabBounds, src.size2Ft);
-    const wrap = (v) => (v < 0 ? v + 8192 : v);
+    // A negative position at load gets a world added: 8192 ft, W in a track format version 6 world.
+    const wrap = (v) => (v < 0 ? v + worldFt : v);
     const pos = [wrap(src.positionFt[0]), src.positionFt[1], wrap(src.positionFt[2])];
     const pos2 = [wrap(src.position2Ft[0]), pos[1] - H / 2 + H2 / 2, wrap(src.position2Ft[2])];
     const matrix = new Float64Array(9);

@@ -1,19 +1,24 @@
 /*
   Community Patch 4 world layers (src/worker/cp4-world.js): lakes from a .WTR tile map, fog volumes
-  from type 14 boxes, vegetation instance batches from a .VEG, and .SRF material matching. The
-  last test reads Fila's sandbox (~/games/cp4sandbox/fog_test.pod) and skips without it.
+  from type 14 boxes, vegetation instance batches from a .VEG, .SRF material matching and beta
+  0.53's waterfalls from a .WFL. The sandbox tests read Fila's sandboxes (~/games/cp4sandbox/fog_test.pod
+  for 0.52; CP4_SANDBOX_053, default ~/games/cp4sandbox053/fog_test.pod, for 0.53) and skip without them.
 */
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildLakeSheets, collectFogVolumes, vegetationInstances, srfMaterialType, modelSurface, loadCp4World,
-  tileBedSampler, FOG_VOLUME_CAP, VEG_CHUNK_TILES,
+  tileBedSampler, fallHeightsOf, FOG_VOLUME_CAP, VEG_CHUNK_TILES,
 } from "../src/worker/cp4-world.js";
-import { parseWtr, writeWtr, parseSitFog, parseSrf, parseMtm2Veg, writeMtm2Veg } from "../src/vendor/openphotex/index.js";
+import {
+  parseWtr, writeWtr, parseSitFog, parseSrf, parseMtm2Veg, writeMtm2Veg, writeWfl, writePod1, parsePod, readPodEntry,
+  FALL_VERTEX_FLOATS,
+} from "../src/vendor/openphotex/index.js";
 import { parseSitTrack } from "../src/worker/sit-parser.js";
 import { hasStockPod, indexStockPod } from "./helpers/stock-pod.mjs";
 
 const SANDBOX = `${process.env.HOME}/games/cp4sandbox/fog_test.pod`;
+const SANDBOX_053 = process.env.CP4_SANDBOX_053 ?? `${process.env.HOME}/games/cp4sandbox053/fog_test.pod`;
 const LAYOUT = { gridSize: 256, cellSize: 64, heightScale: 3 };
 
 function lake(height, tileCount) {
@@ -47,7 +52,10 @@ test("a lake's tiles become one flat quad each, at its height in steps x heightS
 test("lakes the engine refuses are skipped with its reason", () => {
   const map = new Uint8Array(65536);
   map[10] = 1; map[11] = 2; map[12] = 4;
-  const wtr = parseWtr(writeWtr([lake(0, 1), lake(100, 1), lake(200, 0), lake(300, 1)], map));
+  const wtr = parseWtr(writeWtr([lake(1, 1), lake(100, 1), lake(200, 0), lake(300, 1)], map));
+  // A height of 0 cannot be written to a version 1 file any more (OpenPhotex writeWtr refuses it); the reader still checks it.
+  wtr.lakes[0].height = 0;
+  wtr.lakes[0].heightFt = 0;
   const bed = (tx) => (tx === 12 ? 40 : 100);
   const { lakes, tileMap, warnings } = buildLakeSheets(wtr, { ...LAYOUT, trackWaterFt: 50, bedFt: bed });
   assert.deepEqual(lakes.map((l) => l.id), []);
@@ -194,4 +202,143 @@ test("the CP4 sandbox loads its lakes, fog volumes and vegetation", { skip: !has
   assert.equal(world.vegetation.treeCount, 12394);
   assert.equal(world.vegetation.clumpCount, 131072);
   assert.ok(loaded.includes("AK8PINEA.BIN") && loaded.includes("V208715A8.BIN"));
+});
+
+/*
+  A classic track (8-bit heights) with a 200 ft plateau on rows 100 and up and 20 ft ground below
+  it, .LVL water at 60 ft, and lake 1 at 210 ft over the plateau's tiles x 95..106, z 100..105.
+  Fall 1 pours from the lake over the plateau's edge (crest x 3200..3264 ft at z 3200 ft, flowing
+  toward -z) into the track's water; fall 2 names the same lake at another height.
+*/
+function waterfallTrack(falls) {
+  const raw = new Uint8Array(65536);
+  for (let z = 0; z < 256; z++) raw.fill(z >= 100 ? 100 : 10, z * 256, z * 256 + 256);
+  const map = new Uint8Array(65536);
+  for (let z = 100; z <= 105; z++) for (let x = 95; x <= 106; x++) map[x + z * 256] = 1;
+  const wtr = writeWtr([{ flags: 1, height: 420, seeds: [{ x: 100, z: 102 }], box: { minX: 95, minZ: 100, maxX: 106, maxZ: 105 }, tileCount: 72 }], map);
+  const podBytes = writePod1("", [
+    { name: "WORLD\\TEST.WTR", data: wtr },
+    { name: "WORLD\\TEST.WFL", data: writeWfl(falls) },
+  ]);
+  const podIndex = parsePod(podBytes);
+  const doc = {
+    terrain: { rawData: raw, gridSize: 256, rawBytesPerCell: 1 },
+    waterHeightFt: 60, waterLevel: 15, models: {}, boxes: [], warnings: [],
+  };
+  return { podIndex, getBytes: (e) => readPodEntry(podBytes, e), doc };
+}
+
+const crest = [{ x: 3200 * 16, z: 3200 * 16 }, { x: 3264 * 16, z: 3200 * 16 }];
+const fallRecord = (extra = {}) => ({
+  source: 1, flags: 2, speed: 8 * 16, height: 420, points: crest, opacity: 80, mist: 100, volume: 100, ...extra,
+});
+
+test("a classic track's heights go to the waterfalls' walk as v << 8", () => {
+  const raw = new Uint8Array(65536);
+  raw[5] = 100;
+  const h = fallHeightsOf({ rawData: raw, gridSize: 256 });
+  assert.equal(h.mode, "classic8");
+  assert.equal(h.coarse[5], 100 << 8);
+  assert.equal(fallHeightsOf({ rawData: raw, gridSize: 128 }), null, "only a 256 x 256 grid");
+});
+
+test("a .WFL's falls are built over the terrain into the water, with their mist, in scene units", () => {
+  const { podIndex, getBytes, doc } = waterfallTrack([fallRecord(), fallRecord({ height: 400 })]);
+  const world = loadCp4World(podIndex, getBytes, doc, "TEST", () => null, { cellSize: 64, heightScale: 3 });
+  assert.equal(world.lakes.length, 1);
+  assert.deepEqual(doc.warnings, ["Waterfalls: fall 2 refused (FALL_HEIGHT)"]);
+  const wf = world.waterfalls;
+  assert.equal(wf.falls.length, 1);
+  const fall = wf.falls[0];
+  assert.equal(fall.id, 1);
+  assert.equal(fall.source, 1);
+  assert.equal(fall.splash, true);
+  assert.equal(fall.opacity, 0.8);
+  assert.equal(fall.crestSpeedFtPerSec, 8);
+  assert.equal(fall.textureName, null, "no stem: the default ripple");
+  assert.ok(fall.ends.water > 0, "the water columns reach the track's water");
+  assert.equal(fall.landing.y, 60);
+  assert.ok(fall.foamVertexCount > 0);
+  assert.equal(wf.vertices.length / FALL_VERTEX_FLOATS, fall.vertexCount);
+  assert.equal(wf.positions.length, fall.vertexCount * 3);
+  assert.equal(wf.indices.length, fall.indexCount);
+  for (const i of wf.indices) assert.ok(i < fall.vertexCount);
+  // Vertex 0 is the crest's point 0 at the crest height: x 3200 ft x 2, 210 ft = 105 steps x 3, z flipped.
+  assert.deepEqual([...wf.positions.subarray(0, 3)], [6400, 315, 16384 - 6400]);
+  // Every vertex: the anchor plus its 1/256 ft offset.
+  const v = wf.vertices, p = wf.positions, last = fall.vertexCount - 1;
+  assert.ok(Math.abs(p[3 * last] - (3200 + v[last * 16] / 256) * 2) < 1e-3);
+  assert.ok(Math.abs(p[3 * last + 1] - (210 + v[last * 16 + 1] / 256) * 1.5) < 1e-3);
+  assert.ok(Math.abs(p[3 * last + 2] - (16384 - (3200 + v[last * 16 + 2] / 256) * 2)) < 1e-3);
+  assert.ok(p[3 * last + 2] > 16384 - 6400, "flowing toward -z in the level is +z in the scene");
+  // One mist box, its floor 2 ft below the landing, in the fog volumes' units.
+  assert.equal(wf.mists.length, 1);
+  const mist = wf.mists[0];
+  assert.equal(mist.slot, 0);
+  assert.equal(mist.floorFt, 58);
+  assert.ok(Math.abs(mist.centre[1] - (58 + mist.heightFt / 2) * 1.5) < 1e-9);
+  assert.deepEqual(mist.size, [mist.widthFt * 2, mist.heightFt * 1.5, mist.lengthFt * 2]);
+  assert.equal(mist.fog.wmask, 0x1ff);
+  assert.equal(fall.mist, true);
+});
+
+test("waterfalls without terrain, or with a broken .WFL, are a warning and nothing drawn", () => {
+  const { podIndex, getBytes, doc } = waterfallTrack([fallRecord()]);
+  doc.terrain = { rawData: null, gridSize: 256 };
+  const world = loadCp4World(podIndex, getBytes, doc, "TEST", () => null, { cellSize: 64, heightScale: 3 });
+  assert.equal(world.waterfalls, null);
+  assert.ok(doc.warnings.includes("Waterfalls: the track has no 256 x 256 terrain to pour them over"));
+
+  const broken = waterfallTrack([fallRecord()]);
+  const entry = broken.podIndex.entries.find((e) => /\.WFL$/i.test(e.name));
+  const bytes = broken.getBytes(entry).slice();
+  // Version 2 with a 256 x 256 header: version 2 is a 512-cell world's only.
+  bytes[4] = 2;
+  const world2 = loadCp4World(broken.podIndex, (e) => (e === entry ? bytes : broken.getBytes(e)), broken.doc, "TEST", () => null, { cellSize: 64, heightScale: 3 });
+  assert.equal(world2.waterfalls, null);
+  assert.ok(broken.doc.warnings.includes("Waterfalls: WFL: authored for another terrain size"));
+});
+
+/*
+  The world's size picks the .WTR and .WFL version (track format version 6, sections 9.1 and
+  9.3): a 256-cell track, whether .SIT, .SI2 or a 256-cell .SI3, reads version 1 only, so the
+  512 x 512 version 2 files are a warning each and nothing of them is drawn.
+*/
+for (const [label, v6] of [
+  ["a classic track", null],
+  ["a 256-cell .SI3 track", { worldCells: 256, worldFt: 8192, terrainHeightMap: null, heightStep: 128, heightBase: 0 }],
+]) {
+  test(`${label} refuses a version 2 .WTR and .WFL`, () => {
+    const { doc } = waterfallTrack([fallRecord()]);
+    doc.v6 = v6;
+    const map = new Uint8Array(512 * 512);
+    map[0] = 1;
+    const podBytes = writePod1("", [
+      { name: "WORLD\\TEST.WTR", data: writeWtr([{ flags: 1, height: 420, seeds: [{ x: 0, z: 0 }], box: { minX: 0, minZ: 0, maxX: 0, maxZ: 0 }, tileCount: 1 }], map) },
+      { name: "WORLD\\TEST.WFL", data: writeWfl([fallRecord()], { cells: 512 }) },
+    ]);
+    const podIndex = parsePod(podBytes);
+    const world = loadCp4World(podIndex, (e) => readPodEntry(podBytes, e), doc, "TEST", () => null, { cellSize: 64, heightScale: 3 });
+    assert.deepEqual(world.lakes, []);
+    assert.equal(world.waterfalls, null);
+    assert.equal(doc.warnings.length, 2);
+    assert.ok(doc.warnings[0].startsWith("Lakes: WTR:"), doc.warnings[0]);
+    assert.equal(doc.warnings[1], "Waterfalls: WFL: authored for another terrain size");
+  });
+}
+
+test("the CP4 0.53 sandbox builds its two waterfalls", { skip: !hasStockPod(SANDBOX_053) }, () => {
+  const pod = indexStockPod(SANDBOX_053);
+  const sit = pod.podIndex.entries.find((e) => /FOGTEST\.SI2$/i.test(e.name));
+  const doc = parseSitTrack(pod.podIndex, pod.getBytes, sit, "");
+  const world = loadCp4World(pod.podIndex, pod.getBytes, doc, "FOGTEST",
+    (name) => ({ name, meshes: [{ textureName: "X" }] }), { cellSize: 64, heightScale: 3 });
+  assert.deepEqual(doc.warnings.filter((w) => w.startsWith("Waterfalls")), []);
+  const wf = world.waterfalls;
+  assert.deepEqual(wf.falls.map((f) => [f.id, f.vertexCount, f.mist]), [[1, 2195, true], [2, 3840, true]]);
+  assert.equal(wf.positions.length / 3, 2195 + 3840);
+  assert.deepEqual(wf.mists.map((m) => m.slot), [0, 1]); // hotfix 3: a dry fall has mist too
+  assert.equal(wf.falls[0].crestLengthFt > 0, true);
+  // Fall 1 pours from lake 2 into lake 1, whose sheet the viewer draws at 258.5 ft.
+  assert.equal(wf.falls[0].landing.y, 258.5);
 });

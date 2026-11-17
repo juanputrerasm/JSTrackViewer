@@ -3,12 +3,14 @@
 
   Browsers decode PNG art for display, but they flatten a 16-bit grey image to 8 bits, and
   Community Patch 4 stores track heights as 16-bit grey PNGs (DATA\<stem>_H.PNG). This reader
-  keeps every sample exact. It covers what such files use: 8- and 16-bit samples, any of the
-  non-palette colour types, the five scanline filters, no interlace. Ancillary chunks are skipped.
+  keeps every sample exact. It covers 8- and 16-bit samples of every colour type, palette
+  images at 1, 2, 4 or 8 bits (the samples are the palette indices, with the PLTE colours and
+  the tRNS alphas beside them), the five scanline filters, no interlace. tRNS is kept as stored;
+  the other ancillary chunks are skipped.
 */
 import { inflateZlib } from "./inflate.js";
 const SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
-const CHANNELS = { 0: 1, 2: 3, 4: 2, 6: 4 };
+const CHANNELS = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
 export function isPng(bytes) {
     return bytes.length >= 8 && SIGNATURE.every((b, i) => bytes[i] === b);
 }
@@ -20,12 +22,14 @@ function paeth(a, b, c) {
     const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
     return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
-/** Decode a PNG's samples. Throws RangeError on palette, sub-byte depths, interlace or damage. */
+/** Decode a PNG's samples. Throws RangeError on sub-byte grey, interlace or damage. */
 export function decodePngSamples(bytes) {
     if (!isPng(bytes))
         throw new RangeError("png: bad signature");
     let o = 8;
     let width = 0, height = 0, bitDepth = 0, colorType = -1;
+    let plte = null;
+    let trns = null;
     const idat = [];
     let idatLen = 0;
     while (o + 8 <= bytes.length) {
@@ -44,6 +48,14 @@ export function decodePngSamples(bytes) {
             if (bytes[data + 12] !== 0)
                 throw new RangeError("png: interlaced images are not supported");
         }
+        else if (type === "PLTE") {
+            if (len % 3 !== 0 || len === 0 || len > 768)
+                throw new RangeError("png: bad PLTE");
+            plte = bytes.slice(data, data + len);
+        }
+        else if (type === "tRNS") {
+            trns = bytes.slice(data, data + len);
+        }
         else if (type === "IDAT") {
             idat.push(bytes.subarray(data, data + len));
             idatLen += len;
@@ -55,21 +67,33 @@ export function decodePngSamples(bytes) {
     }
     if (!width || !height)
         throw new RangeError("png: no IHDR");
-    if (colorType === 3)
-        throw new RangeError("png: palette images are not supported");
     const channels = CHANNELS[colorType];
     if (!channels)
         throw new RangeError(`png: unknown colour type ${colorType}`);
-    if (bitDepth !== 8 && bitDepth !== 16)
+    const indexed = colorType === 3;
+    if (indexed) {
+        if (bitDepth !== 1 && bitDepth !== 2 && bitDepth !== 4 && bitDepth !== 8)
+            throw new RangeError(`png: bit depth ${bitDepth} is not valid for a palette image`);
+        if (!plte)
+            throw new RangeError("png: palette image without PLTE");
+    }
+    else if (colorType === 0) {
+        if (bitDepth !== 1 && bitDepth !== 2 && bitDepth !== 4 && bitDepth !== 8 && bitDepth !== 16)
+            throw new RangeError(`png: bit depth ${bitDepth} is not valid for a grey image`);
+    }
+    else if (bitDepth !== 8 && bitDepth !== 16)
         throw new RangeError(`png: bit depth ${bitDepth} is not supported`);
+    // Palette and grey images may pack 1, 2 or 4 bits a sample (unscaled: 0 .. 2^bits - 1).
     const z = new Uint8Array(idatLen);
     let p = 0;
     for (const c of idat) {
         z.set(c, p);
         p += c.length;
     }
-    const bpp = channels * (bitDepth / 8);
-    const stride = width * bpp;
+    // The filters work on whole bytes: a sub-byte row is ceil(width * bits / 8) bytes, one byte per "pixel".
+    const packed = bitDepth < 8;
+    const bpp = packed ? 1 : channels * (bitDepth / 8);
+    const stride = packed ? Math.ceil((width * bitDepth) / 8) : width * bpp;
     const raw = inflateZlib(z, (stride + 1) * height);
     if (raw.length < (stride + 1) * height)
         throw new RangeError("png: image data too short");
@@ -109,10 +133,30 @@ export function decodePngSamples(bytes) {
         if (bitDepth === 8)
             for (let i = 0; i < stride; i++)
                 samples[s++] = cur[i];
-        else
+        else if (bitDepth === 16)
             for (let i = 0; i < stride; i += 2)
                 samples[s++] = (cur[i] << 8) | cur[i + 1];
+        else {
+            // Packed indices or grey levels, most significant bits first; the row's spare low bits are padding.
+            const mask = (1 << bitDepth) - 1;
+            for (let x = 0; x < width; x++) {
+                const bit = x * bitDepth;
+                samples[s++] = (cur[bit >> 3] >> (8 - bitDepth - (bit & 7))) & mask;
+            }
+        }
         prev.set(cur);
     }
-    return { width, height, bitDepth, colorType: colorType, channels, samples };
+    let paletteAlpha = null, transparentKey = null;
+    if (trns) {
+        if (indexed)
+            paletteAlpha = trns.slice(0, Math.min(trns.length, plte.length / 3));
+        else if (colorType === 0 && trns.length >= 2)
+            transparentKey = [(trns[0] << 8) | trns[1]];
+        else if (colorType === 2 && trns.length >= 6)
+            transparentKey = [0, 2, 4].map((k) => (trns[k] << 8) | trns[k + 1]);
+    }
+    return {
+        width, height, bitDepth: bitDepth, colorType: colorType, channels, samples,
+        palette: indexed ? plte : null, paletteAlpha, transparentKey,
+    };
 }

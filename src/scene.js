@@ -181,6 +181,108 @@ const UP_AXIS = new THREE.Vector3(0, 1, 0);
 */
 const FOG_WEATHER_BIT = { clear: 0, cloudy: 1, dusk: 6, night: 7 };
 const FOG_WEATHER_LIGHT = { clear: 1, cloudy: 0.7, dusk: 0.375, night: 0.25 };
+
+/*
+  The waterfalls' look 0, Original (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 12.0.1), at its [Graphics]
+  defaults: wfEdge 100, wfLift 40 (hundredths of a foot), wfDepthPull 4 (per mille). Positions come
+  in scene units; the engine's anchor-relative position, flow, mask and normal come as its vertex
+  floats (aLocal in 1/256 ft, aFlow u tau speed air, aMask edge end kind fall, aNormalFt).
+*/
+const WATERFALL_VERTEX_SHADER = /* glsl */ `
+  #include <common>
+  #include <fog_pars_vertex>
+  uniform float uUnitsPerFt;
+  uniform float uYUnitsPerFt;
+  attribute vec3 aLocal;
+  attribute vec4 aFlow;
+  attribute vec4 aMask;
+  attribute vec3 aNormalFt;
+  varying vec4 vFlow;
+  varying vec4 vMask;
+  varying vec2 vLocalFt;
+  void main() {
+    vec4 world = modelMatrix * vec4(position, 1.0);
+    vec3 toEye = cameraPosition - world.xyz;
+    // Draped sheet water (air 0, kind 0) only: lifted along its normal, pulled toward the eye.
+    float draped = (1.0 - aFlow.w) * (1.0 - step(0.5, aMask.z));
+    float eyeFt = length(toEye) / uUnitsPerFt;
+    float liftFt = draped * (40.0 / 100.0 + 0.0005 * eyeFt);
+    world.xyz += vec3(aNormalFt.x * uUnitsPerFt, aNormalFt.y * uYUnitsPerFt, -aNormalFt.z * uUnitsPerFt) * liftFt;
+    world.xyz += toEye * draped * (4.0 / 1000.0);
+    vFlow = aFlow;
+    vMask = aMask;
+    vLocalFt = aLocal.xz / 256.0;
+    vec4 mvPosition = viewMatrix * world;
+    gl_Position = projectionMatrix * mvPosition;
+    #include <fog_vertex>
+  }
+`;
+
+const WATERFALL_FRAGMENT_SHADER = /* glsl */ `
+  #include <common>
+  #include <fog_pars_fragment>
+  uniform sampler2D uMap;
+  uniform float uHasMap;
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  uniform float uCrestSpeed;
+  uniform float uSplash;
+  uniform float uTime;
+  uniform float uLight;
+  varying vec4 vFlow;
+  varying vec4 vMask;
+  varying vec2 vLocalFt;
+
+  // The DLL's lattice hash and value noise with a smoothstep blend.
+  float wfHash(ivec2 c) {
+    uint h = uint(c.x) * 0x8da6b343u ^ uint(c.y) * 0xd8163841u;
+    h ^= h >> 13u;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15u;
+    return float(h & 0xffffffu) / 16777215.0;
+  }
+  float wfNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 s = f * f * (3.0 - 2.0 * f);
+    ivec2 c = ivec2(i);
+    float a = wfHash(c), b = wfHash(c + ivec2(1, 0)), d = wfHash(c + ivec2(0, 1)), e = wfHash(c + ivec2(1, 1));
+    return mix(mix(a, b, s.x), mix(d, e, s.x), s.y);
+  }
+  vec3 wfSample(vec2 uv) {
+    return uHasMap > 0.5 ? texture2D(uMap, uv).rgb : uColor;
+  }
+
+  void main() {
+    float u = vFlow.x;
+    float tau = vFlow.y;
+    float edge = vMask.x;
+    float end = vMask.y;
+    float flow = (tau - uTime) * uCrestSpeed;
+    vec3 color;
+    float alpha;
+    if (vMask.z < 0.5) {
+      vec3 c1 = wfSample(vec2(u / 16.0, flow / 16.0));
+      vec3 c2 = wfSample(vec2(u / 21.92 + 0.31, (tau * uCrestSpeed - uTime * uCrestSpeed * 0.85) / 21.92 + 0.17));
+      color = mix(c1, c2, 0.3);
+      float q = flow;
+      float ns = 0.65 * wfNoise(vec2(u / 0.8, q / 4.0)) + 0.35 * wfNoise(vec2(u / 0.35 + 3.1, q / 1.7));
+      float nf = 0.6 * wfNoise(vec2(u / 1.3 + 7.3, q / 3.0)) + 0.4 * wfNoise(vec2(u / 0.5 + 1.7, q / 1.4));
+      float k = 1.0;
+      float mask = smoothstep(0.0, 0.25, sqrt(max(edge, 0.0)) * 1.1 + 0.08 - k * (0.15 + 0.75 * ns))
+        * smoothstep(0.0, 0.3, end + 0.15 - 0.65 * nf);
+      alpha = uOpacity * mask;
+    } else {
+      if (uSplash < 0.5) discard;
+      color = clamp(wfSample(vLocalFt / 16.0 + vec2(0.0, uTime * 0.03)) * 1.6 + 0.12, 0.0, 1.0);
+      alpha = uOpacity * clamp(end * 1.5, 0.0, 1.0);
+    }
+    if (alpha <= 0.002) discard;
+    gl_FragColor = vec4(color * uLight, alpha);
+    #include <colorspace_fragment>
+    #include <fog_fragment>
+  }
+`;
 const SUN_COLOR = 0xfff4e0;
 /*
   The fly camera's vertical field of view: MTM2's.
@@ -452,7 +554,7 @@ export class TrackScene {
       wireframe: false, trucks: true, billboards: true, checkpoints: false,
       navpoints: true, cpmarkers: true, tunnels: true, quakes: true, powerups: true, animate: true,
       racetrack: true, underground: true, lensflare: true, sky: true, fog: true,
-      movingObjects: true, vegetation: true, fogVolumes: true,
+      movingObjects: true, vegetation: true, fogVolumes: true, waterfalls: true,
     };
     this._heightScale = 4;
     this._textureSmoothingEnabled = true;
@@ -468,6 +570,8 @@ export class TrackScene {
       roadMaskEnabled: { value: 0 },
       // Scales the lit result of LTE terrain back to its baked brightness; see _applyLighting.
       lteGain: { value: 1 },
+      // 1 while the Grid layer shows: the terrain yields its depth ties to the grid; see _installTerrainShader.
+      terrainGridBias: { value: 0 },
     };
     this._backdropUniforms = {
       backdropTint: { value: new THREE.Color(0xffffff) },
@@ -556,6 +660,8 @@ export class TrackScene {
       cp4Vegetation: new THREE.Group(),
       // Community Patch 4 fog volumes (SIT box type 14); see _buildFogVolumes.
       fogVolumes: new THREE.Group(),
+      // Community Patch 4 beta 0.53 waterfalls (WORLD\<stem>.WFL) and their mist; see _buildWaterfalls.
+      waterfalls: new THREE.Group(),
       backdrop:   new THREE.Group(),
       // A track's own sky texture on a dome (Evo). Sky, not backdrop: the Backdrop toggle leaves it.
       skyBox:     new THREE.Group(),
@@ -919,6 +1025,7 @@ export class TrackScene {
       this._updateVegetationLod();
       this._truckLights?.update(this._camera, time);
       this._updateTextureAnimations(dt);
+      this._updateWaterfalls(dt);
       this._updateKeyframes(dt);
       this._updateFlyDetail(dt);
       this._updateFlyNearPlane();
@@ -1320,6 +1427,7 @@ export class TrackScene {
       water:      has("water"),
       vegetation: has("vegetation", "cp4Vegetation"),
       fogVolumes: has("fogVolumes"),
+      waterfalls: has("waterfalls"),
       backdrop:   has("backdrop"),
       sky:        !!this._trackData?.tvSky,
       // MTM1's Classic sky brings the TV fog with it.
@@ -1341,6 +1449,7 @@ export class TrackScene {
     // With the road hidden, the ground it covers is shown again.
     this._roadMaskUniforms.roadMaskEnabled.value = this._roadMaskTarget && f.racetrack !== false ? 1 : 0;
     this._groups.terrainGrid.visible = f.grid;
+    this._roadMaskUniforms.terrainGridBias.value = f.grid ? 1 : 0;
     this._groups.objects.visible = f.objects;
     this._groups.objectsWire.visible = f.objects && (f.wireframe === true);
     this._groups.billboards.visible = f.objects;
@@ -1348,6 +1457,7 @@ export class TrackScene {
     this._groups.vegetationWire.visible = f.objects && f.vegetation !== false && (f.wireframe === true);
     this._groups.cp4Vegetation.visible = f.objects && f.vegetation !== false;
     this._groups.fogVolumes.visible = f.fogVolumes !== false;
+    this._groups.waterfalls.visible = f.waterfalls !== false;
     this._groups.billboardsWire.visible = f.objects && (f.wireframe === true);
     this._groups.checkpoints.visible = f.objects && f.checkpoints !== false;
     this._groups.checkpointsWire.visible = f.objects && f.checkpoints !== false && (f.wireframe === true);
@@ -1523,6 +1633,11 @@ export class TrackScene {
     this._labelTextures = [];
     this._textureAnimations = [];
     this._animationClock = 0;
+    // The loop above frees the waterfalls' materials, never the textures they sample.
+    for (const texture of this._waterfallTextures ?? []) texture.texture.dispose();
+    this._waterfallTextures = [];
+    this._waterfallMaterials = [];
+    this._waterfallClock = 0;
     this._keyframeAnimations = [];
     this._keyframeClock = 0;
     this._crushCabs = new Map();
@@ -1582,6 +1697,7 @@ export class TrackScene {
     if (trackData.trucks?.length) this._buildTrucks(trackData);
     if (trackData.vegetation?.trees?.length) this._buildVegetation(trackData);
     if (trackData.lakes?.sheets?.length) this._buildLakes(trackData);
+    if (trackData.waterfalls?.falls?.length) this._buildWaterfalls(trackData);
     if (trackData.cp4Vegetation?.batches?.length) this._buildCp4Vegetation(trackData);
     if (trackData.fogVolumes?.length) this._buildFogVolumes(trackData);
     if (trackData.navPoints?.length) this._buildNavPoints(trackData);
@@ -1819,14 +1935,23 @@ export class TrackScene {
 
     // Grid overlay: quad edges only (no triangle diagonals)
     const posArr = geo.attributes.position.array;
-    const lineVerts = [];
-    const pushV = (vi) => { const i = vi * 3; lineVerts.push(posArr[i], posArr[i + 1], posArr[i + 2]); };
     /*
       A Community Patch 4 Spline or Full Map mesh has (s + 1)^2 vertices a 32 ft cell (see
       buildFineCells in terrain-builder.js). The grid stays on the 32 ft cells, drawn through
       the 8 ft points between their corners so the lines follow the finer relief.
+
+      Two edges a cell plus the east and far borders, 2 * sub segments of 2 points each: on a
+      512-cell Spline world that is over 4 million points, so they go straight into a typed
+      array rather than through a growing JS array. Whether a line shows close to the camera is
+      the terrain shader's business (_installTerrainShader).
     */
     const sub = terrainData.subdivisions ?? 1;
+    const lineVerts = new Float32Array((2 * gridSize * gridSize + 2 * gridSize) * sub * 2 * 3);
+    let lineAt = 0;
+    const pushV = (vi) => {
+      const i = vi * 3;
+      lineVerts[lineAt++] = posArr[i]; lineVerts[lineAt++] = posArr[i + 1]; lineVerts[lineAt++] = posArr[i + 2];
+    };
     if (sub > 1) {
       const row = sub + 1;
       const edge = (vb, i0, j0, di, dj) => {
@@ -1856,7 +1981,7 @@ export class TrackScene {
       }
     }
     const gridLinGeo = new THREE.BufferGeometry();
-    gridLinGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(lineVerts), 3));
+    gridLinGeo.setAttribute("position", new THREE.BufferAttribute(lineAt === lineVerts.length ? lineVerts : lineVerts.slice(0, lineAt), 3));
     const gridMat = new THREE.LineBasicMaterial({ color: 0x8888cc, opacity: 0.65, transparent: true });
     this._groups.terrainGrid.add(new THREE.LineSegments(gridLinGeo, gridMat));
   }
@@ -3350,6 +3475,23 @@ export class TrackScene {
     slope term) and its result is scaled by lteGain, which maps an unshadowed clear-day
     ground to exactly its LTE brightness.
   */
+  /*
+    The terrain materials' shader additions: the CPR road mask, the LTE light, and the Grid
+    layer's depth bias.
+
+    The grid (_buildTerrain) is drawn through the terrain mesh's own vertices, so every line lies
+    exactly on the triangles beside it and is seen only where it wins a depth tie (LessEqual). A
+    line fragment takes its depth on the line, a terrain fragment at its pixel's centre, up to
+    about half a pixel to one side: the two differ by up to half the terrain's depth step across
+    a pixel. Far off, that step is below the depth buffer's resolution, the two round to the same
+    value and the line shows; close to the camera the step is many depth units, and the line
+    loses to the terrain on every pixel whose centre lies on the nearer side of it, which on
+    ground seen at a glancing angle is most or all of it. While the grid is shown the terrain
+    therefore writes its depth one pixel's step (fwidth) further back, plus a few units of a
+    24-bit buffer: the same slope-scaled offset as glPolygonOffset(1, 1), done here because this
+    shader writes gl_FragDepth itself. The grid then shows at every distance, and nothing else
+    changes while it is hidden.
+  */
   _installTerrainShader(material, baked) {
     const uniforms = this._roadMaskUniforms;
     if (baked) material.defines = { ...(material.defines ?? {}), USE_LTE: "" };
@@ -3373,6 +3515,7 @@ export class TrackScene {
           uniform sampler2D roadMask;
           uniform vec4 roadMaskBounds;
           uniform float roadMaskEnabled;
+          uniform float terrainGridBias;
           #ifdef USE_LTE
             varying float vLteLight;
             uniform float lteGain;
@@ -3390,7 +3533,8 @@ export class TrackScene {
             reflectedLight.indirectDiffuse *= lteLinear;
           #endif`)
         .replace("#include <clipping_planes_fragment>", `#include <clipping_planes_fragment>
-          gl_FragDepth = gl_FragCoord.z;
+          // With the Grid layer on, one pixel's depth step further back (see the note above).
+          gl_FragDepth = gl_FragCoord.z + terrainGridBias * (fwidth(gl_FragCoord.z) + 2.0e-7);
           if (roadMaskEnabled > 0.5) {
             vec2 roadUv = (vRoadMaskXZ - roadMaskBounds.xy) / roadMaskBounds.zw;
             if (all(greaterThanEqual(roadUv, vec2(0.0))) && all(lessThanEqual(roadUv, vec2(1.0)))
@@ -4070,11 +4214,118 @@ export class TrackScene {
     this._applyFogVolumeWeather();
   }
 
+  /*
+    Community Patch 4 beta 0.53 waterfalls (WORLD\<stem>.WFL; worker/cp4-world.js buildWaterfalls,
+    OpenPhotex buildFallMeshes). The engine builds every fall into one track buffer; so does this,
+    as one BufferGeometry with a draw group per fall (its own texture, opacity and crest speed).
+
+    Drawn in the engine's look 0, Original (OpenMTM2 docs/CP4_EXE_ANALYSIS.md 12.0.1): the texture
+    at (u / 16, flow / 16), flow = (tau - time) * crest speed, with a second layer at 1 / 21.92 scale
+    and 0.85 of the speed mixed in at 30%; alpha = opacity x the ragged mask (value noise over u and
+    flow eating the outer columns and the end); the foam strip (kind 1, only with SPLASH) at the
+    anchor-relative position / 16 drifting at 0.03 a second, brightened, alpha opacity x end x 1.5.
+    Draped water is lifted along its normal and pulled toward the eye as the vertex shader does.
+    Time is the scene's, wrapping at 600 s, and stops with the Animations toggle. The colour is
+    multiplied by the weather's light factor (as the fog volumes are) rather than by the scene's
+    lights. Looks 1 to 3 (CP4's own water modes and ice), the droplets and the landing rings are not
+    drawn.
+
+    The mist (12.4) is a fog volume, drawn as _buildFogVolumes draws one, in the same group.
+  */
+  _buildWaterfalls(trackData) {
+    const wf = trackData.waterfalls;
+    const unitsPerFt = (trackData.terrain?.cellSize ?? 64) / 32;
+    const yUnitsPerFt = (trackData.terrain?.heightScale ?? this._heightScale) / 2;
+    const vertices = new Float32Array(wf.vertices);
+    const positions = new Float32Array(wf.positions);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    // The engine's 16 floats (OpenPhotex FALL_VERTEX): local pos, then u tau speed air, edge end kind fall, drop, normal, path.
+    const interleaved = new THREE.InterleavedBuffer(vertices, 16);
+    geo.setAttribute("aLocal", new THREE.InterleavedBufferAttribute(interleaved, 3, 0));
+    geo.setAttribute("aFlow", new THREE.InterleavedBufferAttribute(interleaved, 4, 3));
+    geo.setAttribute("aMask", new THREE.InterleavedBufferAttribute(interleaved, 4, 7));
+    geo.setAttribute("aNormalFt", new THREE.InterleavedBufferAttribute(interleaved, 3, 12));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(wf.indices), 1));
+    geo.computeBoundingSphere();
+
+    this._waterfallTextures = (wf.textures ?? []).map((t) => {
+      const frames = t.frames.map((buffer) => new Uint8ClampedArray(buffer));
+      const texture = new THREE.DataTexture(new Uint8ClampedArray(frames[0]), t.width, t.height, THREE.RGBAFormat);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      texture.magFilter = texture.minFilter = THREE.LinearFilter;
+      texture.generateMipmaps = false;
+      texture.needsUpdate = true;
+      return { texture, frames, sequence: t.sequence, frameSec: t.frameSec, current: 0 };
+    });
+
+    const light = FOG_WEATHER_LIGHT[this.weatherApplies() ? this._weather : "clear"] ?? 1;
+    this._waterfallMaterials = wf.falls.map((fall) => {
+      const map = this._waterfallTextures[fall.textureIndex ?? -1]?.texture ?? null;
+      const uniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+        uMap: { value: null }, uHasMap: { value: map ? 1 : 0 }, uColor: { value: new THREE.Color(WATER_COLOR) },
+        uOpacity: { value: fall.opacity }, uCrestSpeed: { value: fall.crestSpeedFtPerSec },
+        uSplash: { value: fall.splash ? 1 : 0 }, uTime: { value: 0 }, uLight: { value: light },
+        uUnitsPerFt: { value: unitsPerFt }, uYUnitsPerFt: { value: yUnitsPerFt },
+      }]);
+      uniforms.uMap.value = map;
+      return new THREE.ShaderMaterial({
+        uniforms, vertexShader: WATERFALL_VERTEX_SHADER, fragmentShader: WATERFALL_FRAGMENT_SHADER,
+        transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
+      });
+    });
+    wf.falls.forEach((fall, i) => geo.addGroup(fall.firstIndex, fall.indexCount, i));
+    const mesh = new THREE.Mesh(geo, this._waterfallMaterials);
+    // After the lakes, before the fog volumes and the mist, as the engine orders them (12.9).
+    mesh.renderOrder = 1;
+    mesh.userData.waterfalls = wf.falls;
+    this._groups.waterfalls.add(mesh);
+    this._waterfallClock = 0;
+
+    for (const mist of wf.mists ?? []) {
+      const fog = mist.fog;
+      const side = Math.min(mist.widthFt, mist.lengthFt, mist.heightFt);
+      const opacity = Math.max(0.08, Math.min(fog.maxOp ?? 1, 1 - Math.exp(-3 * side / Math.max(1, fog.vis))));
+      const color = new THREE.Color(fog.color[0], fog.color[1], fog.color[2]);
+      const boxGeo = new THREE.BoxGeometry(mist.size[0], mist.size[1], mist.size[2]);
+      const box = new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
+      }));
+      box.renderOrder = 2;
+      box.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 })));
+      box.position.set(mist.centre[0], mist.centre[1], mist.centre[2]);
+      box.rotation.y = mist.yaw;
+      box.userData.fogVolume = mist;
+      box.userData.waterfallMist = mist;
+      box.userData.baseColor = color.clone();
+      this._groups.waterfalls.add(box);
+    }
+    this._applyFogVolumeWeather();
+  }
+
+  /* The waterfalls' clock and ripple frames; see _buildWaterfalls. */
+  _updateWaterfalls(dt) {
+    if (!this._waterfallMaterials?.length || this._renderFlags.animate === false) return;
+    this._waterfallClock = ((this._waterfallClock ?? 0) + dt) % 600;
+    for (const material of this._waterfallMaterials) material.uniforms.uTime.value = this._waterfallClock;
+    for (const t of this._waterfallTextures) {
+      if (t.sequence.length < 2 || !(t.frameSec > 0)) continue;
+      const frame = t.sequence[Math.floor(this._waterfallClock / t.frameSec) % t.sequence.length];
+      if (frame === t.current) continue;
+      t.current = frame;
+      t.texture.image.data.set(t.frames[frame]);
+      t.texture.needsUpdate = true;
+    }
+  }
+
   _applyFogVolumeWeather() {
     const weather = this.weatherApplies() ? this._weather : "clear";
     const bit = FOG_WEATHER_BIT[weather] ?? 0;
     const light = FOG_WEATHER_LIGHT[weather] ?? 1;
-    for (const mesh of this._groups?.fogVolumes?.children ?? []) {
+    for (const material of this._waterfallMaterials ?? []) material.uniforms.uLight.value = light;
+    for (const mesh of [...(this._groups?.fogVolumes?.children ?? []), ...(this._groups?.waterfalls?.children ?? [])]) {
       const volume = mesh.userData.fogVolume;
       if (!volume) continue;
       mesh.visible = ((volume.fog.wmask >> bit) & 1) === 1;
@@ -4481,7 +4732,8 @@ export class TrackScene {
     for (const gb of groundBoxes) {
       const upper = gb.upper ?? 0;
       const lower = gb.lower ?? 0;
-      if (upper < 1) continue;
+      // A version 6 box (gbox-loader.js) is in the list only when present, and may stand below 0.
+      if (upper < 1 && gb.v6 !== true) continue;
       const midX    = gb.midX ?? (gb.x * CELL + CELL / 2);
       const midYW   = gb.midY ?? (gb.y * CELL + CELL / 2);
       const midZ    = ws - midYW;

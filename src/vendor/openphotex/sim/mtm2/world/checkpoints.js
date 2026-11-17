@@ -72,3 +72,31 @@ export function pointInCheckpointBox(b, p) {
     const lz = m[2] * dx + m[5] * dy + m[8] * dz;
     return Math.abs(lx) <= b.size[0] / 2 && Math.abs(ly) <= b.size[1] / 2 && Math.abs(lz) <= b.size[2] / 2;
 }
+/*
+  Boxes in a checkpoint's footprint (MTM2_PHYSICS.md §14.15; retail 0x552a93..0x552b5e, CP4
+  0x1403ba223..0x1403ba2dc, the same rule). Once the level's boxes and checkpoints are loaded, every
+  box of type 0 whose centre lies in some checkpoint gate's footprint becomes type 11. The offset
+  box - gate is turned into the gate's frame (Mᵀ · d, retail 0x4692f0 through the thunk 0x403c83, CP4
+  0x1403b1910) and tested against the gate's FULL width on x and FULL length on z, strictly; the
+  height is not tested. Skipped in Summit Rumble (race mode 4: retail [0x63f508], CP4 [0x145766cd8]).
+  A type 11 box is otherwise an ordinary box; only a computer truck's listing reads it
+  (`listedByComputerTruck` in collide/box.ts), and CP4 leaves it out of the .SRF surfaces.
+*/
+export const CHECKPOINT_FOOTPRINT_TYPE = 11;
+/** Whether a point lies in a checkpoint gate's footprint, by the game's test above. */
+export function inCheckpointFootprint(gate, p) {
+    const m = gate.matrix;
+    const dx = p[0] - gate.position[0], dy = p[1] - gate.position[1], dz = p[2] - gate.position[2];
+    const lx = m[0] * dx + m[3] * dy + m[6] * dz;
+    const lz = m[2] * dx + m[5] * dy + m[8] * dz;
+    return Math.abs(lx) < gate.size[0] && Math.abs(lz) < gate.size[2];
+}
+/**
+ * A level box's type after the footprint rule: 11 for a type 0 box whose position lies in any
+ * checkpoint's footprint, else its own. The caller skips it in Summit Rumble.
+ */
+export function checkpointFootprintType(box, checkpoints) {
+    if (box.type !== 0 || !box.positionFt)
+        return box.type;
+    return checkpoints.some((cp) => inCheckpointFootprint(cp.gate, box.positionFt)) ? CHECKPOINT_FOOTPRINT_TYPE : box.type;
+}
