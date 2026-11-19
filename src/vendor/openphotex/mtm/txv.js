@@ -188,3 +188,54 @@ export function txvUsesV6Keys(input) {
     const lines = Array.isArray(input) ? input : parseTxv(input);
     return TXV_V6_ONLY_KEYS.some((k) => txvValue(lines, k) !== null);
 }
+/*
+  Track ambience (track format version 6, "Ambience"; docs/LEVELS.md): optional keys for a track's
+  own sky, haze and light in Clear weather. Any track may carry them (a .SI2 one too); an engine
+  that does not know them skips them, as Community Patch 4 skips every key it does not parse.
+
+    skyTopColor=r,g,b      the sky straight up, 0 to 255
+    skyBottomColor=r,g,b   the sky at the horizon
+    skyHorizon=f           where between the horizon (0) and the zenith (1) the top colour is reached (default 0.25)
+    skyImage=ART\X.PNG     a full-colour picture round the horizon over the gradient (its alpha shows the gradient)
+    fogColor=r,g,b         the haze's colour
+    fogStartFt, fogEndFt   where the haze starts and where it is complete, feet
+    lightTint=r,g,b        the light's hue as multipliers, scaled to a mean of 1 (the scene's own level is kept)
+*/
+export const TXV_AMBIENCE_KEYS = ["skyTopColor", "skyBottomColor", "skyHorizon", "skyImage", "fogColor", "fogStartFt", "fogEndFt", "lightTint"];
+const triple = (v) => {
+    if (v == null)
+        return null;
+    const parts = v.split(/[\s,]+/).filter(Boolean).map(Number);
+    return parts.length === 3 && parts.every(Number.isFinite) ? [parts[0], parts[1], parts[2]] : null;
+};
+const ranged = (v, lo, hi) => {
+    if (v == null || v.trim() === "")
+        return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : null;
+};
+/** The ambience keys of a .TXV, or null when it has none of them. */
+export function readTxvAmbience(input) {
+    if (input == null)
+        return null;
+    const lines = Array.isArray(input) ? input : parseTxv(input);
+    const get = (k) => txvValue(lines, k);
+    const colour = (k) => triple(get(k))?.map((x) => Math.min(255, Math.max(0, Math.round(x)))) ?? null;
+    const rawTint = triple(get("lightTint"))?.map((x) => Math.min(4, Math.max(0, x))) ?? null;
+    const mean = rawTint ? (rawTint[0] + rawTint[1] + rawTint[2]) / 3 : 0;
+    const lightTint = rawTint && mean > 0 ? rawTint.map((x) => x / mean) : null;
+    const a = {
+        skyTop: colour("skyTopColor"),
+        skyBottom: colour("skyBottomColor"),
+        skyHorizon: ranged(get("skyHorizon"), 0.01, 1) ?? 0.25,
+        skyImage: get("skyImage")?.trim() || null,
+        fogColor: colour("fogColor"),
+        fogStartFt: ranged(get("fogStartFt"), 0, 1e6),
+        fogEndFt: ranged(get("fogEndFt"), 1, 1e6),
+        lightTint,
+    };
+    const sky = !!(a.skyTop || a.skyBottom || a.skyImage);
+    if (!sky && !a.fogColor && !a.lightTint)
+        return null;
+    return { ...a, sky };
+}

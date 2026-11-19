@@ -16,6 +16,13 @@ JSTrackViewer opens the archives of **Monster Truck Madness**, **Monster Truck M
 
 ---
 
+## What's new in 1.3.1
+
+Changes since 1.3.0:
+
+- A track's own ambience (track format version 6, section 9.6): the TXV's sky gradient and sky picture, haze and light tint. In Clear weather the sky dome shows the track's sky and the haze fades the scene into its colour, its start and end laid over the view distance; the light tint applies in every weather. Any MTM2 track may carry the keys (the Motorhead conversions do); the Track Data panel lists them.
+- OpenPhotex 1.7.4.
+
 ## What's new in 1.3.0
 
 Changes since 1.2.0:
@@ -108,7 +115,7 @@ Each feature is described in detail under [Feature details](#feature-details).
 | TRK + TTX | CPR | The road layer: surfaces, curbs, walls and their textures |
 | WAT, VEG | 4x4 Evolution 2 | Water material and vegetation |
 | RAW (16-bit), height PNG | MTM2 (Community Patch 4) | 16-bit heights at 1/128 ft: 256 x 256 (131,072 bytes, drawn as is or expanded to an 8 ft Spline grid when the TXV says `terrainGrid=spline`), a 1024 x 1024 Full Map at 8 ft (2,097,152 bytes), or the grey PNG the TXV names with `terrainHeights` |
-| TXV | MTM2 (Community Patches 3 and 4, track format version 6) | The track's version record: format version, tool, and Community Patch 4's terrain grid and height file; for an SI3 track also `worldCells`, `terrainHeightMap` (a 16-bit RAW or grey PNG of N or 4N square), `terrainHeightStep` and `terrainHeightBase` |
+| TXV | MTM2 (Community Patches 3 and 4, track format version 6) | The track's version record: format version, tool, and Community Patch 4's terrain grid and height file; for an SI3 track also `worldCells`, `terrainHeightMap` (a 16-bit RAW or grey PNG of N or 4N square), `terrainHeightStep` and `terrainHeightBase`; on any track the ambience keys `skyTopColor`, `skyBottomColor`, `skyHorizon`, `skyImage`, `fogColor`, `fogStartFt`, `fogEndFt` and `lightTint` |
 | WTR | MTM2 (Community Patch 4, track format version 6) | Lakes above the track's own water: a height each and a 256 x 256 map of their tiles (version 1), or 512 x 512 with signed heights across the terrain's range (version 2, 512-cell SI3 tracks only). The world's size picks the version, and any other pairing is refused with a warning |
 | WFL | MTM2 (Community Patch 4 beta 0.53, track format version 6) | Waterfalls: up to 64 crests of 2 to 8 points, each fed by a lake or a spring at its own height, with its flow speed, opacity, mist, splash, sound and texture. The file holds no geometry; the sheet is built at load from the crest, the terrain and the water. Version 1 is a 256-cell world's (SIT, SI2, or a 256-cell SI3) and version 2 a 512-cell SI3's, with signed heights across the terrain's range and crests anywhere in the world; any other pairing is refused with a warning |
 | VEG (binary, MVEG) | MTM2 (Community Patch 4) | Placed trees and grass clumps, with each species' model and far card |

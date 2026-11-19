@@ -358,6 +358,16 @@ const SKY_SEAM_BLEND = 0.18;
 /** How far below the horizon the sky texture's bottom row sits, in radians (20 degrees). */
 const SKY_BELOW_HORIZON = Math.PI / 9;
 const BACKGROUND_COLOR = 0xbcd6e7;
+/*
+  A track's own ambience (track format version 6, section 9.6; openmtm2.github.io proposals/track-format-v6.md):
+  its sky gradient and picture and its haze replace the weather's in Clear weather; its light tint applies in every
+  weather. As OpenMTM2 draws it (src/game/ambience.js): the picture's bottom row on the horizon, reaching
+  AMBIENT_IMAGE_TOP up and fading into the gradient over its top AMBIENT_IMAGE_FADE; the haze's start and end laid
+  over the view distance, keeping the start's share of the end (a game made for a short view would otherwise put a
+  wall of fog at the bumper).
+*/
+const AMBIENT_IMAGE_TOP = (42 * Math.PI) / 180;
+const AMBIENT_IMAGE_FADE = 0.25;
 
 /*
   The TV/F3/HB sky, as GAME.EXE draws it (0x18b60).
@@ -869,11 +879,77 @@ export class TrackScene {
     return tex;
   }
 
+  /** The track's ambience (section 9.6), when the weather applies and is Clear; else null. */
+  _ambienceInClear() {
+    const a = this._trackData?.ambience;
+    return a && this.weatherApplies() && this._weather === "clear" ? a : null;
+  }
+
+  /*
+    The track's own sky for the dome, built as _gradientTexture is: rows from SKY_BELOW_HORIZON under the
+    horizon up to the zenith, the bottom colour up to the horizon, then toward the top colour, reached
+    `skyHorizon` of the way to the zenith; the picture over it from the horizon up. Null without any sky key.
+  */
+  _ambientSkyTexture() {
+    if (this._skyTextures.ambience) return this._skyTextures.ambience;
+    const a = this._trackData?.ambience;
+    if (!a || !(a.skyTop || a.skyBottom || a.image)) return null;
+    const top = a.skyTop ?? a.skyBottom ?? [140, 180, 220], bottom = a.skyBottom ?? top;
+    const img = a.image?.rgba ? { width: a.image.width, height: a.image.height, rgba: new Uint8Array(a.image.rgba) } : null;
+    const rows = 512, cols = img ? Math.min(2048, Math.max(256, img.width)) : 4;
+    const data = new Uint8Array(rows * cols * 4);
+    for (let row = 0; row < rows; row++) {
+      const elevation = (row / (rows - 1)) * (Math.PI / 2 + SKY_BELOW_HORIZON) - SKY_BELOW_HORIZON;
+      const t = Math.max(0, Math.min(1, elevation / (Math.PI / 2) / Math.max(0.01, a.skyHorizon ?? 0.25)));
+      const c = [0, 1, 2].map((k) => bottom[k] + (top[k] - bottom[k]) * t);
+      // The picture: its bottom row on the horizon, its top AMBIENT_IMAGE_TOP up, fading into the gradient.
+      const u = img && elevation >= 0 && elevation <= AMBIENT_IMAGE_TOP ? elevation / AMBIENT_IMAGE_TOP : -1;
+      const fade = u < 0 ? 0 : u > 1 - AMBIENT_IMAGE_FADE ? (1 - u) / AMBIENT_IMAGE_FADE : 1;
+      const sy = u < 0 ? 0 : Math.min(img.height - 1, Math.floor((1 - u) * img.height));
+      for (let col = 0; col < cols; col++) {
+        const o = (row * cols + col) * 4;
+        let r = c[0], g = c[1], b = c[2];
+        if (fade > 0) {
+          const sx = Math.min(img.width - 1, Math.floor((col / cols) * img.width));
+          const si = (sy * img.width + sx) * 4, al = (img.rgba[si + 3] / 255) * fade;
+          r = r * (1 - al) + img.rgba[si] * al; g = g * (1 - al) + img.rgba[si + 1] * al; b = b * (1 - al) + img.rgba[si + 2] * al;
+        }
+        data[o] = Math.round(r); data[o + 1] = Math.round(g); data[o + 2] = Math.round(b); data[o + 3] = 255;
+      }
+    }
+    const tex = new THREE.DataTexture(data, cols, rows, THREE.RGBAFormat);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
+    this._skyTextures.ambience = tex;
+    return tex;
+  }
+
+  /** The track's haze in Clear weather (section 9.6), laid over the view distance; null without fogColor. */
+  _ambientHaze() {
+    const a = this._ambienceInClear();
+    if (!a?.fogColor) return null;
+    const far = this._viewDistance ?? 128 * 64;
+    const end = a.fogEndFt ?? far, start = Math.min(end, a.fogStartFt ?? 0);
+    const color = new THREE.Color().setRGB(a.fogColor[0] / 255, a.fogColor[1] / 255, a.fogColor[2] / 255, THREE.SRGBColorSpace);
+    if (!this._ambientFog) this._ambientFog = new THREE.Fog(color, 0, far);
+    this._ambientFog.color.copy(color);
+    this._ambientFog.near = end > 0 ? (start / end) * far : 0;
+    this._ambientFog.far = far;
+    return this._ambientFog;
+  }
+
   _applyWeather() {
     this._applyFogVolumeWeather();
     const preset = this._weatherPreset();
     const style = this._effectiveSkyStyle();
+    const ambientSky = this._ambienceInClear() ? this._ambientSkyTexture() : null;
     this._sky.material.map = !preset ? null
+      : ambientSky ? ambientSky
       : style === "gradient" ? this._gradientTexture(this._weather)
       : this._skyTexture(preset.sky);
     this._sky.material.needsUpdate = true;
@@ -931,12 +1007,15 @@ export class TrackScene {
     const preset = this._weatherPreset();
     const sun = this._sunIntensity * (preset?.sun ?? 1);
     const sunColor = preset?.sunColor ?? SUN_COLOR;
+    // The track's light tint (section 9.6) multiplies the sun's and the sky's light in every weather.
+    const tint = this.weatherApplies() ? this._trackData?.ambience?.lightTint : null;
+    const tinted = (c) => (tint ? new THREE.Color(c).multiply(new THREE.Color(tint[0], tint[1], tint[2])) : new THREE.Color(c));
     this._sun.intensity = sun * LIGHT_SCALE;
-    this._sun.color.set(sunColor);
+    this._sun.color.copy(tinted(sunColor));
     this._shadows.setIntensity(sun * LIGHT_SCALE);
-    this._shadows.setColor(sunColor);
+    this._shadows.setColor(tinted(sunColor));
     this._ambient.intensity = AMBIENT_INTENSITY * LIGHT_SCALE * (preset?.ambient ?? 1);
-    this._ambient.color.set(preset?.ambientColor ?? AMBIENT_COLOR);
+    this._ambient.color.copy(tinted(preset?.ambientColor ?? AMBIENT_COLOR));
 
     /*
       The baked-light gain for LTE terrain: pi over the irradiance an unshadowed, level patch
@@ -979,6 +1058,7 @@ export class TrackScene {
       this._tvFog.near = dist * TV_FOG_START;
       this._tvFog.far = dist;
     }
+    if (this._ambientFog) this._applyTvSky();
     this._camera.far = dist * 3;
     this._camera.updateProjectionMatrix();
     this._shadows?.setMaxFar(Math.min(this._camera.far, SHADOW_MAX_FAR));
@@ -1644,6 +1724,8 @@ export class TrackScene {
     this._objectsByBox = new Map();
     this._movers = null;
     this._classicSky = false;
+    this._ambientFog = null;
+    if (this._skyTextures?.ambience) { this._skyTextures.ambience.dispose(); delete this._skyTextures.ambience; }
     this._modelTexCache = {};
     this._trackData = null;
     this._shadows.setEnabled(false);
@@ -2502,7 +2584,9 @@ export class TrackScene {
     const sky = !!this._trackData?.tvSky || classic;
     this._groups.tvSky.visible = sky && (classic || f.sky !== false);
     const fog = sky && f.fog !== false && !!this._tvFog;
-    this._scene.fog = fog ? this._tvFog : null;
+    // A track's own haze in Clear weather (section 9.6), where the track has no flat sky of its own.
+    const haze = !sky && f.fog !== false ? this._ambientHaze() : null;
+    this._scene.fog = fog ? this._tvFog : haze;
     if (this._tvSkyUniforms) this._tvSkyUniforms.skyFogOn.value = fog ? 1 : 0;
     if (!this._trackData) return;
     const horizonClear = sky && (this._groups.tvSky.visible || fog);

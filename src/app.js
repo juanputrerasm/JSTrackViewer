@@ -1047,6 +1047,16 @@ export class TrackViewerApp {
       if (version.hdTextures) pairs.push(["HD textures", version.hdTextures]);
       if (version.legacyFallback) pairs.push(["Legacy fallback", version.legacyFallback]);
     }
+    // The track's own sky, haze and light (track format version 6, 9.6), shown in Clear weather.
+    const amb = data.ambience;
+    if (amb) {
+      const parts = [];
+      if (amb.skyTop || amb.skyBottom) parts.push("sky gradient");
+      if (amb.skyImage) parts.push(amb.image ? "sky picture" : `sky picture ${amb.skyImage} missing`);
+      if (amb.fogColor) parts.push("haze");
+      if (amb.lightTint) parts.push("light tint");
+      if (parts.length) pairs.push(["Ambience", parts.join(", ")]);
+    }
     // Community Patch 4's 16-bit terrain, by the mode its height file and .TXV resolve to.
     const terrainMode = CP4_TERRAIN_MODES[data.terrain?.cp4Mode];
     if (terrainMode) pairs.push(["Terrain grid", terrainMode]);

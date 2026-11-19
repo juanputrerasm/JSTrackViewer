@@ -58,7 +58,7 @@ export { sampleForPalette, medianCutPalette, colourCube, encodeRawTexture, quant
 export { MTM2_PALETTE_WHITE_INDEX, MTM2_PALETTE_FIRST_AUTHORED, MTM2_PALETTE_AUTHORED_COUNT, mtm2LevelPalette, buildFogMap, } from "./mtm/level-palette.js";
 export { writeMtm2Sit, writeMtm2Lvl, writeTexList, writeTty, writeEmptyList, emptyGroundBoxGrids, buildMtm2Lte, writeMtm2Trk, sitTruckLines, replaceSitVehicles, mtm2SitFromParsed, } from "./mtm/write.js";
 export { MTM2_SAVED_GAME_HEADER, parseMtm2SavedGame, writeMtm2SavedGame } from "./mtm/saved-game.js";
-export { parseTxv, txvValue, writeTxv, readTxvInfo, setTxvValues, readTxvV6, txvUsesV6Keys, TXV_V6_KEYS, TXV_V6_ONLY_KEYS, TXV_FORMAT_VERSION_V6, MTM2_WORLD_CELLS, MTM2_HEIGHT_STEPS, } from "./mtm/txv.js";
+export { parseTxv, txvValue, writeTxv, readTxvInfo, setTxvValues, readTxvV6, txvUsesV6Keys, readTxvAmbience, TXV_AMBIENCE_KEYS, TXV_V6_KEYS, TXV_V6_ONLY_KEYS, TXV_FORMAT_VERSION_V6, MTM2_WORLD_CELLS, MTM2_HEIGHT_STEPS, } from "./mtm/txv.js";
 export { decodeMtm2Heights, decodeMtm2HeightPng, resolveMtm2TerrainMode, parseTerrainGridKey, mtm2HeightsToFeet, mtm2EngineHeightsFt, decodeMtm2V6Heights, mtm2V6HeightsH128, mtm2V6HeightsFt, mtm2V6StepAndBase, mtm2V6SamplesFromFt, encodeMtm2HeightRaw16, MTM2_H16_PER_FT, MTM2_RAW_LENGTH_8BIT, MTM2_RAW_LENGTH_16BIT, MTM2_RAW_LENGTH_FINE, MTM2_FINE_CELL_FT, } from "./mtm/heights.js";
 export { isWtr, parseWtr, writeWtr, wtrLakeAt, wtrHeightRange, WTR_HEIGHT_FT, WTR_FLAG_REFLECTIVE, WTR_HEADER_EDGE_RULE, WTR_TILES } from "./mtm/wtr.js";
 export { isWfl, parseWfl, writeWfl, wflPointsFt, wflFallFitsV1, WFL_MAX_FALLS, WFL_MAX_POINTS, WFL_POINT_FT, WFL_SPEED_FT, WFL_HEIGHT_FT, WFL_FLAG_FREEZE, WFL_FLAG_SPLASH, WFL_FLAG_SOUND, WFL_ROUGH_DEFAULT, WFL_ROUGH_OFF, WFL_ROUGH_DEFAULT_FT } from "./mtm/wfl.js";
@@ -102,6 +102,6 @@ export * as cp4Sim from "./sim/cp4/index.js";
 export { CPR_DEFAULT_SETUP, cloneCprSetup, parseCprGarage, writeCprGarage } from "./cpr/garage.js";
 export { PodFormatError } from "./errors.js";
 /** The library version, as published in package.json. */
-export const VERSION = "1.7.3";
+export const VERSION = "1.7.4";
 export { parseMtmPlayerPro, writeMtmPlayerPro, newMtmDriver, PLAYER_PRO_VERSION } from "./mtm/player-pro.js";
 export { parseMtmHighScores, writeMtmHighScores, decipherHighScores, encipherHighScores, HIGH_SCORES_FILE } from "./mtm/high-scores.js";
